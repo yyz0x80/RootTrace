@@ -80,6 +80,15 @@ class AgentLoop:
                 tools=tool_schemas,
             )
 
+            # Print round number and tool calls for user visibility
+            if assistant_turn.tool_calls:
+                for tool_call in assistant_turn.tool_calls:
+                    # Format arguments for display
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    print(f"[Round {round_number}] {tool_call.name}({args_str})")
+            else:
+                print(f"[Round {round_number}] final answer")
+
             # The assistant message must be stored before its tool results.
             messages.append(
                 self._build_assistant_message(assistant_turn)

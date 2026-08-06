@@ -80,6 +80,14 @@ class ToolDefinition:
     description: str
     input_schema: dict[str, Any]
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert ToolDefinition to a dictionary for JSON serialization."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        }
+
 
 def generate_json_schema(input_class: type[ToolInput]) -> dict[str, Any]:
     """
