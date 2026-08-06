@@ -16,7 +16,6 @@ from patchpilot.models import AssistantTurn, ToolCall
 class ToolCallParseError(Exception):
     """Raised when tool call arguments cannot be parsed as JSON."""
 
-    pass
 
 
 class LLMProvider:
@@ -117,9 +116,9 @@ class LLMProvider:
                         f"Rate limit exceeded after {max_retries} retry attempts"
                     ) from e
 
-            except OpenAIError as e:
+            except OpenAIError:
                 # Non-rate-limit errors are not retried
-                raise e
+                raise
 
         # This should not be reached, but kept for type safety
         raise OpenAIError("Unexpected error in completion logic") from last_error
