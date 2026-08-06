@@ -19,7 +19,7 @@ class TestAgentLoopInit:
         """Test initialization with valid parameters."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
 
         agent_loop = AgentLoop(
             provider=mock_provider,
@@ -37,7 +37,7 @@ class TestAgentLoopInit:
         """Test initialization with default max_rounds."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
 
         agent_loop = AgentLoop(
             provider=mock_provider,
@@ -73,7 +73,7 @@ class TestAgentLoopRun:
         """Test that empty issue raises ValueError."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
 
         agent_loop = AgentLoop(
             provider=mock_provider,
@@ -90,7 +90,7 @@ class TestAgentLoopRun:
         """Test successful completion without tool calls."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
 
         mock_provider.complete.return_value = AssistantTurn(
             content="Task completed successfully",
@@ -111,10 +111,10 @@ class TestAgentLoopRun:
         """Test execution of a single tool call."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = [
-            {"name": "search_code", "parameters": {}}
+        mock_tools.get_tool_schemas.return_value = [
+            {"type": "function", "function": {"name": "search_code", "parameters": {}}}
         ]
-        mock_tools.get_names.return_value = ["search_code"]
+        mock_tools.get_available_tools.return_value = ["search_code"]
         mock_tools.execute.return_value = ToolResult(
             ok=True,
             content="Search results found",
@@ -156,11 +156,11 @@ class TestAgentLoopRun:
         """Test execution of multiple tool calls in one round."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = [
-            {"name": "search_code", "parameters": {}},
-            {"name": "read_file", "parameters": {}},
+        mock_tools.get_tool_schemas.return_value = [
+            {"type": "function", "function": {"name": "search_code", "parameters": {}}},
+            {"type": "function", "function": {"name": "read_file", "parameters": {}}},
         ]
-        mock_tools.get_names.return_value = ["search_code", "read_file"]
+        mock_tools.get_available_tools.return_value = ["search_code", "read_file"]
         mock_tools.execute.side_effect = [
             ToolResult(ok=True, content="Search results"),
             ToolResult(ok=True, content="File content"),
@@ -202,8 +202,10 @@ class TestAgentLoopRun:
         """Test that exceeding max rounds raises AgentLoopLimitError."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = [{"name": "test", "parameters": {}}]
-        mock_tools.get_names.return_value = ["test"]
+        mock_tools.get_tool_schemas.return_value = [
+            {"type": "function", "function": {"name": "test", "parameters": {}}}
+        ]
+        mock_tools.get_available_tools.return_value = ["test"]
         mock_tools.execute.return_value = ToolResult(ok=True, content="result")
 
         # Always request tool calls, never complete
@@ -231,7 +233,7 @@ class TestAgentLoopRun:
         """Test error when model returns neither content nor tool calls."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
 
         mock_provider.complete.return_value = AssistantTurn(
             content=None,
@@ -254,7 +256,7 @@ class TestExecuteTool:
         """Test successful tool execution."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
 
         mock_tools.execute.return_value = ToolResult(
             ok=True,
@@ -285,8 +287,8 @@ class TestExecuteTool:
         """Test handling of unknown tool name."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
-        mock_tools.get_names.return_value = ["search_code", "read_file"]
+        mock_tools.get_tool_schemas.return_value = []
+        mock_tools.get_available_tools.return_value = ["search_code", "read_file"]
         mock_tools.execute.side_effect = KeyError("unknown_tool")
 
         agent_loop = AgentLoop(
@@ -310,7 +312,7 @@ class TestExecuteTool:
         """Test handling of tool execution exceptions."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
         mock_tools.execute.side_effect = ValueError("Invalid input")
 
         agent_loop = AgentLoop(
@@ -334,7 +336,7 @@ class TestExecuteTool:
         """Test handling of invalid tool result type."""
         mock_provider = Mock()
         mock_tools = Mock()
-        mock_tools.get_schemas.return_value = []
+        mock_tools.get_tool_schemas.return_value = []
         mock_tools.execute.return_value = "invalid string result"
 
         agent_loop = AgentLoop(

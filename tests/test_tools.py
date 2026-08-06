@@ -432,11 +432,12 @@ class TestToolSchema:
         assert "command" in schema["required"]
 
     def test_get_tool_schemas(self, tool_registry):
-        """Test getting all tool schemas"""
+        """Test getting all tool schemas in OpenAI format"""
         schemas = tool_registry.get_tool_schemas()
         assert len(schemas) == 4
-        assert all(isinstance(schema, ToolDefinition) for schema in schemas)
-        tool_names = {schema.name for schema in schemas}
+        assert all(isinstance(schema, dict) for schema in schemas)
+        assert all(schema["type"] == "function" for schema in schemas)
+        tool_names = {schema["function"]["name"] for schema in schemas}
         assert tool_names == {"search_code", "read_file", "edit_file", "run_command"}
 
     def test_get_tool_schema_existing(self, tool_registry):
@@ -457,21 +458,24 @@ class TestToolSchema:
         """Test that all tool schemas have descriptions"""
         schemas = tool_registry.get_tool_schemas()
         for schema in schemas:
-            assert schema.description, f"Tool {schema.name} missing description"
-            assert len(schema.description) > 0, f"Tool {schema.name} has empty description"
+            function_def = schema["function"]
+            assert function_def["description"], f"Tool {function_def['name']} missing description"
+            assert len(function_def["description"]) > 0, f"Tool {function_def['name']} has empty description"
 
     def test_tool_schemas_have_valid_input_schemas(self, tool_registry):
         """Test that all tool schemas have valid input schemas"""
         schemas = tool_registry.get_tool_schemas()
         for schema in schemas:
-            assert schema.input_schema, f"Tool {schema.name} missing input schema"
-            assert "type" in schema.input_schema, f"Tool {schema.name} schema missing type"
-            assert "properties" in schema.input_schema, f"Tool {schema.name} schema missing properties"
-            assert schema.input_schema["type"] == "object"
+            function_def = schema["function"]
+            parameters = function_def["parameters"]
+            assert parameters, f"Tool {function_def['name']} missing input schema"
+            assert "type" in parameters, f"Tool {function_def['name']} schema missing type"
+            assert "properties" in parameters, f"Tool {function_def['name']} schema missing properties"
+            assert parameters["type"] == "object"
 
     def test_all_tools_registered_in_schemas(self, tool_registry):
         """Test that all tools in the handler mapping have schemas"""
         schemas = tool_registry.get_tool_schemas()
-        schema_names = {schema.name for schema in schemas}
+        schema_names = {schema["function"]["name"] for schema in schemas}
         handler_names = set(tool_registry._tool_handlers.keys())
         assert schema_names == handler_names, "Schema names and handler names don't match"

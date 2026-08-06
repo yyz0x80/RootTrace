@@ -263,14 +263,24 @@ class ToolRegistry:
         self._tool_definitions[name] = tool_def
         self._tool_handlers[name] = handler
 
-    def get_tool_schemas(self) -> list[ToolDefinition]:
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
         """
-        Get all available tool definitions with their schemas.
+        Get all available tool definitions in OpenAI-compatible format.
 
         Returns:
-            List of ToolDefinition objects containing tool name, description, and input schema
+            List of tool dictionaries in OpenAI format with type, function name, description, and parameters
         """
-        return list(self._tool_definitions.values())
+        openai_tools = []
+        for tool_def in self._tool_definitions.values():
+            openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_def.name,
+                    "description": tool_def.description,
+                    "parameters": tool_def.input_schema,
+                }
+            })
+        return openai_tools
 
     def get_tool_schema(self, tool_name: str) -> ToolDefinition | None:
         """
@@ -308,6 +318,25 @@ class ToolRegistry:
             del self._tool_handlers[name]
             return True
         return False
+
+    def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        """
+        Execute a tool by name with the given arguments.
+
+        Args:
+            name: Name of the tool to execute
+            arguments: Dictionary of arguments to pass to the tool
+
+        Returns:
+            ToolResult containing the execution result
+
+        Raises:
+            KeyError: If the tool name is not registered
+        """
+        handler = self._tool_handlers.get(name)
+        if handler is None:
+            raise KeyError(f"Tool not found: {name}")
+        return handler(arguments)
 
     def search_code(self, arguments: dict[str, Any]) -> ToolResult:
         """

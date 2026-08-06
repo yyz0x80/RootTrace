@@ -66,7 +66,7 @@ class AgentLoop:
             },
         ]
 
-        tool_schemas = self.tools.get_schemas()
+        tool_schemas = self.tools.get_tool_schemas()
 
         for round_number in range(1, self.max_rounds + 1):
             logger.info(
@@ -143,7 +143,7 @@ class AgentLoop:
                 content=(
                     f"Unknown tool: {tool_call.name}. "
                     f"Available tools: "
-                    f"{', '.join(self.tools.get_names())}"
+                    f"{', '.join(self.tools.get_available_tools())}"
                 ),
             )
         except Exception as exc:
