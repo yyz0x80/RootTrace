@@ -1,3 +1,21 @@
+"""Tool definitions and registry for PatchPilot agent operations.
+
+This module provides the core tool system for the PatchPilot agent, including:
+- Input validation dataclasses for each tool
+- JSON Schema generation for tool definitions
+- A tool registry for dynamic tool registration
+- Tool implementations for repository operations
+
+Available tools:
+- search_code: Search for code patterns using ripgrep
+- read_file: Read file content with optional line ranges
+- edit_file: Edit files using exact text replacement
+- run_command: Execute allowed commands in the workspace
+
+The tool system enforces security boundaries through input validation,
+output size limits, and workspace policy enforcement.
+"""
+
 import difflib
 import shlex
 import subprocess

@@ -1,3 +1,18 @@
+"""Workspace policy and path resolution for target repository access.
+
+This module provides the Workspace class which enforces security boundaries
+for file system operations within a target repository. It ensures that:
+
+- All paths are resolved relative to the repository root
+- Absolute paths are rejected
+- Path traversal attacks (..) are prevented
+- Sensitive files (.env, .git) are protected from read/write access
+- Test files are protected from modification
+
+The Workspace class is the authoritative security boundary for all
+file system operations performed by the PatchPilot agent.
+"""
+
 from pathlib import Path
 
 
