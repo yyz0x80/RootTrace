@@ -1,0 +1,477 @@
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from patchpilot.models import ToolResult
+from patchpilot.tools import (
+    EditFileInput,
+    ReadFileInput,
+    RunCommandInput,
+    SearchCodeInput,
+    ToolDefinition,
+    ToolRegistry,
+    generate_json_schema,
+)
+from patchpilot.workspace import Workspace
+
+
+@pytest.fixture
+def temp_workspace():
+    """Create a temporary workspace for testing"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Workspace(Path(tmpdir))
+        yield workspace
+
+
+@pytest.fixture
+def tool_registry(temp_workspace):
+    """Create a ToolRegistry with temporary workspace"""
+    return ToolRegistry(temp_workspace)
+
+
+class TestSearchCode:
+    """Tests for search_code tool"""
+
+    def test_search_code_basic(self, tool_registry, temp_workspace):
+        """Test basic code search"""
+        # Create a test file
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items, page, page_size):\n    pass\n")
+
+        result = tool_registry.search_code({"query": "paginate", "path": "."})
+        assert result.ok
+        assert "paginate" in result.content
+
+    def test_search_code_no_matches(self, tool_registry):
+        """Test search with no matches"""
+        result = tool_registry.search_code({"query": "nonexistent", "path": "."})
+        assert result.ok
+        assert result.content == ""
+
+    def test_search_code_with_path(self, tool_registry, temp_workspace):
+        """Test search with specific path"""
+        subdir = temp_workspace.root / "subdir"
+        subdir.mkdir()
+        test_file = subdir / "test.py"
+        test_file.write_text("def paginate(items):\n    pass\n")
+
+        result = tool_registry.search_code({"query": "paginate", "path": "subdir"})
+        assert result.ok
+        assert "paginate" in result.content
+
+    def test_search_code_invalid_path(self, tool_registry):
+        """Test search with invalid path (outside workspace)"""
+        result = tool_registry.search_code({"query": "test", "path": "/etc"})
+        assert not result.ok
+        assert "Path error" in result.content
+
+    def test_search_code_absolute_path_rejected(self, tool_registry):
+        """Test that absolute paths are rejected"""
+        result = tool_registry.search_code({"query": "test", "path": "/absolute/path"})
+        assert not result.ok
+        assert "Absolute path rejected" in result.content
+
+    def test_search_code_invalid_input(self, tool_registry):
+        """Test search with invalid input"""
+        result = tool_registry.search_code({"query": 123})  # Invalid type
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+
+class TestReadFile:
+    """Tests for read_file tool"""
+
+    def test_read_file_basic(self, tool_registry, temp_workspace):
+        """Test basic file reading"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.read_file({"path": "test.py"})
+        assert result.ok
+        assert "1: line1" in result.content
+        assert "2: line2" in result.content
+        assert "3: line3" in result.content
+
+    def test_read_file_with_line_range(self, tool_registry, temp_workspace):
+        """Test reading file with line range"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\nline4\nline5\n")
+
+        result = tool_registry.read_file({"path": "test.py", "start_line": 2, "end_line": 4})
+        assert result.ok
+        assert "2: line2" in result.content
+        assert "3: line3" in result.content
+        assert "4: line4" in result.content
+        assert "line1" not in result.content
+        assert "line5" not in result.content
+
+    def test_read_file_not_found(self, tool_registry):
+        """Test reading non-existent file"""
+        result = tool_registry.read_file({"path": "nonexistent.py"})
+        assert not result.ok
+        assert "File not found" in result.content
+
+    def test_read_file_env_rejected(self, tool_registry, temp_workspace):
+        """Test that .env files are rejected"""
+        env_file = temp_workspace.root / ".env"
+        env_file.write_text("SECRET_KEY=abc123\n")
+
+        result = tool_registry.read_file({"path": ".env"})
+        assert not result.ok
+        assert "rejected" in result.content
+
+    def test_read_file_git_rejected(self, tool_registry, temp_workspace):
+        """Test that .git directory is rejected"""
+        git_dir = temp_workspace.root / ".git"
+        git_dir.mkdir()
+        test_file = git_dir / "config"
+        test_file.write_text("[core]\n")
+
+        result = tool_registry.read_file({"path": ".git/config"})
+        assert not result.ok
+        assert "rejected" in result.content
+
+    def test_read_file_outside_workspace(self, tool_registry):
+        """Test that files outside workspace are rejected"""
+        result = tool_registry.read_file({"path": "/etc/passwd"})
+        assert not result.ok
+        assert "Path error" in result.content
+
+    def test_read_file_exceeds_line_limit(self, tool_registry, temp_workspace):
+        """Test that exceeding line limit is rejected"""
+        test_file = temp_workspace.root / "test.py"
+        # Create a file with more than 300 lines
+        lines = ["line\n"] * 400
+        test_file.write_text("".join(lines))
+
+        result = tool_registry.read_file({"path": "test.py"})
+        assert not result.ok
+        assert "maximum line limit" in result.content
+
+    def test_read_file_invalid_input(self, tool_registry):
+        """Test read with invalid input"""
+        result = tool_registry.read_file({"path": 123})  # Invalid type
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+
+class TestEditFile:
+    """Tests for edit_file tool"""
+
+    def test_edit_file_basic(self, tool_registry, temp_workspace):
+        """Test basic file editing"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items, page, page_size):\n    start = (page - 1) * page_size\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "start = (page - 1) * page_size",
+            "new_text": "if page < 1:\n        page = 1\n    start = (page - 1) * page_size"
+        })
+        assert result.ok
+        assert "if page < 1:" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "if page < 1:" in updated_content
+
+    def test_edit_file_old_text_not_found(self, tool_registry, temp_workspace):
+        """Test editing when old_text is not found"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    pass\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "nonexistent text",
+            "new_text": "new text"
+        })
+        assert not result.ok
+        assert "old_text not found" in result.content
+
+    def test_edit_file_multiple_matches(self, tool_registry, temp_workspace):
+        """Test editing when old_text appears multiple times"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("x = 1\nx = 1\nx = 1\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "x = 1",
+            "new_text": "x = 2"
+        })
+        assert not result.ok
+        assert "appears 3 times" in result.content
+
+    def test_edit_file_not_found(self, tool_registry):
+        """Test editing non-existent file"""
+        result = tool_registry.edit_file({
+            "path": "nonexistent.py",
+            "old_text": "old",
+            "new_text": "new"
+        })
+        assert not result.ok
+        assert "File not found" in result.content
+
+    def test_edit_file_env_rejected(self, tool_registry, temp_workspace):
+        """Test that editing .env is rejected"""
+        env_file = temp_workspace.root / ".env"
+        env_file.write_text("KEY=value\n")
+
+        result = tool_registry.edit_file({
+            "path": ".env",
+            "old_text": "KEY=value",
+            "new_text": "KEY=newvalue"
+        })
+        assert not result.ok
+        assert "rejected" in result.content
+
+    def test_edit_file_tests_rejected(self, tool_registry, temp_workspace):
+        """Test that editing files in tests/ is rejected"""
+        tests_dir = temp_workspace.root / "tests"
+        tests_dir.mkdir()
+        test_file = tests_dir / "test_example.py"
+        test_file.write_text("def test_something():\n    pass\n")
+
+        result = tool_registry.edit_file({
+            "path": "tests/test_example.py",
+            "old_text": "def test_something():",
+            "new_text": "def test_modified():"
+        })
+        assert not result.ok
+        assert "tests directory rejected" in result.content
+
+    def test_edit_file_outside_workspace(self, tool_registry):
+        """Test that editing files outside workspace is rejected"""
+        result = tool_registry.edit_file({
+            "path": "/etc/passwd",
+            "old_text": "root",
+            "new_text": "hacker"
+        })
+        assert not result.ok
+        assert "Path error" in result.content
+
+    def test_edit_file_invalid_input(self, tool_registry):
+        """Test edit with invalid input"""
+        result = tool_registry.edit_file({"path": 123, "old_text": "old", "new_text": "new"})
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+
+class TestRunCommand:
+    """Tests for run_command tool"""
+
+    def test_run_command_pytest(self, tool_registry, temp_workspace):
+        """Test running pytest"""
+        # Create a simple test file
+        tests_dir = temp_workspace.root / "tests"
+        tests_dir.mkdir()
+        test_file = tests_dir / "test_example.py"
+        test_file.write_text("def test_pass():\n    assert True\n")
+
+        result = tool_registry.run_command({"command": "pytest"})
+        assert result.ok or "test_pass" in result.content  # May fail if pytest not installed
+
+    def test_run_command_python_m_pytest(self, tool_registry, temp_workspace):
+        """Test running python -m pytest"""
+        tests_dir = temp_workspace.root / "tests"
+        tests_dir.mkdir()
+        test_file = tests_dir / "test_example.py"
+        test_file.write_text("def test_pass():\n    assert True\n")
+
+        result = tool_registry.run_command({"command": "python -m pytest"})
+        assert result.ok or "test_pass" in result.content
+
+    def test_run_command_git_status(self, tool_registry):
+        """Test running git status"""
+        result = tool_registry.run_command({"command": "git status"})
+        # git status may fail if not a git repo, but should be allowed
+        assert "exit_code" in result.content or result.ok
+
+    def test_run_command_git_diff(self, tool_registry):
+        """Test running git diff"""
+        result = tool_registry.run_command({"command": "git diff"})
+        # git diff may fail if not a git repo, but should be allowed
+        assert "exit_code" in result.content or result.ok
+
+    def test_run_command_ruff_check(self, tool_registry, temp_workspace):
+        """Test running ruff check"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("x = 1\n")
+
+        result = tool_registry.run_command({"command": "ruff check test.py"})
+        # ruff may not be installed, but command should be allowed
+        assert "exit_code" in result.content or result.ok
+
+    def test_run_command_not_allowed(self, tool_registry):
+        """Test that disallowed commands are rejected"""
+        result = tool_registry.run_command({"command": "rm -rf /"})
+        assert not result.ok
+        assert "not allowed" in result.content
+
+    def test_run_command_python_m_not_pytest(self, tool_registry):
+        """Test that python -m with non-pytest is rejected"""
+        result = tool_registry.run_command({"command": "python -m http.server"})
+        assert not result.ok
+        assert "Only 'python -m pytest' is allowed" in result.content
+
+    def test_run_command_git_push_rejected(self, tool_registry):
+        """Test that git push is rejected"""
+        result = tool_registry.run_command({"command": "git push"})
+        assert not result.ok
+        assert "Only 'git diff' and 'git status'" in result.content
+
+    def test_run_command_ruff_not_check(self, tool_registry):
+        """Test that ruff without check is rejected"""
+        result = tool_registry.run_command({"command": "ruff format"})
+        assert not result.ok
+        assert "Only 'ruff check' is allowed" in result.content
+
+    def test_run_command_empty(self, tool_registry):
+        """Test that empty command is rejected"""
+        result = tool_registry.run_command({"command": ""})
+        assert not result.ok
+        assert "Empty command" in result.content
+
+    def test_run_command_invalid_syntax(self, tool_registry):
+        """Test that invalid command syntax is rejected"""
+        result = tool_registry.run_command({"command": "unclosed 'quote"})
+        assert not result.ok
+        assert "Invalid command syntax" in result.content
+
+    def test_run_command_invalid_input(self, tool_registry):
+        """Test run with invalid input"""
+        result = tool_registry.run_command({"command": 123})  # Invalid type
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+
+class TestToolDispatch:
+    """Tests for tool dispatch mechanism"""
+
+    def test_dispatch_valid_tool(self, tool_registry):
+        """Test dispatching a valid tool"""
+        result = tool_registry.dispatch("search_code", {"query": "test", "path": "."})
+        assert isinstance(result, ToolResult)
+
+    def test_dispatch_unknown_tool(self, tool_registry):
+        """Test dispatching an unknown tool"""
+        result = tool_registry.dispatch("unknown_tool", {})
+        assert not result.ok
+        assert "Unknown tool" in result.content
+
+    def test_dispatch_all_tools(self, tool_registry):
+        """Test that all registered tools can be dispatched"""
+        tools = ["search_code", "read_file", "edit_file", "run_command"]
+        for tool_name in tools:
+            result = tool_registry.dispatch(tool_name, {})
+            # Should not raise "Unknown tool" error
+            assert "Unknown tool" not in result.content
+
+
+class TestToolSchema:
+    """Tests for tool schema generation and discovery"""
+
+    def test_tool_definition_creation(self):
+        """Test creating a ToolDefinition"""
+        schema = {"type": "object", "properties": {}}
+        tool_def = ToolDefinition(
+            name="test_tool",
+            description="A test tool",
+            input_schema=schema
+        )
+        assert tool_def.name == "test_tool"
+        assert tool_def.description == "A test tool"
+        assert tool_def.input_schema == schema
+
+    def test_generate_json_schema_search_code(self):
+        """Test JSON schema generation for SearchCodeInput"""
+        schema = generate_json_schema(SearchCodeInput)
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        assert "query" in schema["properties"]
+        assert "path" in schema["properties"]
+        assert schema["properties"]["query"]["type"] == "string"
+        assert schema["properties"]["path"]["type"] == "string"
+        assert "query" in schema["required"]
+        assert "path" not in schema["required"]  # Has default value
+
+    def test_generate_json_schema_read_file(self):
+        """Test JSON schema generation for ReadFileInput"""
+        schema = generate_json_schema(ReadFileInput)
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        assert "path" in schema["properties"]
+        assert "start_line" in schema["properties"]
+        assert "end_line" in schema["properties"]
+        assert schema["properties"]["path"]["type"] == "string"
+        assert schema["properties"]["start_line"]["type"] == "integer"
+        # end_line is int | None, so it should be nullable in JSON schema
+        assert schema["properties"]["end_line"]["type"] == ["integer", "null"]
+        assert "path" in schema["required"]
+        assert "start_line" not in schema["required"]  # Has default
+        assert "end_line" not in schema["required"]  # Optional
+
+    def test_generate_json_schema_edit_file(self):
+        """Test JSON schema generation for EditFileInput"""
+        schema = generate_json_schema(EditFileInput)
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        assert "path" in schema["properties"]
+        assert "old_text" in schema["properties"]
+        assert "new_text" in schema["properties"]
+        assert all(schema["properties"][k]["type"] == "string" for k in ["path", "old_text", "new_text"])
+        assert all(k in schema["required"] for k in ["path", "old_text", "new_text"])
+
+    def test_generate_json_schema_run_command(self):
+        """Test JSON schema generation for RunCommandInput"""
+        schema = generate_json_schema(RunCommandInput)
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        assert "command" in schema["properties"]
+        assert schema["properties"]["command"]["type"] == "string"
+        assert "command" in schema["required"]
+
+    def test_get_tool_schemas(self, tool_registry):
+        """Test getting all tool schemas"""
+        schemas = tool_registry.get_tool_schemas()
+        assert len(schemas) == 4
+        assert all(isinstance(schema, ToolDefinition) for schema in schemas)
+        tool_names = {schema.name for schema in schemas}
+        assert tool_names == {"search_code", "read_file", "edit_file", "run_command"}
+
+    def test_get_tool_schema_existing(self, tool_registry):
+        """Test getting a specific tool schema that exists"""
+        schema = tool_registry.get_tool_schema("search_code")
+        assert schema is not None
+        assert schema.name == "search_code"
+        assert schema.description is not None
+        assert schema.input_schema is not None
+        assert isinstance(schema.input_schema, dict)
+
+    def test_get_tool_schema_nonexistent(self, tool_registry):
+        """Test getting a specific tool schema that doesn't exist"""
+        schema = tool_registry.get_tool_schema("nonexistent_tool")
+        assert schema is None
+
+    def test_tool_schemas_have_descriptions(self, tool_registry):
+        """Test that all tool schemas have descriptions"""
+        schemas = tool_registry.get_tool_schemas()
+        for schema in schemas:
+            assert schema.description, f"Tool {schema.name} missing description"
+            assert len(schema.description) > 0, f"Tool {schema.name} has empty description"
+
+    def test_tool_schemas_have_valid_input_schemas(self, tool_registry):
+        """Test that all tool schemas have valid input schemas"""
+        schemas = tool_registry.get_tool_schemas()
+        for schema in schemas:
+            assert schema.input_schema, f"Tool {schema.name} missing input schema"
+            assert "type" in schema.input_schema, f"Tool {schema.name} schema missing type"
+            assert "properties" in schema.input_schema, f"Tool {schema.name} schema missing properties"
+            assert schema.input_schema["type"] == "object"
+
+    def test_all_tools_registered_in_schemas(self, tool_registry):
+        """Test that all tools in the handler mapping have schemas"""
+        schemas = tool_registry.get_tool_schemas()
+        schema_names = {schema.name for schema in schemas}
+        handler_names = set(tool_registry._tool_handlers.keys())
+        assert schema_names == handler_names, "Schema names and handler names don't match"
