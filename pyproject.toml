@@ -1,0 +1,30 @@
+[project]
+name = "patchpilot"
+version = "0.1.0"
+description = "A minimal Issue-to-Patch coding agent"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=2.0,<3",
+    "python-dotenv>=1.0,<2",
+    "pydantic>=2.0,<3",
+    "rich>=13.0,<15"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<10",
+    "ruff>=0.9"
+]
+
+[project.scripts]
+patchpilot = "patchpilot.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["patchpilot*"]
+exclude = ["demo_repo*", "tests*"]
+namespaces = false
