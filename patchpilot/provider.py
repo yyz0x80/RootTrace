@@ -123,5 +123,27 @@ class LLMProvider:
         # This should not be reached, but kept for type safety
         raise OpenAIError("Unexpected error in completion logic") from last_error
 
+    def generate_text(self, prompt: str) -> str:
+        """Generate text response from a simple prompt.
 
+        This is a convenience method for simple text generation without tools.
+        It adapts the simple prompt-response interface to the structured
+        complete() method.
+
+        Args:
+            prompt: The input prompt text.
+
+        Returns:
+            The generated text response.
+
+        Raises:
+            ValueError: If the response content is None.
+            OpenAIError: For API-related errors.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        response = self.complete(messages=messages, tools=[])
         
+        if response.content is None:
+            raise ValueError("LLM returned None content")
+        
+        return response.content
