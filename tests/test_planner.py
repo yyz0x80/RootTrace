@@ -11,7 +11,14 @@ from patchpilot.planning.planner import (
     create_plan,
     get_repository_files,
 )
-from patchpilot.planning.schema import ChangePlan
+from patchpilot.planning.schema import ChangePlan, PlannedChange
+from patchpilot.planning.scope_gate import (
+    DATABASE_MIGRATION_HINTS,
+    FORBIDDEN_FILES,
+    FORBIDDEN_PREFIXES,
+    ScopeGateResult,
+    check_scope,
+)
 
 
 def test_get_repository_files_basic(tmp_path):
@@ -215,3 +222,333 @@ def test_ignored_dirs_constant():
     assert "__pycache__" in IGNORED_DIRS
     assert "venv" in IGNORED_DIRS
     assert ".venv" in IGNORED_DIRS
+
+
+# Scope Gate Tests
+
+
+def test_check_scope_allowed_plan():
+    """Test that a valid plan passes scope checks."""
+    plan = ChangePlan(
+        relevant_files=["src/main.py", "src/utils.py"],
+        planned_changes=[
+            PlannedChange(
+                file="src/main.py",
+                description="Fix bug",
+                acceptance_criteria=["AC-1"],
+            )
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is True
+    assert len(result.violations) == 0
+    assert len(result.warnings) == 0
+
+
+def test_check_scope_too_many_files():
+    """Test that modifying too many files is rejected."""
+    plan = ChangePlan(
+        relevant_files=[f"file{i}.py" for i in range(10)],
+        planned_changes=[
+            PlannedChange(
+                file=f"file{i}.py",
+                description="Change",
+                acceptance_criteria=[],
+            )
+            for i in range(10)
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan, max_modified_files=6)
+
+    assert result.allowed is False
+    assert len(result.violations) == 1
+    assert "maximum allowed is 6" in result.violations[0]
+
+
+def test_check_scope_forbidden_env_file():
+    """Test that .env file modification is forbidden."""
+    plan = ChangePlan(
+        relevant_files=[".env"],
+        planned_changes=[
+            PlannedChange(
+                file=".env",
+                description="Update config",
+                acceptance_criteria=[],
+            )
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is False
+    assert len(result.violations) == 1
+    assert ".env" in result.violations[0]
+    assert "forbidden" in result.violations[0]
+
+
+def test_check_scope_forbidden_cicd_files():
+    """Test that CI/CD configuration modification is forbidden."""
+    plan = ChangePlan(
+        relevant_files=[".github/workflows/test.yml"],
+        planned_changes=[
+            PlannedChange(
+                file=".github/workflows/test.yml",
+                description="Update workflow",
+                acceptance_criteria=[],
+            )
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is False
+    assert len(result.violations) == 1
+    assert "CI/CD modification is forbidden" in result.violations[0]
+
+
+def test_check_scope_database_migration():
+    """Test that database migrations require manual handling."""
+    plan = ChangePlan(
+        relevant_files=["migrations/001_initial.py"],
+        planned_changes=[
+            PlannedChange(
+                file="migrations/001_initial.py",
+                description="Add migration",
+                acceptance_criteria=[],
+            )
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is False
+    assert len(result.violations) == 1
+    assert "Database migration requires manual handling" in result.violations[0]
+
+
+def test_check_scope_alembic_migration():
+    """Test that alembic migrations require manual handling."""
+    plan = ChangePlan(
+        relevant_files=["alembic/versions/1234_migration.py"],
+        planned_changes=[
+            PlannedChange(
+                file="alembic/versions/1234_migration.py",
+                description="Add alembic migration",
+                acceptance_criteria=[],
+            )
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is False
+    assert len(result.violations) == 1
+    assert "Database migration requires manual handling" in result.violations[0]
+
+
+def test_check_scope_file_not_in_relevant():
+    """Test that modifying files not in relevant_files generates warnings."""
+    plan = ChangePlan(
+        relevant_files=["src/main.py"],
+        planned_changes=[
+            PlannedChange(
+                file="src/main.py",
+                description="Fix bug",
+                acceptance_criteria=[],
+            ),
+            PlannedChange(
+                file="src/unrelated.py",
+                description="Change unrelated file",
+                acceptance_criteria=[],
+            ),
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is True  # Warnings don't block execution
+    assert len(result.violations) == 0
+    assert len(result.warnings) == 1
+    assert "src/unrelated.py" in result.warnings[0]
+    assert "not listed in relevant_files" in result.warnings[0]
+
+
+def test_check_scope_high_risk_blocked():
+    """Test that high-risk plans cannot be automatically executed."""
+    plan = ChangePlan(
+        relevant_files=["src/main.py"],
+        planned_changes=[
+            PlannedChange(
+                file="src/main.py",
+                description="Risky change",
+                acceptance_criteria=[],
+            )
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="high",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is False
+    assert len(result.violations) == 1
+    assert "High-risk plan cannot be automatically executed" in result.violations[0]
+
+
+def test_check_scope_multiple_violations():
+    """Test that multiple violations are all reported."""
+    plan = ChangePlan(
+        relevant_files=[".env", ".github/workflows/test.yml"],
+        planned_changes=[
+            PlannedChange(
+                file=".env",
+                description="Change env",
+                acceptance_criteria=[],
+            ),
+            PlannedChange(
+                file=".github/workflows/test.yml",
+                description="Change CI",
+                acceptance_criteria=[],
+            ),
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="high",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is False
+    assert len(result.violations) == 3  # .env, CI/CD, and high risk
+    assert len(result.warnings) == 0
+
+
+def test_check_scope_duplicate_files():
+    """Test that duplicate file changes are counted correctly."""
+    plan = ChangePlan(
+        relevant_files=["src/main.py"],
+        planned_changes=[
+            PlannedChange(
+                file="src/main.py",
+                description="First change",
+                acceptance_criteria=[],
+            ),
+            PlannedChange(
+                file="src/main.py",
+                description="Second change",
+                acceptance_criteria=[],
+            ),
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is True
+    assert len(result.violations) == 0
+    # Duplicate changes to the same file should only count as one file
+
+
+def test_check_scope_custom_max_files():
+    """Test that custom max_modified_files parameter is respected."""
+    plan = ChangePlan(
+        relevant_files=[f"file{i}.py" for i in range(3)],
+        planned_changes=[
+            PlannedChange(
+                file=f"file{i}.py",
+                description="Change",
+                acceptance_criteria=[],
+            )
+            for i in range(3)
+        ],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan, max_modified_files=2)
+
+    assert result.allowed is False
+    assert "maximum allowed is 2" in result.violations[0]
+
+
+def test_check_scope_empty_plan():
+    """Test that an empty plan passes scope checks."""
+    plan = ChangePlan(
+        relevant_files=[],
+        planned_changes=[],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    result = check_scope(plan)
+
+    assert result.allowed is True
+    assert len(result.violations) == 0
+    assert len(result.warnings) == 0
+
+
+def test_forbidden_files_constant():
+    """Test that FORBIDDEN_FILES contains expected entries."""
+    assert ".env" in FORBIDDEN_FILES
+
+
+def test_forbidden_prefixes_constant():
+    """Test that FORBIDDEN_PREFIXES contains expected entries."""
+    assert ".github/workflows/" in FORBIDDEN_PREFIXES
+
+
+def test_database_migration_hints_constant():
+    """Test that DATABASE_MIGRATION_HINTS contains expected entries."""
+    assert "migrations/" in DATABASE_MIGRATION_HINTS
+    assert "alembic/versions/" in DATABASE_MIGRATION_HINTS
+
+
+def test_scope_gate_result_model():
+    """Test that ScopeGateResult model works correctly."""
+    result = ScopeGateResult(
+        allowed=False,
+        violations=["Violation 1", "Violation 2"],
+        warnings=["Warning 1"],
+    )
+
+    assert result.allowed is False
+    assert len(result.violations) == 2
+    assert len(result.warnings) == 1
+
+
+def test_scope_gate_result_defaults():
+    """Test that ScopeGateResult default values work."""
+    result = ScopeGateResult(allowed=True)
+
+    assert result.allowed is True
+    assert result.violations == []
+    assert result.warnings == []
