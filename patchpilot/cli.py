@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 from patchpilot.agent_loop import AgentLoop, AgentLoopError, AgentLoopLimitError
+from patchpilot.issue.loader import load_issue
+from patchpilot.issue.normalizer import normalize_issue
 from patchpilot.provider import LLMProvider
 from patchpilot.tools import ToolRegistry
 from patchpilot.workspace import Workspace
@@ -56,13 +58,26 @@ def main() -> None:
         sys.exit(1)
     
     try:
-        # Read issue file
-        issue_path = Path(args.issue)
-        if not issue_path.exists():
-            print(f"Error: Issue file not found: {args.issue}", file=sys.stderr)
-            sys.exit(1)
+        # Load raw issue
+        raw_issue = load_issue(args.issue)
         
-        issue_content = issue_path.read_text(encoding="utf-8")
+        # Create provider for normalization
+        provider = LLMProvider()
+        
+        # Normalize the issue
+        normalized_issue = normalize_issue(
+            issue=raw_issue,
+            generate=provider.complete_text,
+        )
+        
+        # Check for ambiguous points
+        if normalized_issue.ambiguous_points:
+            print("NEEDS_CLARIFICATION\n")
+            print("The following requirements are ambiguous:\n")
+            for i, point in enumerate(normalized_issue.ambiguous_points, start=1):
+                print(f"{i}. {point}")
+            print("\nPatchPilot will not guess product behavior.")
+            sys.exit(1)
         
         # Create workspace
         repo_path = Path(args.repo)
@@ -71,9 +86,6 @@ def main() -> None:
             sys.exit(1)
         
         workspace = Workspace(root=repo_path)
-        
-        # Create provider
-        provider = LLMProvider()
         
         # Create tool registry
         tools = ToolRegistry(workspace=workspace)
@@ -85,8 +97,8 @@ def main() -> None:
             max_rounds=args.max_rounds,
         )
         
-        # Run the agent
-        result = agent_loop.run(issue=issue_content)
+        # Run the agent with normalized issue
+        result = agent_loop.run(issue=normalized_issue.model_dump_json(indent=2))
         
         # Print result
         print(result)
