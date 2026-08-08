@@ -1,0 +1,14 @@
+{
+  "title": "Test Issue",
+  "task_type": "feature",
+  "problem_statement": "Test problem",
+  "acceptance_criteria": [],
+  "constraints": [],
+  "ambiguous_points": [
+    "Default priority is unspecified.",
+    "Error handling strategy is not defined.",
+    "Timeout behavior is unclear."
+  ],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}

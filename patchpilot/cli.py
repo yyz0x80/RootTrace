@@ -11,8 +11,11 @@ from pathlib import Path
 from patchpilot.agent_loop import AgentLoop, AgentLoopError, AgentLoopLimitError
 from patchpilot.issue.loader import load_issue
 from patchpilot.issue.normalizer import normalize_issue
+from patchpilot.planning.planner import create_plan
+from patchpilot.planning.scope_gate import check_scope
 from patchpilot.provider import LLMProvider
 from patchpilot.tools import ToolRegistry
+from patchpilot.utils import save_json
 from patchpilot.workspace import Workspace
 
 
@@ -70,6 +73,12 @@ def main() -> None:
             generate=provider.complete_text,
         )
         
+        # Save normalized issue to artifacts
+        save_json(
+            "artifacts/normalized_issue.json",
+            normalized_issue.model_dump_json(indent=2),
+        )
+        
         # Check for ambiguous points
         if normalized_issue.ambiguous_points:
             print("NEEDS_CLARIFICATION\n")
@@ -87,6 +96,40 @@ def main() -> None:
         
         workspace = Workspace(root=repo_path)
         
+        # Create change plan
+        plan = create_plan(
+            issue=normalized_issue,
+            repo_path=str(repo_path),
+            generate=provider.complete_text,
+        )
+        
+        # Save plan to artifacts
+        save_json(
+            "artifacts/plan.json",
+            plan.model_dump_json(indent=2),
+        )
+        
+        # Validate plan against scope restrictions
+        scope_result = check_scope(plan)
+        
+        if not scope_result.allowed:
+            print("SCOPE_CHECK_FAILED\n")
+            print("The following violations block execution:\n")
+            for i, violation in enumerate(scope_result.violations, start=1):
+                print(f"{i}. {violation}")
+            if scope_result.warnings:
+                print("\nWarnings:\n")
+                for i, warning in enumerate(scope_result.warnings, start=1):
+                    print(f"{i}. {warning}")
+            sys.exit(1)
+        
+        if scope_result.warnings:
+            print("SCOPE_CHECK_WARNINGS\n")
+            print("The following warnings were generated:\n")
+            for i, warning in enumerate(scope_result.warnings, start=1):
+                print(f"{i}. {warning}")
+            print()
+        
         # Create tool registry
         tools = ToolRegistry(workspace=workspace)
         
@@ -97,8 +140,8 @@ def main() -> None:
             max_rounds=args.max_rounds,
         )
         
-        # Run the agent with normalized issue
-        result = agent_loop.run(issue=normalized_issue.model_dump_json(indent=2))
+        # Run the agent with the plan
+        result = agent_loop.run(issue=plan.model_dump_json(indent=2))
         
         # Print result
         print(result)
