@@ -111,7 +111,7 @@ def handle_prepare(args) -> None:
         print("Normalizing issue...")
         normalized_issue = normalize_issue(
             issue=raw_issue,
-            generate=provider.complete_text,
+            generate=provider.generate_text,
         )
         
         # Step 3: Check for ambiguous points
@@ -138,7 +138,7 @@ def handle_prepare(args) -> None:
         plan = create_plan(
             issue=normalized_issue,
             repo_path=str(repo_path),
-            generate=provider.complete_text,
+            generate=provider.generate_text,
         )
         
         print(f"Plan created with {len(plan.planned_changes)} planned changes")
@@ -220,7 +220,7 @@ def handle_run(args) -> None:
         # Normalize the issue
         normalized_issue = normalize_issue(
             issue=raw_issue,
-            generate=provider.complete_text,
+            generate=provider.generate_text,
         )
         
         # Save normalized issue to artifacts
@@ -250,7 +250,7 @@ def handle_run(args) -> None:
         plan = create_plan(
             issue=normalized_issue,
             repo_path=str(repo_path),
-            generate=provider.complete_text,
+            generate=provider.generate_text,
         )
         
         # Save plan to artifacts

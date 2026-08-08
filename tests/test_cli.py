@@ -38,7 +38,7 @@ def test_main_with_ambiguous_points_stops(
 
     mock_provider_instance = Mock()
     mock_provider.return_value = mock_provider_instance
-    mock_provider_instance.complete_text = Mock(return_value="normalized")
+    mock_provider_instance.generate_text = Mock(return_value="normalized")
 
     mock_normalize.return_value = NormalizedIssue(
         title="Test Issue",
@@ -98,7 +98,7 @@ def test_main_without_ambiguous_points_proceeds(
 
     mock_provider_instance = Mock()
     mock_provider.return_value = mock_provider_instance
-    mock_provider_instance.complete_text = Mock(return_value="normalized")
+    mock_provider_instance.generate_text = Mock(return_value="normalized")
 
     mock_normalize.return_value = NormalizedIssue(
         title="Test Issue",
@@ -167,7 +167,7 @@ def test_main_with_multiple_ambiguous_points_shows_all(
 
     mock_provider_instance = Mock()
     mock_provider.return_value = mock_provider_instance
-    mock_provider_instance.complete_text = Mock(return_value="normalized")
+    mock_provider_instance.generate_text = Mock(return_value="normalized")
 
     mock_normalize.return_value = NormalizedIssue(
         title="Test Issue",
