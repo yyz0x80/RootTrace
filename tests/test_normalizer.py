@@ -137,3 +137,108 @@ def test_normalize_issue_validates_schema():
 
     with pytest.raises(ValidationError):  # Pydantic validation error
         normalize_issue(issue, mock_generate)
+
+
+def test_normalize_issue_with_ambiguous_points():
+    """Test that ambiguous_points field is correctly populated."""
+    issue = RawIssue(
+        title="Add user preference setting",
+        body="Users should be able to set preferences",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Add user preference setting",
+  "task_type": "feature",
+  "problem_statement": "Users should be able to set preferences",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Preference settings are accessible"
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [
+    "It is unclear where preferences should be stored (database vs file)",
+    "Default values for preferences are not specified"
+  ],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert isinstance(result, NormalizedIssue)
+    assert len(result.ambiguous_points) == 2
+    assert "It is unclear where preferences should be stored" in result.ambiguous_points[0]
+    assert "Default values for preferences are not specified" in result.ambiguous_points[1]
+
+
+def test_normalize_issue_with_empty_ambiguous_points():
+    """Test that ambiguous_points defaults to empty list when not provided."""
+    issue = RawIssue(
+        title="Simple bug fix",
+        body="Fix a typo in the README",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Simple bug fix",
+  "task_type": "bug",
+  "problem_statement": "Fix a typo in the README",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Typo is fixed"
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert isinstance(result, NormalizedIssue)
+    assert result.ambiguous_points == []
+
+
+def test_normalize_issue_with_complex_ambiguity():
+    """Test normalization with multiple types of ambiguity."""
+    issue = RawIssue(
+        title="Implement caching",
+        body="Add caching to improve performance",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Implement caching",
+  "task_type": "feature",
+  "problem_statement": "Add caching to improve performance",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Cache is implemented"
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [
+    "Cache invalidation strategy is not specified",
+    "TTL (time-to-live) values are not defined",
+    "Which data should be cached is unclear",
+    "Cache backend choice (Redis vs in-memory) is not specified"
+  ],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert isinstance(result, NormalizedIssue)
+    assert len(result.ambiguous_points) == 4
+    assert any("invalidation" in point for point in result.ambiguous_points)
+    assert any("TTL" in point for point in result.ambiguous_points)
