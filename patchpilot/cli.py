@@ -27,6 +27,27 @@ def main() -> None:
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
+    # prepare subcommand
+    prepare_parser = subparsers.add_parser("prepare", help="Prepare a change plan for an issue")
+    prepare_parser.add_argument(
+        "--repo",
+        type=str,
+        required=True,
+        help="Path to the target repository"
+    )
+    prepare_parser.add_argument(
+        "--issue",
+        type=str,
+        required=True,
+        help="Path to the issue description file (Markdown format) or GitHub issue URL"
+    )
+    prepare_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model identifier (overrides PATCHPILOT_MODEL environment variable)"
+    )
+    
     # run subcommand
     run_parser = subparsers.add_parser("run", help="Run PatchPilot on a repository")
     run_parser.add_argument(
@@ -56,10 +77,139 @@ def main() -> None:
     
     args = parser.parse_args()
     
-    if args.command != "run":
+    if args.command == "prepare":
+        handle_prepare(args)
+    elif args.command == "run":
+        handle_run(args)
+    else:
         parser.print_help()
         sys.exit(1)
+
+
+def handle_prepare(args) -> None:
+    """Handle the prepare subcommand workflow.
     
+    This function implements the prepare workflow:
+    1. Load issue from file or GitHub
+    2. Normalize the issue to extract structured information
+    3. Check for ambiguous points
+    4. Create a change plan
+    5. Validate the plan against scope restrictions
+    6. Output artifacts (normalized_issue.json, plan.json)
+    7. Request user approval
+    """
+    try:
+        # Step 1: Load raw issue
+        raw_issue = load_issue(args.issue)
+        print(f"Loaded issue from: {raw_issue.source}")
+        print(f"Title: {raw_issue.title}\n")
+        
+        # Create provider for normalization and planning
+        provider = LLMProvider()
+        
+        # Step 2: Normalize the issue
+        print("Normalizing issue...")
+        normalized_issue = normalize_issue(
+            issue=raw_issue,
+            generate=provider.complete_text,
+        )
+        
+        # Step 3: Check for ambiguous points
+        if normalized_issue.ambiguous_points:
+            print("NEEDS_CLARIFICATION\n")
+            print("The following requirements are ambiguous:\n")
+            for i, point in enumerate(normalized_issue.ambiguous_points, start=1):
+                print(f"{i}. {point}")
+            print("\nPatchPilot will not guess product behavior.")
+            sys.exit(1)
+        
+        print("Issue normalized successfully")
+        print(f"Task type: {normalized_issue.task_type}")
+        print(f"Acceptance criteria: {len(normalized_issue.acceptance_criteria)}")
+        print()
+        
+        # Step 4: Create change plan
+        print("Creating change plan...")
+        repo_path = Path(args.repo)
+        if not repo_path.exists():
+            print(f"Error: Repository path not found: {args.repo}", file=sys.stderr)
+            sys.exit(1)
+        
+        plan = create_plan(
+            issue=normalized_issue,
+            repo_path=str(repo_path),
+            generate=provider.complete_text,
+        )
+        
+        print(f"Plan created with {len(plan.planned_changes)} planned changes")
+        print(f"Risk level: {plan.risk_level}")
+        print()
+        
+        # Step 5: Check scope
+        print("Checking scope...")
+        scope_result = check_scope(plan)
+        
+        if not scope_result.allowed:
+            print("SCOPE_CHECK_FAILED\n")
+            print("The following violations block execution:\n")
+            for i, violation in enumerate(scope_result.violations, start=1):
+                print(f"{i}. {violation}")
+            if scope_result.warnings:
+                print("\nWarnings:\n")
+                for i, warning in enumerate(scope_result.warnings, start=1):
+                    print(f"{i}. {warning}")
+            sys.exit(1)
+        
+        if scope_result.warnings:
+            print("SCOPE_CHECK_WARNINGS\n")
+            print("The following warnings were generated:\n")
+            for i, warning in enumerate(scope_result.warnings, start=1):
+                print(f"{i}. {warning}")
+            print()
+        
+        print("Scope check passed")
+        print()
+        
+        # Step 6: Output artifacts
+        print("Saving artifacts...")
+        save_json(
+            "artifacts/normalized_issue.json",
+            normalized_issue.model_dump_json(indent=2),
+        )
+        print("Saved: artifacts/normalized_issue.json")
+        
+        save_json(
+            "artifacts/plan.json",
+            plan.model_dump_json(indent=2),
+        )
+        print("Saved: artifacts/plan.json")
+        print()
+        
+        # Step 7: Request user approval
+        print("PREPARE_COMPLETE\n")
+        print("Summary:")
+        print(f"  Task type: {normalized_issue.task_type}")
+        print(f"  Acceptance criteria: {len(normalized_issue.acceptance_criteria)}")
+        print(f"  Planned changes: {len(plan.planned_changes)}")
+        print(f"  Planned tests: {len(plan.planned_tests)}")
+        print(f"  Risk level: {plan.risk_level}")
+        print()
+        print("Review the artifacts in artifacts/ directory.")
+        print("To execute this plan, run: patchpilot run --repo <repo> --issue <issue>")
+        
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"File system error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def handle_run(args) -> None:
+    """Handle the run subcommand workflow.
+    
+    This function implements the full run workflow that executes the agent loop.
+    """
     try:
         # Load raw issue
         raw_issue = load_issue(args.issue)
