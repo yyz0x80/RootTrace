@@ -1,0 +1,27 @@
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        ripgrep \
+        coreutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    pytest \
+    ruff
+
+RUN useradd \
+    --create-home \
+    --uid 10001 \
+    --shell /bin/sh \
+    patchpilot
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /workspace
+
+USER patchpilot
+
+CMD ["sleep", "infinity"]
