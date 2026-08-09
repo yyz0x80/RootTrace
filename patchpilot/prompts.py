@@ -43,3 +43,26 @@ FORBIDDEN:
 Your first action must be: call search_code to find the relevant code
 """.strip()
 
+REPAIR_PROMPT = """
+The previous implementation failed deterministic verification.
+
+Original issue:
+{issue}
+
+Approved plan:
+{plan}
+
+Verification failure:
+{failure}
+
+Repair the implementation using the failure evidence above.
+
+Rules:
+1. Stay within the approved scope.
+2. Do not broaden the requested functionality.
+3. Do not change tests merely to hide a failing implementation.
+4. Do not install dependencies unless explicitly allowed.
+5. Fix the root cause of the reported failure.
+6. Stop after making the required code changes.
+7. The external verifier will decide whether the task passes.
+"""

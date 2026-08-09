@@ -5,6 +5,7 @@ on local repositories with issue descriptions.
 """
 
 import argparse
+import subprocess  # noqa: F401
 import sys
 from pathlib import Path
 
@@ -13,9 +14,19 @@ from patchpilot.issue.loader import load_issue
 from patchpilot.issue.normalizer import normalize_issue
 from patchpilot.planning.planner import create_plan
 from patchpilot.planning.scope_gate import check_scope
+from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.provider import LLMProvider
+from patchpilot.sandbox.docker_runner import CommandResult
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
+from patchpilot.verification.error_parser import parse_failure
+from patchpilot.verification.report import CheckReport, VerificationReport
+from patchpilot.workflow import (
+    RepairLoopError,
+    RepairLoopLimitError,
+    RepairLoopStalledError,
+    run_repair_loop,
+)
 from patchpilot.workspace import Workspace
 
 
@@ -73,6 +84,12 @@ def main() -> None:
         type=int,
         default=12,
         help="Maximum number of agent rounds (default: 12)"
+    )
+    run_parser.add_argument(
+        "--max-repairs",
+        type=int,
+        default=3,
+        help="Maximum number of repair attempts (default: 3)"
     )
     
     args = parser.parse_args()
@@ -290,17 +307,179 @@ def handle_run(args) -> None:
             max_rounds=args.max_rounds,
         )
         
-        # Run the agent with the plan
-        result = agent_loop.run(issue=plan.model_dump_json(indent=2))
+        # Define verifier function for repair loop
+        def run_verification() -> VerificationReport:
+            """Run verification commands and return a VerificationReport."""
+            import subprocess
+            import time
+            
+            report = VerificationReport()
+            
+            # Run quick verification (ruff)
+            try:
+                start_time = time.time()
+                result = subprocess.run(
+                    ["ruff", "check", "patchpilot/"],
+                    cwd=workspace.root,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                duration = time.time() - start_time
+                
+                if result.returncode == 0:
+                    ruff_check = CheckReport(
+                        level="quick",
+                        command="ruff check patchpilot/",
+                        passed=True,
+                        exit_code=0,
+                        duration_seconds=duration,
+                    )
+                else:
+                    # Parse the failure
+                    mock_result = CommandResult(
+                        command="ruff check patchpilot/",
+                        exit_code=result.returncode,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        timed_out=False,
+                    )
+                    failure_summary = parse_failure(mock_result)
+                    
+                    ruff_check = CheckReport(
+                        level="quick",
+                        command="ruff check patchpilot/",
+                        passed=False,
+                        exit_code=result.returncode,
+                        duration_seconds=duration,
+                        failure_type=failure_summary.error_type,
+                        summary=failure_summary.__dict__,
+                    )
+                report.add_check(ruff_check)
+            except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
+                # If ruff check fails, create a failed check
+                ruff_check = CheckReport(
+                    level="quick",
+                    command="ruff check patchpilot/",
+                    passed=False,
+                    exit_code=1,
+                    duration_seconds=0.0,
+                    failure_type="LintError",
+                    summary={"error": str(e)},
+                )
+                report.add_check(ruff_check)
+            
+            # Only run pytest if ruff passed
+            if report.passed:
+                try:
+                    start_time = time.time()
+                    result = subprocess.run(
+                        ["python", "-m", "pytest", "tests/", "-q"],
+                        cwd=workspace.root,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        check=False,
+                    )
+                    duration = time.time() - start_time
+                    
+                    if result.returncode == 0:
+                        pytest_check = CheckReport(
+                            level="standard",
+                            command="python -m pytest tests/ -q",
+                            passed=True,
+                            exit_code=0,
+                            duration_seconds=duration,
+                        )
+                    else:
+                        # Parse the failure
+                        mock_result = CommandResult(
+                            command="python -m pytest tests/ -q",
+                            exit_code=result.returncode,
+                            stdout=result.stdout,
+                            stderr=result.stderr,
+                            timed_out=False,
+                        )
+                        failure_summary = parse_failure(mock_result)
+                        
+                        pytest_check = CheckReport(
+                            level="standard",
+                            command="python -m pytest tests/ -q",
+                            passed=False,
+                            exit_code=result.returncode,
+                            duration_seconds=duration,
+                            failure_type=failure_summary.error_type,
+                            summary=failure_summary.__dict__,
+                        )
+                    report.add_check(pytest_check)
+                except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
+                    # If pytest fails, create a failed check
+                    pytest_check = CheckReport(
+                        level="standard",
+                        command="python -m pytest tests/ -q",
+                        passed=False,
+                        exit_code=1,
+                        duration_seconds=0.0,
+                        failure_type="TestError",
+                        summary={"error": str(e)},
+                    )
+                    report.add_check(pytest_check)
+            
+            return report
         
-        # Print result
-        print(result)
+        # Define repair prompt builder
+        def build_repair_prompt(original_issue: str, failure_report: VerificationReport) -> str:
+            """Build a repair prompt based on the failure report."""
+            failed_checks = failure_report.get_failed_checks()
+            if not failed_checks:
+                return original_issue
+            
+            latest_failure = failed_checks[-1]
+            failure_summary = latest_failure.summary or {}
+            
+            return REPAIR_PROMPT.format(
+                issue=original_issue,
+                plan=plan.model_dump_json(indent=2),
+                failure=failure_summary.get("relevant_output", "Unknown failure"),
+            )
+        
+        # Run the repair loop with the plan
+        try:
+            result, verification_report = run_repair_loop(
+                agent_loop=agent_loop,
+                issue=plan.model_dump_json(indent=2),
+                max_attempts=args.max_repairs,
+                verifier=run_verification,
+                repair_prompt_builder=build_repair_prompt,
+            )
+            
+            # Print result
+            print(result)
+            
+            # Print verification status
+            if verification_report and verification_report.passed:
+                print("\n✓ Verification passed")
+            elif verification_report:
+                print(f"\n✗ Verification failed after {args.max_repairs} repair attempt(s)")
+                failed_checks = verification_report.get_failed_checks()
+                if failed_checks:
+                    latest_failure = failed_checks[-1]
+                    print(f"  Failure type: {latest_failure.failure_type}")
+        
+        except RepairLoopStalledError as e:
+            print(f"\n⚠ Repair stopped early: {e}", file=sys.stderr)
+            print("The same failure repeated across repair attempts.", file=sys.stderr)
+            sys.exit(1)
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except (AgentLoopError, AgentLoopLimitError) as e:
         print(f"Agent error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (RepairLoopError, RepairLoopLimitError) as e:
+        print(f"Repair loop error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
         print(f"File system error: {e}", file=sys.stderr)
