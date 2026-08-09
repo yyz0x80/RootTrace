@@ -20,10 +20,18 @@ import difflib
 import shlex
 import subprocess
 from dataclasses import MISSING, dataclass, fields
-from typing import Any, ClassVar, Union, get_type_hints
+from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolResult
 from patchpilot.workspace import Workspace
+
+
+class CommandRunnerProtocol(Protocol):
+    """Protocol for command execution (DockerSandbox or subprocess fallback)."""
+
+    def run(self, command: str, timeout_seconds: int) -> Any:
+        """Execute a command and return a result with stdout, stderr, exit_code."""
+        ...
 
 
 @dataclass
@@ -226,8 +234,9 @@ class ToolRegistry:
     MAX_FILE_LINES = 300
     COMMAND_TIMEOUT = 60
 
-    def __init__(self, workspace: Workspace):
+    def __init__(self, workspace: Workspace, command_runner: CommandRunnerProtocol | None = None):
         self.workspace = workspace
+        self.command_runner = command_runner
         # Dynamic tool registration storage
         self._tool_definitions: dict[str, ToolDefinition] = {}
         self._tool_handlers: dict[str, Any] = {}
@@ -603,36 +612,60 @@ class ToolRegistry:
                 content="Only 'ruff check' is allowed for ruff command"
             )
 
-        # Run command with subprocess
-        try:
-            result = subprocess.run(
-                args,
-                cwd=self.workspace.root,
-                capture_output=True,
-                text=True,
-                timeout=self.COMMAND_TIMEOUT,
-                check=False,
-            )
-
-            # Combine stdout and stderr
-            output = result.stdout
-            if result.stderr:
-                output += f"\n{result.stderr}" if output else result.stderr
-
-            if result.returncode != 0:
-                return ToolResult(
-                    ok=False,
-                    content=f"exit_code={result.returncode}\n{output}"
+        # Run command with DockerSandbox if available, otherwise subprocess
+        if self.command_runner is not None:
+            try:
+                result = self.command_runner.run(
+                    command=input_data.command,
+                    timeout_seconds=self.COMMAND_TIMEOUT,
                 )
 
-            return ToolResult(ok=True, content=output)
+                # Combine stdout and stderr
+                output = result.stdout
+                if result.stderr:
+                    output += f"\n{result.stderr}" if output else result.stderr
 
-        except subprocess.TimeoutExpired:
-            return ToolResult(ok=False, content="Command timed out")
-        except FileNotFoundError:
-            return ToolResult(ok=False, content=f"Command '{base_command}' not found in PATH")
-        except OSError as e:
-            return ToolResult(ok=False, content=f"Command failed: {e}")
+                if result.exit_code != 0:
+                    return ToolResult(
+                        ok=False,
+                        content=f"exit_code={result.exit_code}\n{output}"
+                    )
+
+                return ToolResult(ok=True, content=output)
+
+            except (OSError, subprocess.SubprocessError, AttributeError) as e:
+                return ToolResult(ok=False, content=f"Docker execution failed: {e}")
+        else:
+            # Fallback to subprocess
+            try:
+                result = subprocess.run(
+                    args,
+                    cwd=self.workspace.root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.COMMAND_TIMEOUT,
+                    check=False,
+                )
+
+                # Combine stdout and stderr
+                output = result.stdout
+                if result.stderr:
+                    output += f"\n{result.stderr}" if output else result.stderr
+
+                if result.returncode != 0:
+                    return ToolResult(
+                        ok=False,
+                        content=f"exit_code={result.returncode}\n{output}"
+                    )
+
+                return ToolResult(ok=True, content=output)
+
+            except subprocess.TimeoutExpired:
+                return ToolResult(ok=False, content="Command timed out")
+            except FileNotFoundError:
+                return ToolResult(ok=False, content=f"Command '{base_command}' not found in PATH")
+            except OSError as e:
+                return ToolResult(ok=False, content=f"Command failed: {e}")
 
     def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
         """
