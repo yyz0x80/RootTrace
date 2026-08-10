@@ -387,6 +387,7 @@ def handle_run(args) -> None:
                         exit_code=result.returncode,
                         stdout=result.stdout,
                         stderr=result.stderr,
+                        duration_seconds=duration,
                         timed_out=False,
                     )
                     failure_summary = parse_failure(mock_result)
@@ -443,6 +444,7 @@ def handle_run(args) -> None:
                             exit_code=result.returncode,
                             stdout=result.stdout,
                             stderr=result.stderr,
+                            duration_seconds=duration,
                             timed_out=False,
                         )
                         failure_summary = parse_failure(mock_result)
@@ -635,6 +637,7 @@ def handle_execute(args) -> None:
                         exit_code=result.returncode,
                         stdout=result.stdout,
                         stderr=result.stderr,
+                        duration_seconds=duration,
                         timed_out=False,
                     )
                     failure_summary = parse_failure(mock_result)
@@ -691,6 +694,7 @@ def handle_execute(args) -> None:
                             exit_code=result.returncode,
                             stdout=result.stdout,
                             stderr=result.stderr,
+                            duration_seconds=duration,
                             timed_out=False,
                         )
                         failure_summary = parse_failure(mock_result)

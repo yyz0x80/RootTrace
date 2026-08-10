@@ -6,6 +6,7 @@ This module provides tools for verifying code changes through:
 - Verification result aggregation
 - Report generation and persistence
 - Failure fingerprinting for repair loop optimization
+- Deterministic verification with Ruff and pytest
 """
 
 from patchpilot.verification.error_parser import (
@@ -17,11 +18,13 @@ from patchpilot.verification.report import (
     VerificationReport,
     failure_fingerprint,
 )
+from patchpilot.verification.verifier import Verifier
 
 __all__ = [
     "CheckReport",
     "FailureSummary",
     "VerificationReport",
+    "Verifier",
     "failure_fingerprint",
     "parse_failure",
 ]
