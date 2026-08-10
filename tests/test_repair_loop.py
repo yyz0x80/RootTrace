@@ -1,11 +1,10 @@
 """Tests for the repair loop with early stopping logic."""
 
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 
 import pytest
 
-from patchpilot.agent_loop import AgentLoop
-from patchpilot.verification.report import CheckReport, VerificationReport, failure_fingerprint
+from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.repair_loop import (
     RepairLoop,
     RepairLoopError,
@@ -199,7 +198,7 @@ class TestRepairLoopRun:
         def build_prompt(issue, failure_report):
             return f"REPAIR: {issue}"
 
-        result, report = repair_loop.run(
+        result, _report = repair_loop.run(
             "Fix the bug",
             repair_prompt_builder=build_prompt,
         )

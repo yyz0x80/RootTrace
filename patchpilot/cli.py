@@ -19,6 +19,7 @@ from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.provider import LLMProvider
+from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.sandbox.docker_runner import CommandResult, DockerSandbox
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
@@ -192,8 +193,16 @@ def handle_prepare(args) -> None:
         # Step 4: Create change plan
         print("Creating change plan...")
         repo_path = Path(args.repo)
-        if not repo_path.exists():
-            print(f"Error: Repository path not found: {args.repo}", file=sys.stderr)
+        
+        # Validate repository
+        print("Validating repository...")
+        try:
+            preflight_result = validate_repository(repo_path)
+            print(f"Repository validated: {preflight_result.repo_path}")
+            print(f"Current HEAD: {preflight_result.head_sha[:8]}...")
+            print()
+        except RepositoryPreflightError as e:
+            print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
         
         plan = create_plan(
@@ -301,8 +310,16 @@ def handle_run(args) -> None:
         
         # Create workspace
         repo_path = Path(args.repo)
-        if not repo_path.exists():
-            print(f"Error: Repository path not found: {args.repo}", file=sys.stderr)
+        
+        # Validate repository
+        print("Validating repository...")
+        try:
+            preflight_result = validate_repository(repo_path)
+            print(f"Repository validated: {preflight_result.repo_path}")
+            print(f"Current HEAD: {preflight_result.head_sha[:8]}...")
+            print()
+        except RepositoryPreflightError as e:
+            print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
         
         workspace = Workspace(root=repo_path)
@@ -577,8 +594,16 @@ def handle_execute(args) -> None:
         
         # Step 3: Setup workspace
         repo_path = Path(args.repo)
-        if not repo_path.exists():
-            print(f"Error: Repository path not found: {args.repo}", file=sys.stderr)
+        
+        # Validate repository
+        print("Validating repository...")
+        try:
+            preflight_result = validate_repository(repo_path)
+            print(f"Repository validated: {preflight_result.repo_path}")
+            print(f"Current HEAD: {preflight_result.head_sha[:8]}...")
+            print()
+        except RepositoryPreflightError as e:
+            print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
         
         workspace = Workspace(root=repo_path)

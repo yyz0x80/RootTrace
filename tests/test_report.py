@@ -576,14 +576,14 @@ def test_failure_fingerprint_passed_report():
     )
 
     fingerprint = failure_fingerprint(report)
-    assert fingerprint == tuple()
+    assert fingerprint == ()
 
 
 def test_failure_fingerprint_empty_report():
     """Test that empty reports return empty tuple."""
     report = VerificationReport()
     fingerprint = failure_fingerprint(report)
-    assert fingerprint == tuple()
+    assert fingerprint == ()
 
 
 def test_failure_fingerprint_with_failure():
@@ -654,7 +654,7 @@ def test_failure_fingerprint_missing_summary_fields():
     )
 
     fingerprint = failure_fingerprint(report)
-    assert fingerprint == ("SyntaxError", tuple(), None, "")
+    assert fingerprint == ("SyntaxError", (), None, "")
 
 
 def test_failure_fingerprint_uses_latest_failure():

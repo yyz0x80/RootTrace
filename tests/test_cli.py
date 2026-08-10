@@ -1,6 +1,6 @@
 """Tests for the CLI module."""
 
-
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -76,7 +76,11 @@ def test_main_with_ambiguous_points_stops(
 @patch("patchpilot.cli.save_json")
 @patch("patchpilot.cli.create_plan")
 @patch("patchpilot.cli.check_scope")
+@patch("patchpilot.cli.validate_repository")
+@patch("patchpilot.cli.run_repair_loop")
 def test_main_without_ambiguous_points_proceeds(
+    mock_run_repair_loop,
+    mock_validate_repository,
     mock_check_scope,
     mock_create_plan,
     mock_save_json,
@@ -119,9 +123,21 @@ def test_main_without_ambiguous_points_proceeds(
     # Mock check_scope to return allowed
     mock_check_scope.return_value = Mock(allowed=True, violations=[], warnings=[])
 
+    # Mock validate_repository to return a valid result
+    from patchpilot.repository.schema import RepositoryPreflightResult
+    mock_validate_repository.return_value = RepositoryPreflightResult(
+        repo_path=Path("/fake/repo"),
+        head_sha="abc123def456",
+    )
+
+    # Mock run_repair_loop to return successful result
+    from patchpilot.verification.report import VerificationReport
+    mock_verification_report = Mock(spec=VerificationReport)
+    mock_verification_report.passed = True
+    mock_run_repair_loop.return_value = ("Success", mock_verification_report)
+
     mock_agent_loop_instance = Mock()
     mock_agent_loop.return_value = mock_agent_loop_instance
-    mock_agent_loop_instance.run = Mock(return_value="Success")
 
     # Mock Path.exists to return True
     mock_path.return_value.exists.return_value = True
@@ -134,9 +150,10 @@ def test_main_without_ambiguous_points_proceeds(
     with patch("sys.argv", ["patchpilot", "run", "--repo", "/fake/repo", "--issue", "test.md"]):
         main()
 
-    # Verify agent was called
-    mock_agent_loop.assert_called_once()
-    mock_agent_loop_instance.run.assert_called_once()
+    # Verify repository validation was called
+    mock_validate_repository.assert_called_once()
+    # Verify repair loop was called
+    mock_run_repair_loop.assert_called_once()
 
 
 @patch("patchpilot.cli.Path")
