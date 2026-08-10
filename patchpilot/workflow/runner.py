@@ -7,6 +7,7 @@ workflow from issue to verified patch, including:
 - Agent execution for code modifications
 - Verification with deterministic checks
 - Repair loop with intelligent failure handling
+- Scope gate validation for repair changes
 - Early stopping for unrecoverable errors and repeated failures
 
 The WorkflowRunner integrates all PatchPilot components into a unified
@@ -18,11 +19,14 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from patchpilot.agent_loop import AgentLoop
+from patchpilot.planning.schema import ChangePlan, PlannedChange
+from patchpilot.planning.scope_gate import ScopeGateResult, check_scope
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
@@ -40,6 +44,7 @@ UNRECOVERABLE_FAILURE_TYPES = {
     FailureType.PERMISSION_FAILURE,
     FailureType.TIMEOUT,
     FailureType.REQUIREMENT_AMBIGUITY,
+    FailureType.SCOPE_VIOLATION,
 }
 
 
@@ -67,6 +72,7 @@ class WorkflowRunner:
        - Stops immediately for unrecoverable failures
        - Stops when the same failure repeats
        - Limits to MAX_REPAIR_ATTEMPTS repair attempts
+       - Validates repair changes against scope gate using git diff --name-only
     6. Returns the final verification report
 
     Attributes:
@@ -117,7 +123,11 @@ class WorkflowRunner:
         2. Start Docker Sandbox
         3. Run Coding Agent for initial modification
         4. Run Verifier
-        5. Enter repair loop if verification fails
+        5. Enter repair loop if verification fails:
+           - Run Repair Agent
+           - Get modified files via git diff --name-only
+           - Validate changes against scope gate
+           - Proceed to verifier only if scope gate allows
         6. Return final verification report
 
         Args:
@@ -196,7 +206,24 @@ class WorkflowRunner:
                 # Step 5e: Run agent with repair prompt
                 self.agent_loop.run(issue=repair_prompt)
 
-                # Step 5f: Re-run verification
+                # Step 5f: Scope gate check after repair
+                scope_result = self._check_repair_scope()
+                if not scope_result.allowed:
+                    logger.warning(
+                        "Scope gate rejected repair changes: %s. Stopping repair loop.",
+                        scope_result.violations,
+                    )
+                    # Create a failure report indicating scope rejection
+                    report.passed = False
+                    report.failure_type = "SCOPE_VIOLATION"
+                    # Add scope violations to the report for visibility
+                    if report.checks:
+                        report.checks[-1].summary = report.checks[-1].summary or {}
+                        report.checks[-1].summary["scope_violations"] = scope_result.violations
+                        report.checks[-1].summary["scope_warnings"] = scope_result.warnings
+                    break
+
+                # Step 5g: Re-run verification
                 report = self.verifier()
                 report.retry_count = retry_count
 
@@ -318,6 +345,105 @@ class WorkflowRunner:
             plan=plan,
             failure=failure_summary,
         )
+
+    def _get_modified_files(self) -> list[str]:
+        """Get list of modified files using git diff --name-only.
+
+        Runs git diff --name-only in the workspace to identify which files
+        have been modified by the agent.
+
+        Returns:
+            List of modified file paths relative to repository root
+
+        Raises:
+            WorkflowRunnerExecutionError: If git command fails
+        """
+        if self.temp_dir:
+            workspace_path = self.temp_dir / "repo"
+        else:
+            workspace_path = self.workspace.root
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=workspace_path,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                raise WorkflowRunnerExecutionError(
+                    f"git diff --name-only failed: {result.stderr}"
+                )
+
+            modified_files = [
+                line.strip() for line in result.stdout.splitlines() if line.strip()
+            ]
+
+            logger.info("Modified files detected: %s", modified_files)
+            return modified_files
+
+        except subprocess.TimeoutExpired as e:
+            raise WorkflowRunnerExecutionError(
+                f"git diff --name-only timed out: {e}"
+            ) from e
+        except (OSError, subprocess.SubprocessError) as e:
+            raise WorkflowRunnerExecutionError(
+                f"Failed to run git diff --name-only: {e}"
+            ) from e
+
+    def _check_repair_scope(self) -> ScopeGateResult:
+        """Check if repair changes pass scope gate validation.
+
+        After the repair agent makes changes, this method:
+        1. Gets the list of modified files via git diff --name-only
+        2. Builds a minimal ChangePlan from the modified files
+        3. Validates the plan against scope restrictions
+
+        Returns:
+            ScopeGateResult indicating whether changes are allowed
+        """
+        modified_files = self._get_modified_files()
+
+        # Build a minimal ChangePlan for scope validation
+        # Since this is post-repair validation, we use the actual modified files
+        # as the planned changes with minimal metadata
+        planned_changes = [
+            PlannedChange(
+                file=file,
+                description="Modified during repair attempt",
+                acceptance_criteria=[],
+            )
+            for file in modified_files
+        ]
+
+        # Create a minimal ChangePlan for validation
+        # Use low risk level since repairs are scoped to fix specific failures
+        change_plan = ChangePlan(
+            relevant_files=modified_files,
+            planned_changes=planned_changes,
+            planned_tests=[],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        # Run scope gate validation
+        scope_result = check_scope(change_plan)
+
+        if not scope_result.allowed:
+            logger.warning(
+                "Scope gate rejected repair changes: %s",
+                scope_result.violations,
+            )
+        if scope_result.warnings:
+            logger.info(
+                "Scope gate warnings: %s",
+                scope_result.warnings,
+            )
+
+        return scope_result
 
     def _cleanup(self) -> None:
         """Clean up resources by stopping sandbox and removing temporary directory."""

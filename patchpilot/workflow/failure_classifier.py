@@ -31,6 +31,7 @@ class FailureType(str, Enum):
     TIMEOUT = "TIMEOUT"
     MODEL_FAILURE = "MODEL_FAILURE"
     REQUIREMENT_AMBIGUITY = "REQUIREMENT_AMBIGUITY"
+    SCOPE_VIOLATION = "SCOPE_VIOLATION"
 
 
 def classify_failure(summary: FailureSummary) -> FailureType:

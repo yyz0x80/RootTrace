@@ -1,5 +1,6 @@
 """Tests for the Workflow Runner orchestration component."""
 
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -7,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from patchpilot.agent_loop import AgentLoop
+from patchpilot.planning.scope_gate import ScopeGateResult
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workflow.runner import (
@@ -126,10 +128,14 @@ class TestWorkflowRunnerExecute:
             sandbox=mock_sandbox,
         )
 
-        # Mock internal setup methods
+        # Mock internal setup methods and scope gate
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
-             patch.object(runner, '_cleanup'):
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+
+            # Mock scope gate to allow changes
+            mock_scope_check.return_value = ScopeGateResult(allowed=True)
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -187,10 +193,14 @@ class TestWorkflowRunnerExecute:
             sandbox=mock_sandbox,
         )
 
-        # Mock internal setup methods
+        # Mock internal setup methods and scope gate
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
-             patch.object(runner, '_cleanup'):
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+
+            # Mock scope gate to allow changes
+            mock_scope_check.return_value = ScopeGateResult(allowed=True)
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -236,10 +246,14 @@ class TestWorkflowRunnerExecute:
             sandbox=mock_sandbox,
         )
 
-        # Mock internal setup methods
+        # Mock internal setup methods and scope gate
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
-             patch.object(runner, '_cleanup'):
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+
+            # Mock scope gate to allow changes
+            mock_scope_check.return_value = ScopeGateResult(allowed=True)
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -310,10 +324,14 @@ class TestWorkflowRunnerExecute:
             sandbox=mock_sandbox,
         )
 
-        # Mock internal setup methods
+        # Mock internal setup methods and scope gate
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
-             patch.object(runner, '_cleanup'):
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+
+            # Mock scope gate to allow changes
+            mock_scope_check.return_value = ScopeGateResult(allowed=True)
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -577,6 +595,193 @@ class TestRunWorkflow:
             issue="Fix the bug",
             plan="Implement the fix",
         )
+
+
+class TestWorkflowRunnerScopeGate:
+    """Tests for scope gate integration in repair loop."""
+
+    def test_scope_gate_allows_safe_changes(self):
+        """Test that scope gate allows safe repair changes."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # First verification fails, second succeeds
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
+            )
+        )
+
+        success_report = VerificationReport(passed=True)
+        mock_verifier.side_effect = [failed_report, success_report]
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and git diff
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_get_modified_files') as mock_git_diff:
+
+            # Mock git diff to return safe files
+            mock_git_diff.return_value = ["src/module.py", "README.md"]
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+            )
+
+        assert result.passed is True
+        assert mock_agent_loop.run.call_count == 2  # Initial + 1 repair
+        assert mock_verifier.call_count == 2
+
+    def test_scope_gate_blocks_forbidden_changes(self):
+        """Test that scope gate blocks forbidden repair changes."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # First verification fails
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
+            )
+        )
+
+        mock_verifier.return_value = failed_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and git diff
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_get_modified_files') as mock_git_diff:
+
+            # Mock git diff to return forbidden file (.env)
+            mock_git_diff.return_value = [".env"]
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+            )
+
+        assert result.passed is False
+        assert result.failure_type == "SCOPE_VIOLATION"
+        # Should attempt initial + 1 repair (then stop due to scope violation)
+        assert mock_agent_loop.run.call_count == 2
+        assert mock_verifier.call_count == 1  # Only initial verification, scope gate blocks re-verification
+
+    def test_scope_gate_blocks_cicd_changes(self):
+        """Test that scope gate blocks CI/CD repair changes."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # First verification fails
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
+            )
+        )
+
+        mock_verifier.return_value = failed_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and git diff
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_get_modified_files') as mock_git_diff:
+
+            # Mock git diff to return CI/CD file
+            mock_git_diff.return_value = [".github/workflows/test.yml"]
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+            )
+
+        assert result.passed is False
+        assert result.failure_type == "SCOPE_VIOLATION"
+        assert mock_agent_loop.run.call_count == 2
+        assert mock_verifier.call_count == 1
+
+    def test_get_modified_files_calls_git_diff(self):
+        """Test that _get_modified_files correctly calls git diff."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_workspace.root = Path("/fake/repo")
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+        )
+
+        with patch('patchpilot.workflow.runner.subprocess.run') as mock_subprocess:
+            mock_subprocess.return_value = subprocess.CompletedProcess(
+                args=["git", "diff", "--name-only"],
+                returncode=0,
+                stdout="src/file1.py\nsrc/file2.py\n",
+                stderr="",
+            )
+
+            modified_files = runner._get_modified_files()
+
+            assert modified_files == ["src/file1.py", "src/file2.py"]
+            mock_subprocess.assert_called_once()
+            call_args = mock_subprocess.call_args
+            assert call_args[0][0] == ["git", "diff", "--name-only"]
+            assert call_args[1]["cwd"] == Path("/fake/repo")
+            assert call_args[1]["capture_output"] is True
+            assert call_args[1]["text"] is True
+            assert call_args[1]["timeout"] == 30
 
 
 class TestConstants:
