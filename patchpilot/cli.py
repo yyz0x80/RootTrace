@@ -597,7 +597,7 @@ def handle_execute(args) -> None:
         )
         
         # Step 7: Create sandbox
-        sandbox = DockerSandbox()
+        sandbox = DockerSandbox(workspace=workspace.root)
         
         # Step 8: Define verifier function
         def run_verification() -> VerificationReport:
