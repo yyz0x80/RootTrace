@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from patchpilot.issue.schema import NormalizedIssue
-from patchpilot.repository.analyzer import analyze_repository
+from patchpilot.repository.analyzer import _extract_keywords, analyze_repository
 from patchpilot.repository.schema import RepositoryContext
 
 
@@ -231,8 +231,9 @@ def test_filters_stopwords(tmp_path: Path):
     
     context = analyze_repository(tmp_path, issue, head_sha)
     
-    # Keywords should not include stopwords
-    # The actual matches depend on ripgrep, but keyword extraction should filter them
+    # Should still work and filter stopwords from keyword extraction
+    # The actual matches depend on ripgrep availability
+    assert isinstance(context, RepositoryContext)
     assert len(context.tracked_files) > 0
 
 
@@ -259,7 +260,9 @@ def test_keyword_search(tmp_path: Path):
     context = analyze_repository(tmp_path, issue, head_sha)
     
     # Should find files matching "user" or "api" keywords
-    assert len(context.keyword_matches) >= 0
+    # The actual matches depend on ripgrep availability and file content
+    assert len(context.tracked_files) > 0
+    assert "api.py" in context.tracked_files
 
 
 def test_limits_keyword_count(tmp_path: Path):
@@ -275,6 +278,7 @@ def test_limits_keyword_count(tmp_path: Path):
     context = analyze_repository(tmp_path, issue, head_sha)
     
     # Should still work and not crash with many potential keywords
+    # The keyword extraction should limit to 8 keywords internally
     assert isinstance(context, RepositoryContext)
     assert len(context.tracked_files) > 0
 
@@ -326,3 +330,57 @@ def test_handles_empty_repository(tmp_path: Path):
     assert context.python_files == []
     assert context.test_files == []
     assert context.config_files == []
+
+
+def test_extract_keywords_filters_stopwords():
+    """Test that keyword extraction filters out common stopwords."""
+    issue = NormalizedIssue(
+        title="Add support for the new feature",
+        task_type="feature",
+        problem_statement="Add support for the new feature in the module",
+    )
+    
+    keywords = _extract_keywords(issue)
+    
+    # Should not include stopwords
+    assert "the" not in keywords
+    assert "and" not in keywords
+    assert "for" not in keywords
+    assert "with" not in keywords
+    assert "add" not in keywords  # "add" is a stopword in our list
+    assert "support" not in keywords  # "support" is a stopword in our list
+    
+    # Should include meaningful words
+    assert "new" in keywords
+    assert "feature" in keywords
+    assert "module" in keywords
+
+
+def test_extract_keywords_limits_count():
+    """Test that keyword extraction limits to 8 keywords."""
+    issue = NormalizedIssue(
+        title="Fix authentication authorization database configuration logging monitoring caching validation",
+        task_type="bug",
+        problem_statement="Multiple components need fixing in the system",
+    )
+    
+    keywords = _extract_keywords(issue)
+    
+    # Should limit to 8 keywords
+    assert len(keywords) <= 8
+
+
+def test_extract_keywords_deduplicates():
+    """Test that keyword extraction removes duplicates."""
+    issue = NormalizedIssue(
+        title="Fix the user user user module",
+        task_type="bug",
+        problem_statement="The user module has user user problems",
+    )
+    
+    keywords = _extract_keywords(issue)
+    
+    # Should not have duplicates
+    assert len(keywords) == len(set(keywords))
+    # "user" should appear only once
+    assert keywords.count("user") == 1
