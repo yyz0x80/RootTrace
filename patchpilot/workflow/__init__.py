@@ -15,6 +15,8 @@ from patchpilot.workflow.failure_classifier import (
 from patchpilot.workflow.repair_loop import (
     RepairLoop,
     RepairLoopError,
+    RepairLoopLimitError,
+    RepairLoopStalledError,
     run_repair_loop,
 )
 from patchpilot.workflow.runner import (
@@ -31,6 +33,8 @@ __all__ = [
     "FailureType",
     "RepairLoop",
     "RepairLoopError",
+    "RepairLoopLimitError",
+    "RepairLoopStalledError",
     "WorkflowRunner",
     "WorkflowRunnerError",
     "WorkflowRunnerExecutionError",

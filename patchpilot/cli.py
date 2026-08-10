@@ -5,6 +5,7 @@ on local repositories with issue descriptions.
 """
 
 import argparse
+import json
 import subprocess  # noqa: F401
 import sys
 from pathlib import Path
@@ -12,21 +13,23 @@ from pathlib import Path
 from patchpilot.agent_loop import AgentLoop, AgentLoopError, AgentLoopLimitError
 from patchpilot.issue.loader import load_issue
 from patchpilot.issue.normalizer import normalize_issue
+from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.planner import create_plan
+from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.provider import LLMProvider
-from patchpilot.sandbox.docker_runner import CommandResult
+from patchpilot.sandbox.docker_runner import CommandResult, DockerSandbox
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
 from patchpilot.verification.error_parser import parse_failure
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow import (
     RepairLoopError,
-    RepairLoopLimitError,
     RepairLoopStalledError,
     run_repair_loop,
 )
+from patchpilot.workflow.runner import WorkflowRunner, WorkflowRunnerError
 from patchpilot.workspace import Workspace
 
 
@@ -92,12 +95,53 @@ def main() -> None:
         help="Maximum number of repair attempts (default: 3)"
     )
     
+    # execute subcommand
+    execute_parser = subparsers.add_parser("execute", help="Execute an approved change plan")
+    execute_parser.add_argument(
+        "--repo",
+        type=str,
+        required=True,
+        help="Path to the target repository"
+    )
+    execute_parser.add_argument(
+        "--issue",
+        type=str,
+        required=True,
+        help="Path to the normalized issue JSON file (from prepare command)"
+    )
+    execute_parser.add_argument(
+        "--plan",
+        type=str,
+        required=True,
+        help="Path to the approved plan JSON file (from prepare command)"
+    )
+    execute_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model identifier (overrides PATCHPILOT_MODEL environment variable)"
+    )
+    execute_parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=12,
+        help="Maximum number of agent rounds (default: 12)"
+    )
+    execute_parser.add_argument(
+        "--max-repairs",
+        type=int,
+        default=3,
+        help="Maximum number of repair attempts (default: 3)"
+    )
+    
     args = parser.parse_args()
     
     if args.command == "prepare":
         handle_prepare(args)
     elif args.command == "run":
         handle_run(args)
+    elif args.command == "execute":
+        handle_execute(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -212,7 +256,7 @@ def handle_prepare(args) -> None:
         print(f"  Risk level: {plan.risk_level}")
         print()
         print("Review the artifacts in artifacts/ directory.")
-        print("To execute this plan, run: patchpilot run --repo <repo> --issue <issue>")
+        print("To execute this plan, run: patchpilot execute --repo <repo> --issue artifacts/normalized_issue.json --plan artifacts/plan.json")
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -319,7 +363,7 @@ def handle_run(args) -> None:
             try:
                 start_time = time.time()
                 result = subprocess.run(
-                    ["ruff", "check", "patchpilot/"],
+                    ["ruff", "check"],
                     cwd=workspace.root,
                     capture_output=True,
                     text=True,
@@ -331,7 +375,7 @@ def handle_run(args) -> None:
                 if result.returncode == 0:
                     ruff_check = CheckReport(
                         level="quick",
-                        command="ruff check patchpilot/",
+                        command="ruff check",
                         passed=True,
                         exit_code=0,
                         duration_seconds=duration,
@@ -339,7 +383,7 @@ def handle_run(args) -> None:
                 else:
                     # Parse the failure
                     mock_result = CommandResult(
-                        command="ruff check patchpilot/",
+                        command="ruff check",
                         exit_code=result.returncode,
                         stdout=result.stdout,
                         stderr=result.stderr,
@@ -349,7 +393,7 @@ def handle_run(args) -> None:
                     
                     ruff_check = CheckReport(
                         level="quick",
-                        command="ruff check patchpilot/",
+                        command="ruff check",
                         passed=False,
                         exit_code=result.returncode,
                         duration_seconds=duration,
@@ -361,7 +405,7 @@ def handle_run(args) -> None:
                 # If ruff check fails, create a failed check
                 ruff_check = CheckReport(
                     level="quick",
-                    command="ruff check patchpilot/",
+                    command="ruff check",
                     passed=False,
                     exit_code=1,
                     duration_seconds=0.0,
@@ -478,11 +522,261 @@ def handle_run(args) -> None:
     except (AgentLoopError, AgentLoopLimitError) as e:
         print(f"Agent error: {e}", file=sys.stderr)
         sys.exit(1)
-    except (RepairLoopError, RepairLoopLimitError) as e:
+    except RepairLoopError as e:
         print(f"Repair loop error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
         print(f"File system error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def handle_execute(args) -> None:
+    """Handle the execute subcommand workflow.
+    
+    This function implements the execute workflow:
+    1. Load normalized issue from JSON file
+    2. Load approved plan from JSON file
+    3. Setup workspace and sandbox
+    4. Run agent implementation
+    5. Execute verification
+    6. Run repair loop if needed
+    7. Save verification report
+    """
+    try:
+        # Step 1: Load normalized issue
+        print(f"Loading normalized issue from: {args.issue}")
+        issue_path = Path(args.issue)
+        if not issue_path.exists():
+            print(f"Error: Issue file not found: {args.issue}", file=sys.stderr)
+            sys.exit(1)
+        
+        with open(issue_path, encoding="utf-8") as f:
+            issue_data = json.load(f)
+        normalized_issue = NormalizedIssue.model_validate(issue_data)
+        
+        print(f"Loaded issue: {normalized_issue.title}")
+        print(f"Task type: {normalized_issue.task_type}")
+        print()
+        
+        # Step 2: Load approved plan
+        print(f"Loading approved plan from: {args.plan}")
+        plan_path = Path(args.plan)
+        if not plan_path.exists():
+            print(f"Error: Plan file not found: {args.plan}", file=sys.stderr)
+            sys.exit(1)
+        
+        with open(plan_path, encoding="utf-8") as f:
+            plan_data = json.load(f)
+        plan = ChangePlan.model_validate(plan_data)
+        
+        print(f"Loaded plan with {len(plan.planned_changes)} planned changes")
+        print(f"Risk level: {plan.risk_level}")
+        print()
+        
+        # Step 3: Setup workspace
+        repo_path = Path(args.repo)
+        if not repo_path.exists():
+            print(f"Error: Repository path not found: {args.repo}", file=sys.stderr)
+            sys.exit(1)
+        
+        workspace = Workspace(root=repo_path)
+        print(f"Workspace initialized: {repo_path}")
+        print()
+        
+        # Step 4: Create provider
+        provider = LLMProvider()
+        
+        # Step 5: Create tool registry
+        tools = ToolRegistry(workspace=workspace)
+        
+        # Step 6: Create agent loop
+        agent_loop = AgentLoop(
+            provider=provider,
+            tools=tools,
+            max_rounds=args.max_rounds,
+        )
+        
+        # Step 7: Create sandbox
+        sandbox = DockerSandbox()
+        
+        # Step 8: Define verifier function
+        def run_verification() -> VerificationReport:
+            """Run verification commands and return a VerificationReport."""
+            import subprocess
+            import time
+            
+            report = VerificationReport()
+            
+            # Run quick verification (ruff)
+            try:
+                start_time = time.time()
+                result = subprocess.run(
+                    ["ruff", "check"],
+                    cwd=workspace.root,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                duration = time.time() - start_time
+                
+                if result.returncode == 0:
+                    ruff_check = CheckReport(
+                        level="quick",
+                        command="ruff check",
+                        passed=True,
+                        exit_code=0,
+                        duration_seconds=duration,
+                    )
+                else:
+                    # Parse the failure
+                    mock_result = CommandResult(
+                        command="ruff check",
+                        exit_code=result.returncode,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        timed_out=False,
+                    )
+                    failure_summary = parse_failure(mock_result)
+                    
+                    ruff_check = CheckReport(
+                        level="quick",
+                        command="ruff check",
+                        passed=False,
+                        exit_code=result.returncode,
+                        duration_seconds=duration,
+                        failure_type=failure_summary.error_type,
+                        summary=failure_summary.__dict__,
+                    )
+                report.add_check(ruff_check)
+            except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
+                # If ruff check fails, create a failed check
+                ruff_check = CheckReport(
+                    level="quick",
+                    command="ruff check",
+                    passed=False,
+                    exit_code=1,
+                    duration_seconds=0.0,
+                    failure_type="LintError",
+                    summary={"error": str(e)},
+                )
+                report.add_check(ruff_check)
+            
+            # Only run pytest if ruff passed
+            if report.passed:
+                try:
+                    start_time = time.time()
+                    result = subprocess.run(
+                        ["python", "-m", "pytest", "tests/", "-q"],
+                        cwd=workspace.root,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        check=False,
+                    )
+                    duration = time.time() - start_time
+                    
+                    if result.returncode == 0:
+                        pytest_check = CheckReport(
+                            level="standard",
+                            command="python -m pytest tests/ -q",
+                            passed=True,
+                            exit_code=0,
+                            duration_seconds=duration,
+                        )
+                    else:
+                        # Parse the failure
+                        mock_result = CommandResult(
+                            command="python -m pytest tests/ -q",
+                            exit_code=result.returncode,
+                            stdout=result.stdout,
+                            stderr=result.stderr,
+                            timed_out=False,
+                        )
+                        failure_summary = parse_failure(mock_result)
+                        
+                        pytest_check = CheckReport(
+                            level="standard",
+                            command="python -m pytest tests/ -q",
+                            passed=False,
+                            exit_code=result.returncode,
+                            duration_seconds=duration,
+                            failure_type=failure_summary.error_type,
+                            summary=failure_summary.__dict__,
+                        )
+                    report.add_check(pytest_check)
+                except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
+                    # If pytest fails, create a failed check
+                    pytest_check = CheckReport(
+                        level="standard",
+                        command="python -m pytest tests/ -q",
+                        passed=False,
+                        exit_code=1,
+                        duration_seconds=0.0,
+                        failure_type="TestError",
+                        summary={"error": str(e)},
+                    )
+                    report.add_check(pytest_check)
+            
+            return report
+        
+        # Step 9: Create workflow runner
+        runner = WorkflowRunner(
+            agent_loop=agent_loop,
+            verifier=run_verification,
+            workspace=workspace,
+            sandbox=sandbox,
+        )
+        
+        # Step 10: Execute workflow
+        print("Starting workflow execution...")
+        try:
+            verification_report = runner.execute(
+                issue=normalized_issue.model_dump_json(indent=2),
+                plan=plan.model_dump_json(indent=2),
+            )
+            
+            # Step 11: Save verification report
+            print("Saving verification report...")
+            save_json(
+                "artifacts/verification_report.json",
+                verification_report.model_dump_json(indent=2),
+            )
+            print("Saved: artifacts/verification_report.json")
+            print()
+            
+            # Step 12: Print results
+            print("EXECUTION_COMPLETE\n")
+            if verification_report.passed:
+                print("✓ Verification passed")
+                print(f"  Total checks: {len(verification_report.checks)}")
+                print(f"  Duration: {verification_report.total_duration_seconds:.2f}s")
+            else:
+                print("✗ Verification failed")
+                failed_checks = verification_report.get_failed_checks()
+                print(f"  Failed checks: {len(failed_checks)}")
+                if failed_checks:
+                    latest_failure = failed_checks[-1]
+                    print(f"  Failure type: {latest_failure.failure_type}")
+            
+        finally:
+            # Cleanup resources
+            runner._cleanup()
+        
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (AgentLoopError, AgentLoopLimitError) as e:
+        print(f"Agent error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except WorkflowRunnerError as e:
+        print(f"Workflow error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"File system error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
