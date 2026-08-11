@@ -1,13 +1,13 @@
 """Data schemas for repository operations."""
 
-from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import BaseModel
 
-@dataclass
-class RepositoryPreflightResult:
+
+class RepositoryPreflightResult(BaseModel):
     """Result of repository preflight validation.
-    
+
     Attributes:
         repo_path: Absolute path to the validated repository root.
         head_sha: Current HEAD commit SHA.
@@ -16,13 +16,12 @@ class RepositoryPreflightResult:
     head_sha: str
 
 
-@dataclass
-class RepositoryContext:
+class RepositoryContext(BaseModel):
     """Analysis context for a target repository.
-    
+
     Provides structured information about the repository structure
     and files relevant to the current issue.
-    
+
     Attributes:
         base_commit: Git commit SHA being used as the baseline.
         tracked_files: All files tracked by Git in the repository.

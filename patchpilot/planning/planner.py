@@ -10,6 +10,7 @@ from pathlib import Path
 
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan
+from patchpilot.repository.schema import RepositoryContext
 
 # Directories to ignore when scanning repository files
 IGNORED_DIRS = {
@@ -84,28 +85,28 @@ Rules:
 
 Required structure:
 
-{
+{{
   "repository_match": true,
   "repository_mismatch_reason": null,
   "relevant_files": [],
   "planned_changes": [
-    {
+    {{
       "path": "...",
       "action": "create|modify|delete",
       "description": "...",
       "acceptance_criteria": ["AC-1"]
-    }
+    }}
   ],
   "planned_tests": [
-    {
+    {{
       "command": "pytest ...",
       "purpose": "...",
       "acceptance_criteria": ["AC-1"]
-    }
+    }}
   ],
   "out_of_scope": [],
   "risk_level": "low"
-}
+}}
 """
 
 
@@ -145,11 +146,57 @@ def _extract_json(text: str) -> dict:
 
 def create_plan(
     issue: NormalizedIssue,
+    repository_context: RepositoryContext,
+    generate: Callable[[str], str],
+) -> ChangePlan:
+    """Create a change plan for the given issue and repository.
+
+    Args:
+        issue: Normalized issue to plan changes for.
+        repository_context: Repository context with file information.
+        generate: Function to generate LLM responses from prompts.
+
+    Returns:
+        Structured change plan with files, changes, tests, and risk assessment.
+    """
+    repository_context_json = json.dumps(
+        {
+            "tracked_files": repository_context.tracked_files,
+            "python_files": repository_context.python_files,
+            "test_files": repository_context.test_files,
+            "config_files": repository_context.config_files,
+            "keyword_matches": repository_context.keyword_matches,
+        },
+        indent=2,
+    )
+
+    prompt = PLANNER_PROMPT.format(
+        issue=issue.model_dump_json(indent=2),
+        repository_context=repository_context_json,
+    )
+
+    response = generate(prompt)
+
+    data = _extract_json(response)
+
+    plan = ChangePlan.model_validate(data)
+
+    # Set base_commit from repository context (not from LLM)
+    plan.base_commit = repository_context.base_commit
+
+    return plan
+
+
+def create_plan_with_path(
+    issue: NormalizedIssue,
     repo_path: str,
     generate: Callable[[str], str],
     base_commit: str = "",
 ) -> ChangePlan:
-    """Create a change plan for the given issue and repository.
+    """Create a change plan for the given issue and repository path.
+
+    This is a convenience function that creates a plan using repository path
+    instead of RepositoryContext. It's kept for backward compatibility.
 
     Args:
         issue: Normalized issue to plan changes for.
@@ -161,13 +208,13 @@ def create_plan(
         Structured change plan with files, changes, tests, and risk assessment.
     """
     repository_files = get_repository_files(repo_path)
-    repository_context = json.dumps(
+    repository_context_json = json.dumps(
         {"tracked_files": repository_files}, indent=2
     )
 
     prompt = PLANNER_PROMPT.format(
         issue=issue.model_dump_json(indent=2),
-        repository_context=repository_context,
+        repository_context=repository_context_json,
     )
 
     response = generate(prompt)

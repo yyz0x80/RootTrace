@@ -17,9 +17,11 @@ from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.planner import create_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
+from patchpilot.planning.validator import validate_plan
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.provider import LLMProvider
 from patchpilot.repository import RepositoryPreflightError, validate_repository
+from patchpilot.repository.analyzer import analyze_repository
 from patchpilot.sandbox.docker_runner import CommandResult, DockerSandbox
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
@@ -150,33 +152,34 @@ def main() -> None:
 
 def handle_prepare(args) -> None:
     """Handle the prepare subcommand workflow.
-    
+
     This function implements the prepare workflow:
     1. Load issue from file or GitHub
     2. Normalize the issue to extract structured information
-    3. Check for ambiguous points
-    4. Create a change plan
-    5. Validate the plan against scope restrictions
-    6. Output artifacts (normalized_issue.json, plan.json)
-    7. Request user approval
+    3. Repository preflight validation
+    4. Repository analysis
+    5. Create a change plan
+    6. Validate the plan against repository context
+    7. Scope gate validation
+    8. Output artifacts (normalized_issue.json, repository_context.json, plan.json)
     """
     try:
         # Step 1: Load raw issue
         raw_issue = load_issue(args.issue)
         print(f"Loaded issue from: {raw_issue.source}")
         print(f"Title: {raw_issue.title}\n")
-        
+
         # Create provider for normalization and planning
         provider = LLMProvider()
-        
+
         # Step 2: Normalize the issue
         print("Normalizing issue...")
         normalized_issue = normalize_issue(
             issue=raw_issue,
             generate=provider.generate_text,
         )
-        
-        # Step 3: Check for ambiguous points
+
+        # Check for ambiguous points
         if normalized_issue.ambiguous_points:
             print("NEEDS_CLARIFICATION\n")
             print("The following requirements are ambiguous:\n")
@@ -184,18 +187,15 @@ def handle_prepare(args) -> None:
                 print(f"{i}. {point}")
             print("\nPatchPilot will not guess product behavior.")
             sys.exit(1)
-        
+
         print("Issue normalized successfully")
         print(f"Task type: {normalized_issue.task_type}")
         print(f"Acceptance criteria: {len(normalized_issue.acceptance_criteria)}")
         print()
-        
-        # Step 4: Create change plan
-        print("Creating change plan...")
-        repo_path = Path(args.repo)
-        
-        # Validate repository
+
+        # Step 3: Repository preflight
         print("Validating repository...")
+        repo_path = Path(args.repo)
         try:
             preflight_result = validate_repository(repo_path)
             print(f"Repository validated: {preflight_result.repo_path}")
@@ -204,22 +204,49 @@ def handle_prepare(args) -> None:
         except RepositoryPreflightError as e:
             print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
-        
-        plan = create_plan(
+
+        # Step 4: Repository analysis
+        print("Analyzing repository...")
+        repository_context = analyze_repository(
+            repo=repo_path,
             issue=normalized_issue,
-            repo_path=str(repo_path),
-            generate=provider.generate_text,
             base_commit=preflight_result.head_sha,
         )
-        
+        print("Repository analysis complete:")
+        print(f"  Tracked files: {len(repository_context.tracked_files)}")
+        print(f"  Python files: {len(repository_context.python_files)}")
+        print(f"  Test files: {len(repository_context.test_files)}")
+        print(f"  Config files: {len(repository_context.config_files)}")
+        print(f"  Keyword matches: {len(repository_context.keyword_matches)}")
+        print()
+
+        # Step 5: Create change plan
+        print("Creating change plan...")
+        plan = create_plan(
+            issue=normalized_issue,
+            repository_context=repository_context,
+            generate=provider.generate_text,
+        )
+
         print(f"Plan created with {len(plan.planned_changes)} planned changes")
         print(f"Risk level: {plan.risk_level}")
         print()
-        
-        # Step 5: Check scope
+
+        # Step 6: Validate plan against repository context
+        print("Validating plan against repository context...")
+        try:
+            validation_result = validate_plan(plan, repository_context)
+        except ValueError as e:
+            print(f"Plan validation failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print("Plan validation complete")
+        print()
+
+        # Step 7: Scope gate validation
         print("Checking scope...")
-        scope_result = check_scope(plan)
-        
+        scope_result = validation_result
+
         if not scope_result.allowed:
             print("SCOPE_CHECK_FAILED\n")
             print("The following violations block execution:\n")
@@ -230,33 +257,39 @@ def handle_prepare(args) -> None:
                 for i, warning in enumerate(scope_result.warnings, start=1):
                     print(f"{i}. {warning}")
             sys.exit(1)
-        
+
         if scope_result.warnings:
             print("SCOPE_CHECK_WARNINGS\n")
             print("The following warnings were generated:\n")
             for i, warning in enumerate(scope_result.warnings, start=1):
                 print(f"{i}. {warning}")
             print()
-        
+
         print("Scope check passed")
         print()
-        
-        # Step 6: Output artifacts
+
+        # Step 8: Output artifacts
         print("Saving artifacts...")
         save_json(
             "artifacts/normalized_issue.json",
             normalized_issue.model_dump_json(indent=2),
         )
         print("Saved: artifacts/normalized_issue.json")
-        
+
+        save_json(
+            "artifacts/repository_context.json",
+            repository_context.model_dump_json(indent=2),
+        )
+        print("Saved: artifacts/repository_context.json")
+
         save_json(
             "artifacts/plan.json",
             plan.model_dump_json(indent=2),
         )
         print("Saved: artifacts/plan.json")
         print()
-        
-        # Step 7: Request user approval
+
+        # Summary
         print("PREPARE_COMPLETE\n")
         print("Summary:")
         print(f"  Task type: {normalized_issue.task_type}")
@@ -267,7 +300,7 @@ def handle_prepare(args) -> None:
         print()
         print("Review the artifacts in artifacts/ directory.")
         print("To execute this plan, run: patchpilot execute --repo <repo> --issue artifacts/normalized_issue.json --plan artifacts/plan.json")
-        
+
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

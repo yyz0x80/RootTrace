@@ -9,6 +9,7 @@ from patchpilot.planning.planner import (
     IGNORED_DIRS,
     _extract_json,
     create_plan,
+    create_plan_with_path,
     get_repository_files,
 )
 from patchpilot.planning.schema import ChangePlan, PlannedChange
@@ -19,6 +20,7 @@ from patchpilot.planning.scope_gate import (
     ScopeGateResult,
     check_scope,
 )
+from patchpilot.repository.schema import RepositoryContext
 
 
 def test_get_repository_files_basic(tmp_path):
@@ -142,7 +144,7 @@ def test_create_plan_basic():
 
     mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
 
-    plan = create_plan(issue, "/fake/path", mock_generate)
+    plan = create_plan_with_path(issue, "/fake/path", mock_generate)
 
     assert isinstance(plan, ChangePlan)
     assert plan.risk_level == "low"
@@ -161,11 +163,11 @@ def test_create_plan_includes_repository_files(tmp_path):
 
     mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": ["main.py"], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
 
-    create_plan(issue, str(tmp_path), mock_generate)
+    create_plan_with_path(issue, str(tmp_path), mock_generate)
 
     prompt = mock_generate.call_args[0][0]
     assert "main.py" in prompt
-    assert "Repository files:" in prompt
+    assert "Repository context:" in prompt
 
 
 def test_create_plan_parses_complex_response():
@@ -208,7 +210,7 @@ Here is the plan:
 """
 
     mock_generate = Mock(return_value=response)
-    plan = create_plan(issue, "/fake/path", mock_generate)
+    plan = create_plan_with_path(issue, "/fake/path", mock_generate)
 
     assert len(plan.relevant_files) == 1
     assert plan.relevant_files[0] == "src/main.py"
@@ -229,7 +231,7 @@ def test_create_plan_with_base_commit():
 
     mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
 
-    plan = create_plan(issue, "/fake/path", mock_generate, base_commit="abc123def456")
+    plan = create_plan_with_path(issue, "/fake/path", mock_generate, base_commit="abc123def456")
 
     assert plan.base_commit == "abc123def456"
     mock_generate.assert_called_once()
@@ -245,7 +247,7 @@ def test_create_plan_with_repository_mismatch():
 
     mock_generate = Mock(return_value='{"repository_match": false, "repository_mismatch_reason": "No existing Task model found in repository", "relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
 
-    plan = create_plan(issue, "/fake/path", mock_generate)
+    plan = create_plan_with_path(issue, "/fake/path", mock_generate)
 
     assert plan.repository_match is False
     assert plan.repository_mismatch_reason == "No existing Task model found in repository"
@@ -280,7 +282,7 @@ def test_create_plan_with_create_action():
 """
 
     mock_generate = Mock(return_value=response)
-    plan = create_plan(issue, "/fake/path", mock_generate)
+    plan = create_plan_with_path(issue, "/fake/path", mock_generate)
 
     assert len(plan.planned_changes) == 1
     assert plan.planned_changes[0].path == "tests/test_main.py"
@@ -316,7 +318,7 @@ def test_create_plan_with_delete_action():
 """
 
     mock_generate = Mock(return_value=response)
-    plan = create_plan(issue, "/fake/path", mock_generate)
+    plan = create_plan_with_path(issue, "/fake/path", mock_generate)
 
     assert len(plan.planned_changes) == 1
     assert plan.planned_changes[0].path == "src/deprecated.py"
@@ -673,3 +675,35 @@ def test_scope_gate_result_defaults():
     assert result.allowed is True
     assert result.violations == []
     assert result.warnings == []
+
+
+def test_create_plan_with_repository_context():
+    """Test creating a plan with RepositoryContext."""
+    issue = NormalizedIssue(
+        title="Fix bug",
+        task_type="bug",
+        problem_statement="Something is broken",
+    )
+
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["src/main.py", "src/utils.py"],
+        python_files=["src/main.py", "src/utils.py"],
+        test_files=["tests/test_main.py"],
+        config_files=["pyproject.toml"],
+        keyword_matches=["src/main.py"],
+    )
+
+    mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": ["src/main.py"], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
+
+    plan = create_plan(issue, repository_context, mock_generate)
+
+    assert isinstance(plan, ChangePlan)
+    assert plan.risk_level == "low"
+    assert plan.base_commit == "abc123"
+    mock_generate.assert_called_once()
+
+    # Verify that repository context was included in the prompt
+    prompt = mock_generate.call_args[0][0]
+    assert "src/main.py" in prompt
+    assert "tracked_files" in prompt

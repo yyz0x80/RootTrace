@@ -9,7 +9,6 @@ from pathlib import PurePosixPath
 from pydantic import BaseModel, Field
 
 from patchpilot.planning.schema import ChangePlan
-from patchpilot.repository.schema import RepositoryContext
 
 
 class ScopeGateResult(BaseModel):
@@ -41,51 +40,6 @@ DATABASE_MIGRATION_HINTS = (
     "migrations/",
     "alembic/versions/",
 )
-
-
-def validate_plan_against_repository(
-    plan: ChangePlan,
-    repository_context: RepositoryContext,
-) -> None:
-    """Validate that a change plan is consistent with the repository state.
-
-    Ensures that:
-    - The plan's repository_match flag is true
-    - Modify/delete actions reference existing tracked files
-    - Create actions do not reference existing tracked files
-
-    Args:
-        plan: The change plan to validate.
-        repository_context: Repository context with tracked files.
-
-    Raises:
-        ValueError: If the plan is inconsistent with the repository state.
-    """
-    if not plan.repository_match:
-        raise ValueError(
-            "Issue does not match repository: "
-            f"{plan.repository_mismatch_reason}"
-        )
-
-    tracked = set(repository_context.tracked_files)
-
-    for change in plan.planned_changes:
-        if change.action.value in {
-            "modify",
-            "delete",
-        }:
-            if change.path not in tracked:
-                raise ValueError(
-                    "Plan references a non-existing file "
-                    f"for {change.action.value}: "
-                    f"{change.path}"
-                )
-
-        elif change.action.value == "create" and change.path in tracked:
-            raise ValueError(
-                "Plan attempts to create an existing file: "
-                f"{change.path}"
-            )
 
 
 def check_scope(
