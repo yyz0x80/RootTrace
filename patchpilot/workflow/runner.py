@@ -18,8 +18,8 @@ CLI -> WorkflowRunner -> AgentLoop + Tools + Verifier -> Target Repository
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
+import tarfile
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -46,6 +46,25 @@ UNRECOVERABLE_FAILURE_TYPES = {
     FailureType.REQUIREMENT_AMBIGUITY,
     FailureType.SCOPE_VIOLATION,
 }
+
+
+def _run(command: list[str], cwd: Path) -> None:
+    """Run a command with subprocess, checking for success.
+
+    Args:
+        command: List of command arguments.
+        cwd: Working directory for command execution.
+
+    Raises:
+        subprocess.CalledProcessError: If command fails.
+    """
+    subprocess.run(
+        command,
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 class WorkflowRunnerError(RuntimeError):
@@ -120,15 +139,16 @@ class WorkflowRunner:
 
         This method implements the core workflow logic:
         1. Create temporary repository copy
-        2. Start Docker Sandbox
-        3. Run Coding Agent for initial modification
-        4. Run Verifier
-        5. Enter repair loop if verification fails:
+        2. Update agent loop tools to use temporary workspace
+        3. Start Docker Sandbox
+        4. Run Coding Agent for initial modification
+        5. Run Verifier
+        6. Enter repair loop if verification fails:
            - Run Repair Agent
            - Get modified files via git diff --name-only
            - Validate changes against scope gate
            - Proceed to verifier only if scope gate allows
-        6. Return final verification report
+        7. Return final verification report
 
         Args:
             issue: The original issue description
@@ -142,27 +162,30 @@ class WorkflowRunner:
             WorkflowRunnerExecutionError: If agent execution fails critically
         """
         # Step 1: Create temporary repository copy
-        self._create_temporary_workspace()
+        workspace_path = self._create_temporary_workspace()
 
-        # Step 2: Start Docker Sandbox
-        self._start_sandbox()
+        # Step 2: Update agent loop tools to use temporary workspace
+        self.agent_loop.update_workspace(self.workspace)
+
+        # Step 3: Start Docker Sandbox
+        self._start_sandbox(workspace_path)
 
         try:
-            # Step 3: Coding Agent initial modification
+            # Step 4: Coding Agent initial modification
             logger.info("Running coding agent for initial implementation")
             initial_prompt = f"Implement the following plan:\n\n{plan}"
             self.agent_loop.run(issue=initial_prompt)
 
-            # Step 4: Initial verification
+            # Step 5: Initial verification
             logger.info("Running initial verification")
             report = self.verifier()
 
-            # Step 5: Repair loop if verification failed
+            # Step 6: Repair loop if verification failed
             retry_count = 0
             previous_failure = None
 
             while not report.passed:
-                # Step 5a: Check for repeated failure (fingerprint check)
+                # Step 6a: Check for repeated failure (fingerprint check)
                 current_failure = failure_fingerprint(report)
 
                 if current_failure == previous_failure:
@@ -173,7 +196,7 @@ class WorkflowRunner:
 
                 previous_failure = current_failure
 
-                # Step 5b: Check for unrecoverable errors
+                # Step 6b: Check for unrecoverable errors
                 if report.failure_type in UNRECOVERABLE_FAILURE_TYPES:
                     logger.warning(
                         "Unrecoverable failure detected: %s. Stopping repair loop.",
@@ -181,7 +204,7 @@ class WorkflowRunner:
                     )
                     break
 
-                # Step 5c: Check repair attempt limit
+                # Step 6c: Check repair attempt limit
                 if retry_count >= MAX_REPAIR_ATTEMPTS:
                     logger.warning(
                         "Maximum repair attempts (%d) reached. Stopping repair loop.",
@@ -196,17 +219,17 @@ class WorkflowRunner:
                     MAX_REPAIR_ATTEMPTS,
                 )
 
-                # Step 5d: Build repair prompt with failure feedback
+                # Step 6d: Build repair prompt with failure feedback
                 repair_prompt = self._build_repair_prompt(
                     issue=issue,
                     plan=plan,
                     failure_report=report,
                 )
 
-                # Step 5e: Run agent with repair prompt
+                # Step 6e: Run agent with repair prompt
                 self.agent_loop.run(issue=repair_prompt)
 
-                # Step 5f: Scope gate check after repair
+                # Step 6f: Scope gate check after repair
                 scope_result = self._check_repair_scope()
                 if not scope_result.allowed:
                     logger.warning(
@@ -223,7 +246,7 @@ class WorkflowRunner:
                         report.checks[-1].summary["scope_warnings"] = scope_result.warnings
                     break
 
-                # Step 5g: Re-run verification
+                # Step 6g: Re-run verification
                 report = self.verifier()
                 report.retry_count = retry_count
 
@@ -233,61 +256,110 @@ class WorkflowRunner:
             # Cleanup: Stop sandbox and remove temporary directory
             self._cleanup()
 
-    def _create_temporary_workspace(self) -> None:
-        """Create a temporary copy of the repository workspace.
+    def _create_temporary_workspace(self) -> Path:
+        """Create a temporary copy of the repository workspace using git archive.
 
-        Creates a temporary directory and copies the repository contents
-        to provide an isolated working environment for the agent.
-        Uses TemporaryDirectory context manager for automatic cleanup.
+        Creates a temporary directory and exports the repository HEAD commit
+        using git archive to provide an isolated working environment for the agent.
+        Removes sensitive environment files and initializes a new git repository
+        for baseline tracking.
+
+        Returns:
+            Path to the temporary workspace directory
 
         Raises:
             WorkflowRunnerSetupError: If temporary workspace creation fails
         """
         try:
+            # Create temporary directory
             self._temp_dir = tempfile.TemporaryDirectory(prefix="patchpilot-")
-            temp_path = Path(self._temp_dir.name)
-            logger.info("Created temporary workspace: %s", temp_path)
+            temp_root = Path(self._temp_dir.name)
+            logger.info("Created temporary workspace: %s", temp_root)
 
-            # Copy repository contents to temporary directory
-            if self.workspace.root.exists():
-                shutil.copytree(
-                    self.workspace.root,
-                    temp_path / "repo",
-                    ignore=shutil.ignore_patterns(
-                        ".git",
-                        "__pycache__",
-                        "*.pyc",
-                        ".pytest_cache",
-                        ".mypy_cache",
-                        "*.egg-info",
-                        "build",
-                        "dist",
-                    ),
-                )
-                logger.info("Copied repository to temporary workspace")
-            else:
-                raise WorkflowRunnerSetupError(
-                    f"Source repository does not exist: {self.workspace.root}"
-                )
+            # Create workspace directory
+            workspace_path = temp_root / "repo"
+            workspace_path.mkdir()
+            archive_path = temp_root / "source.tar"
 
-        except (OSError, shutil.Error) as e:
+            # Export HEAD commit using git archive
+            logger.info("Exporting repository HEAD using git archive")
+            subprocess.run(
+                [
+                    "git",
+                    "archive",
+                    "--format=tar",
+                    "-o",
+                    str(archive_path),
+                    "HEAD",
+                ],
+                cwd=self.workspace.root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Extract archive to workspace
+            logger.info("Extracting archive to workspace")
+            with tarfile.open(archive_path) as archive:
+                archive.extractall(workspace_path, filter="data")
+
+            # Remove sensitive environment files
+            sensitive_files = [
+                ".env",
+                ".env.local",
+                ".env.production",
+            ]
+
+            for name in sensitive_files:
+                path = workspace_path / name
+                if path.exists():
+                    path.unlink()
+                    logger.info("Removed sensitive file: %s", name)
+
+            # Initialize new git repository for baseline tracking
+            logger.info("Initializing git repository in workspace")
+            _run(["git", "init", "-q"], workspace_path)
+            _run(
+                ["git", "config", "user.email", "patchpilot@local"],
+                workspace_path,
+            )
+            _run(
+                ["git", "config", "user.name", "PatchPilot"],
+                workspace_path,
+            )
+            _run(["git", "add", "-A"], workspace_path)
+            _run(
+                ["git", "commit", "-q", "-m", "PatchPilot baseline"],
+                workspace_path,
+            )
+
+            logger.info("Temporary workspace setup complete")
+
+            # Update workspace to use temporary path
+            self.workspace = Workspace(workspace_path)
+            logger.info("Workspace updated to temporary path: %s", workspace_path)
+
+            return workspace_path
+
+        except (OSError, subprocess.CalledProcessError, tarfile.TarError) as e:
             raise WorkflowRunnerSetupError(
                 f"Failed to create temporary workspace: {e}"
             ) from e
 
-    def _start_sandbox(self) -> None:
+    def _start_sandbox(self, workspace_path: Path) -> None:
         """Start the Docker sandbox for isolated execution.
 
         Initializes the DockerSandbox instance if not provided,
         then starts the container for secure command execution.
+
+        Args:
+            workspace_path: Path to the temporary workspace directory
 
         Raises:
             WorkflowRunnerSetupError: If sandbox startup fails
         """
         try:
             if self.sandbox is None:
-                # Use the temporary workspace for sandbox
-                workspace_path = self.temp_dir / "repo" if self.temp_dir else self.workspace.root
                 self.sandbox = DockerSandbox(workspace=workspace_path)
 
             self.sandbox.start()
@@ -358,15 +430,10 @@ class WorkflowRunner:
         Raises:
             WorkflowRunnerExecutionError: If git command fails
         """
-        if self.temp_dir:
-            workspace_path = self.temp_dir / "repo"
-        else:
-            workspace_path = self.workspace.root
-
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only"],
-                cwd=workspace_path,
+                cwd=self.workspace.root,
                 capture_output=True,
                 text=True,
                 timeout=30,

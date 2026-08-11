@@ -8,6 +8,7 @@ from patchpilot.models import AssistantTurn, ToolCall, ToolResult
 from patchpilot.prompts import SYSTEM_PROMPT
 from patchpilot.provider import LLMProvider
 from patchpilot.tools import ToolRegistry
+from patchpilot.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,14 @@ class AgentLoop:
         self.tools = tools
         self.max_rounds = max_rounds
         self.system_prompt = system_prompt
+
+    def update_workspace(self, workspace: Workspace) -> None:
+        """Update the workspace used by the tool registry.
+
+        Args:
+            workspace: New Workspace instance to use for path resolution
+        """
+        self.tools.update_workspace(workspace)
 
     def run(self, issue: str) -> str:
         """Run the Agent Loop until the model returns a final answer.

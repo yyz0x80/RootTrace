@@ -267,6 +267,14 @@ class ToolRegistry:
             handler=self.run_command,
         )
 
+    def update_workspace(self, workspace: Workspace) -> None:
+        """Update the workspace used by all tools.
+
+        Args:
+            workspace: New Workspace instance to use for path resolution
+        """
+        self.workspace = workspace
+
     def register_tool(
         self,
         name: str,

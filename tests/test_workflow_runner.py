@@ -348,34 +348,64 @@ class TestWorkflowRunnerSetup:
     """Tests for WorkflowRunner setup and cleanup methods."""
 
     def test_create_temporary_workspace(self):
-        """Test temporary workspace creation."""
-        mock_agent_loop = Mock(spec=AgentLoop)
-        mock_verifier = Mock()
-        mock_workspace = Mock(spec=Workspace)
-        mock_workspace.root = Path("/fake/repo")
+        """Test temporary workspace creation using git archive with real git repo."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Create a real git repository
+            source_repo = Path(tmp_dir) / "source"
+            source_repo.mkdir()
+            
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=source_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=source_repo, check=True, capture_output=True)
+            
+            # Create a test file and commit
+            (source_repo / "test.py").write_text("print('hello')")
+            subprocess.run(["git", "add", "."], cwd=source_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=source_repo, check=True, capture_output=True)
+            
+            # Create a sensitive .env file
+            (source_repo / ".env").write_text("SECRET_KEY=test")
+            subprocess.run(["git", "add", "."], cwd=source_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "Add env file"], cwd=source_repo, check=True, capture_output=True)
 
-        runner = WorkflowRunner(
-            agent_loop=mock_agent_loop,
-            verifier=mock_verifier,
-            workspace=mock_workspace,
-        )
+            # Setup runner with real repository
+            mock_agent_loop = Mock(spec=AgentLoop)
+            mock_verifier = Mock()
+            mock_workspace = Mock(spec=Workspace)
+            mock_workspace.root = source_repo
 
-        with patch('patchpilot.workflow.runner.tempfile.TemporaryDirectory') as mock_temp_dir, \
-             patch('patchpilot.workflow.runner.shutil.copytree') as mock_copytree, \
-             patch.object(Path, 'exists', return_value=True):
+            runner = WorkflowRunner(
+                agent_loop=mock_agent_loop,
+                verifier=mock_verifier,
+                workspace=mock_workspace,
+            )
 
-            mock_temp_instance = Mock()
-            mock_temp_instance.name = "/tmp/patchpilot-test"
-            mock_temp_dir.return_value = mock_temp_instance
-
+            # Run the workspace creation
             runner._create_temporary_workspace()
 
-            assert runner.temp_dir == Path("/tmp/patchpilot-test")
-            mock_temp_dir.assert_called_once_with(prefix="patchpilot-")
-            mock_copytree.assert_called_once()
+            # Verify temporary directory was created
+            assert runner.temp_dir is not None
+            workspace_path = runner.temp_dir / "repo"
+            
+            # Verify workspace exists and has files
+            assert workspace_path.exists()
+            assert (workspace_path / "test.py").exists()
+            
+            # Verify .env was removed
+            assert not (workspace_path / ".env").exists()
+            
+            # Verify git repository was initialized in workspace
+            git_config = workspace_path / ".git"
+            assert git_config.exists()
+            
+            # Verify we can get git log (means repo is properly initialized)
+            result = subprocess.run(["git", "log", "--oneline"], cwd=workspace_path, capture_output=True, text=True, check=False)
+            assert result.returncode == 0
+            assert "PatchPilot baseline" in result.stdout
 
     def test_create_temporary_workspace_missing_source(self):
-        """Test that missing source repository raises error."""
+        """Test that missing source repository raises error when git archive fails."""
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -387,10 +417,19 @@ class TestWorkflowRunnerSetup:
             workspace=mock_workspace,
         )
 
-        with (
-            patch.object(Path, 'exists', return_value=False),
-            pytest.raises(WorkflowRunnerSetupError, match="does not exist"),
-        ):
+        with patch('patchpilot.workflow.runner.tempfile.TemporaryDirectory') as mock_temp_dir, \
+             patch('patchpilot.workflow.runner.subprocess.run') as mock_subprocess_run, \
+             pytest.raises(WorkflowRunnerSetupError, match="Failed to create temporary workspace"):
+
+            mock_temp_instance = Mock()
+            mock_temp_instance.name = "/tmp/patchpilot-test"
+            mock_temp_dir.return_value = mock_temp_instance
+
+            # Mock git archive to fail (simulating missing repository)
+            mock_subprocess_run.side_effect = subprocess.CalledProcessError(
+                1, "git", stderr="fatal: not a git repository"
+            )
+
             runner._create_temporary_workspace()
 
     def test_start_sandbox_when_provided(self):
@@ -407,7 +446,7 @@ class TestWorkflowRunnerSetup:
             sandbox=mock_sandbox,
         )
 
-        runner._start_sandbox()
+        runner._start_sandbox(Path("/fake/workspace"))
 
         mock_sandbox.start.assert_called_once()
 
@@ -432,7 +471,7 @@ class TestWorkflowRunnerSetup:
             mock_sandbox_instance = Mock()
             mock_docker_sandbox.return_value = mock_sandbox_instance
 
-            runner._start_sandbox()
+            runner._start_sandbox(Path("/fake/workspace"))
 
             mock_docker_sandbox.assert_called_once()
             mock_sandbox_instance.start.assert_called_once()
