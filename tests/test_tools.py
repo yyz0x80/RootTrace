@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from patchpilot.tools import (
     SearchCodeInput,
     ToolDefinition,
     ToolRegistry,
+    WorkspaceChange,
+    _get_workspace_changes,
     generate_json_schema,
 )
 from patchpilot.workspace import Workspace
@@ -479,3 +482,158 @@ class TestToolSchema:
         schema_names = {schema["function"]["name"] for schema in schemas}
         handler_names = set(tool_registry._tool_handlers.keys())
         assert schema_names == handler_names, "Schema names and handler names don't match"
+
+
+    """Tests for _get_workspace_changes function"""
+
+    def test_get_workspace_changes_modified_files(self, temp_workspace):
+        """Test detecting modified files"""
+        # Create a test file and commit it
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("original content\n")
+
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "add", "test.py"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Modify the file
+        test_file.write_text("modified content\n")
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        assert len(changes) == 1
+        assert changes[0].path == "test.py"
+        assert changes[0].action == "modify"
+
+    def test_get_workspace_changes_new_files(self, temp_workspace):
+        """Test detecting new untracked files"""
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit", "--allow-empty"], cwd=temp_workspace.root, check=True)
+
+        # Create a new file
+        test_file = temp_workspace.root / "new_file.py"
+        test_file.write_text("new content\n")
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        assert len(changes) == 1
+        assert changes[0].path == "new_file.py"
+        assert changes[0].action == "create"
+
+    def test_get_workspace_changes_deleted_files(self, temp_workspace):
+        """Test detecting deleted files"""
+        # Create a test file and commit it
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("original content\n")
+
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "add", "test.py"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Delete the file
+        test_file.unlink()
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        assert len(changes) == 1
+        assert changes[0].path == "test.py"
+        assert changes[0].action == "delete"
+
+    def test_get_workspace_changes_multiple_changes(self, temp_workspace):
+        """Test detecting multiple file changes"""
+        # Create test files and commit them
+        file1 = temp_workspace.root / "file1.py"
+        file2 = temp_workspace.root / "file2.py"
+        file1.write_text("content1\n")
+        file2.write_text("content2\n")
+
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "add", "."], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Modify one file, delete another, create a new one
+        file1.write_text("modified content\n")
+        file2.unlink()
+        file3 = temp_workspace.root / "file3.py"
+        file3.write_text("new content\n")
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        assert len(changes) == 3
+        paths = {change.path for change in changes}
+        actions = {change.path: change.action for change in changes}
+
+        assert "file1.py" in paths
+        assert "file2.py" in paths
+        assert "file3.py" in paths
+        assert actions["file1.py"] == "modify"
+        assert actions["file2.py"] == "delete"
+        assert actions["file3.py"] == "create"
+
+    def test_get_workspace_changes_empty_workspace(self, temp_workspace):
+        """Test that empty workspace returns no changes"""
+        # Initialize git repo with no changes
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit", "--allow-empty"], cwd=temp_workspace.root, check=True)
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        assert len(changes) == 0
+
+    def test_get_workspace_changes_rejects_rename(self, temp_workspace):
+        """Test that file renames are rejected"""
+        # Create a test file and commit it
+        test_file = temp_workspace.root / "old_name.py"
+        test_file.write_text("content\n")
+
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "add", "old_name.py"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Rename the file using git mv
+        subprocess.run(["git", "mv", "old_name.py", "new_name.py"], cwd=temp_workspace.root, check=True)
+
+        # Get workspace changes should raise RuntimeError
+        with pytest.raises(RuntimeError, match="File rename is not supported"):
+            _get_workspace_changes(temp_workspace.root)
+
+
+class TestWorkspaceChange:
+    """Tests for WorkspaceChange dataclass"""
+
+    def test_workspace_change_creation(self):
+        """Test creating a WorkspaceChange instance"""
+        change = WorkspaceChange(path="test.py", action="modify")
+        assert change.path == "test.py"
+        assert change.action == "modify"
+
+    def test_workspace_change_equality(self):
+        """Test WorkspaceChange equality"""
+        change1 = WorkspaceChange(path="test.py", action="modify")
+        change2 = WorkspaceChange(path="test.py", action="modify")
+        change3 = WorkspaceChange(path="test.py", action="create")
+
+        assert change1 == change2
+        assert change1 != change3

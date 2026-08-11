@@ -790,8 +790,8 @@ class TestWorkflowRunnerScopeGate:
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1
 
-    def test_get_modified_files_calls_git_diff(self):
-        """Test that _get_modified_files correctly calls git diff."""
+    def test_get_modified_files_calls_git_status(self):
+        """Test that _get_modified_files correctly calls git status --porcelain."""
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -803,24 +803,17 @@ class TestWorkflowRunnerScopeGate:
             workspace=mock_workspace,
         )
 
-        with patch('patchpilot.workflow.runner.subprocess.run') as mock_subprocess:
-            mock_subprocess.return_value = subprocess.CompletedProcess(
-                args=["git", "diff", "--name-only"],
-                returncode=0,
-                stdout="src/file1.py\nsrc/file2.py\n",
-                stderr="",
-            )
+        with patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+            from patchpilot.tools import WorkspaceChange
+            mock_get_changes.return_value = [
+                WorkspaceChange(path="src/file1.py", action="modify"),
+                WorkspaceChange(path="src/file2.py", action="modify"),
+            ]
 
             modified_files = runner._get_modified_files()
 
             assert modified_files == ["src/file1.py", "src/file2.py"]
-            mock_subprocess.assert_called_once()
-            call_args = mock_subprocess.call_args
-            assert call_args[0][0] == ["git", "diff", "--name-only"]
-            assert call_args[1]["cwd"] == Path("/fake/repo")
-            assert call_args[1]["capture_output"] is True
-            assert call_args[1]["text"] is True
-            assert call_args[1]["timeout"] == 30
+            mock_get_changes.assert_called_once_with(Path("/fake/repo"))
 
 
 class TestConstants:

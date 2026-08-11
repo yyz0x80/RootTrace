@@ -20,6 +20,7 @@ import difflib
 import shlex
 import subprocess
 from dataclasses import MISSING, dataclass, fields
+from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolResult
@@ -32,6 +33,80 @@ class CommandRunnerProtocol(Protocol):
     def run(self, command: str, timeout_seconds: int) -> Any:
         """Execute a command and return a result with stdout, stderr, exit_code."""
         ...
+
+
+@dataclass
+class WorkspaceChange:
+    """Represents a single file change in the workspace.
+
+    Attributes:
+        path: Relative path to the changed file
+        action: Type of change - 'create', 'modify', or 'delete'
+    """
+    path: str
+    action: str
+
+
+def _get_workspace_changes(workspace: Path) -> list[WorkspaceChange]:
+    """Get all workspace changes using git status --porcelain.
+
+    Parses git status output to identify created, modified, and deleted files.
+    File renames are not supported in the current MVP.
+
+    Args:
+        workspace: Path to the workspace directory
+
+    Returns:
+        List of WorkspaceChange objects representing each file change
+
+    Raises:
+        RuntimeError: If file rename is detected (not supported in MVP)
+        subprocess.CalledProcessError: If git command fails
+    """
+    result = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+        ],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    changes = []
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+
+        status = line[:2]
+        path = line[3:].strip()
+
+        # MVP does not support file renames
+        if "R" in status:
+            raise RuntimeError(
+                "File rename is not supported by the current PatchPilot MVP."
+            )
+
+        if status == "??":
+            action = "create"
+        elif "D" in status:
+            action = "delete"
+        elif "A" in status:
+            action = "create"
+        else:
+            action = "modify"
+
+        changes.append(
+            WorkspaceChange(
+                path=path,
+                action=action,
+            )
+        )
+
+    return changes
 
 
 @dataclass

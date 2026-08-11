@@ -29,6 +29,7 @@ from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import ScopeGateResult, check_scope
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
+from patchpilot.tools import _get_workspace_changes
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workspace import Workspace
@@ -419,10 +420,10 @@ class WorkflowRunner:
         )
 
     def _get_modified_files(self) -> list[str]:
-        """Get list of modified files using git diff --name-only.
+        """Get list of modified files using git status --porcelain.
 
-        Runs git diff --name-only in the workspace to identify which files
-        have been modified by the agent.
+        Runs git status --porcelain in the workspace to identify which files
+        have been modified, created, or deleted by the agent.
 
         Returns:
             List of modified file paths relative to repository root
@@ -431,34 +432,21 @@ class WorkflowRunner:
             WorkflowRunnerExecutionError: If git command fails
         """
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only"],
-                cwd=self.workspace.root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
+            changes = _get_workspace_changes(self.workspace.root)
 
-            if result.returncode != 0:
-                raise WorkflowRunnerExecutionError(
-                    f"git diff --name-only failed: {result.stderr}"
-                )
+            # Extract file paths from workspace changes
+            modified_files = [change.path for change in changes]
 
-            modified_files = [
-                line.strip() for line in result.stdout.splitlines() if line.strip()
-            ]
-
-            logger.info("Modified files detected: %s", modified_files)
+            logger.info("Workspace changes detected: %s", modified_files)
             return modified_files
 
-        except subprocess.TimeoutExpired as e:
+        except RuntimeError as e:
             raise WorkflowRunnerExecutionError(
-                f"git diff --name-only timed out: {e}"
+                f"Failed to get workspace changes: {e}"
             ) from e
-        except (OSError, subprocess.SubprocessError) as e:
+        except subprocess.CalledProcessError as e:
             raise WorkflowRunnerExecutionError(
-                f"Failed to run git diff --name-only: {e}"
+                f"git status --porcelain failed: {e}"
             ) from e
 
     def _check_repair_scope(self) -> ScopeGateResult:
