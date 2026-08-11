@@ -209,6 +209,7 @@ def handle_prepare(args) -> None:
             issue=normalized_issue,
             repo_path=str(repo_path),
             generate=provider.generate_text,
+            base_commit=preflight_result.head_sha,
         )
         
         print(f"Plan created with {len(plan.planned_changes)} planned changes")
@@ -329,6 +330,7 @@ def handle_run(args) -> None:
             issue=normalized_issue,
             repo_path=str(repo_path),
             generate=provider.generate_text,
+            base_commit=preflight_result.head_sha,
         )
         
         # Save plan to artifacts

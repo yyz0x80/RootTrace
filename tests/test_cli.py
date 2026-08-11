@@ -118,6 +118,8 @@ def test_main_without_ambiguous_points_proceeds(
         planned_tests=[],
         out_of_scope=[],
         risk_level="low",
+        base_commit="",
+        repository_match=True,
     )
 
     # Mock check_scope to return allowed

@@ -412,7 +412,8 @@ class WorkflowRunner:
         # as the planned changes with minimal metadata
         planned_changes = [
             PlannedChange(
-                file=file,
+                path=file,
+                action="modify",
                 description="Modified during repair attempt",
                 acceptance_criteria=[],
             )

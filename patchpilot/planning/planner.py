@@ -64,24 +64,37 @@ Create a minimal file-level implementation plan.
 
 Rules:
 
-1. Only use files that actually exist in repository_files,
-   unless a new file is clearly required.
-2. Every planned change must be related to an acceptance criterion.
-3. Do not expand product requirements.
-4. Do not modify unrelated modules.
-5. Prefer the smallest possible change.
-6. Do not modify .env.
-7. Do not modify CI/CD configuration.
-8. Identify anything intentionally out of scope.
-9. Return JSON only.
+1. Repository context is authoritative.
+2. action="modify" may only refer to an existing repository file.
+3. action="delete" may only refer to an existing repository file.
+4. action="create" may refer to a file that does not yet exist.
+5. Never mark an existing file as create.
+6. New files are allowed only when necessary for the Issue.
+7. Do not invent an existing file path.
+8. Do not use create as a workaround for a missing core subsystem.
+9. Every planned change must identify one concrete path.
+10. Every planned change must be related to an acceptance criterion.
+11. Do not expand product requirements.
+12. Do not modify unrelated modules.
+13. Prefer the smallest possible change.
+14. Do not modify .env.
+15. Do not modify CI/CD configuration.
+16. Identify anything intentionally out of scope.
+17. Return JSON only.
+
+If the repository does not contain the core functionality needed for the Issue,
+set repository_match to false and provide a concise repository_mismatch_reason.
 
 Required structure:
 
 {
+  "repository_match": true,
+  "repository_mismatch_reason": null,
   "relevant_files": [],
   "planned_changes": [
     {
-      "file": "...",
+      "path": "...",
+      "action": "create|modify|delete",
       "description": "...",
       "acceptance_criteria": ["AC-1"]
     }
@@ -137,6 +150,7 @@ def create_plan(
     issue: NormalizedIssue,
     repo_path: str,
     generate: Callable[[str], str],
+    base_commit: str = "",
 ) -> ChangePlan:
     """Create a change plan for the given issue and repository.
 
@@ -144,6 +158,7 @@ def create_plan(
         issue: Normalized issue to plan changes for.
         repo_path: Path to the target repository.
         generate: Function to generate LLM responses from prompts.
+        base_commit: Current Git commit SHA to use as the plan's base.
 
     Returns:
         Structured change plan with files, changes, tests, and risk assessment.
@@ -166,4 +181,9 @@ Repository files:
 
     data = _extract_json(response)
 
-    return ChangePlan.model_validate(data)
+    plan = ChangePlan.model_validate(data)
+    
+    # Set base_commit from repository context (not from LLM)
+    plan.base_commit = base_commit
+
+    return plan

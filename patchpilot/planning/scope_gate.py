@@ -60,7 +60,7 @@ def check_scope(
     warnings = []
 
     planned_files = [
-        change.file
+        change.path
         for change in plan.planned_changes
     ]
 

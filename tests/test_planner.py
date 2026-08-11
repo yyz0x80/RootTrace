@@ -140,7 +140,7 @@ def test_create_plan_basic():
         problem_statement="Something is broken",
     )
 
-    mock_generate = Mock(return_value='{"relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
+    mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
 
     plan = create_plan(issue, "/fake/path", mock_generate)
 
@@ -159,7 +159,7 @@ def test_create_plan_includes_repository_files(tmp_path):
         problem_statement="Need a new feature",
     )
 
-    mock_generate = Mock(return_value='{"relevant_files": ["main.py"], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
+    mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": ["main.py"], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
 
     create_plan(issue, str(tmp_path), mock_generate)
 
@@ -184,10 +184,12 @@ Here is the plan:
 
 ```json
 {
+  "repository_match": true,
   "relevant_files": ["src/main.py"],
   "planned_changes": [
     {
-      "file": "src/main.py",
+      "path": "src/main.py",
+      "action": "modify",
       "description": "Refactor function",
       "acceptance_criteria": ["AC-1"]
     }
@@ -211,9 +213,114 @@ Here is the plan:
     assert len(plan.relevant_files) == 1
     assert plan.relevant_files[0] == "src/main.py"
     assert len(plan.planned_changes) == 1
-    assert plan.planned_changes[0].file == "src/main.py"
+    assert plan.planned_changes[0].path == "src/main.py"
+    assert plan.planned_changes[0].action == "modify"
     assert len(plan.planned_tests) == 1
     assert plan.risk_level == "medium"
+
+
+def test_create_plan_with_base_commit():
+    """Test that base_commit is set from repository context."""
+    issue = NormalizedIssue(
+        title="Fix bug",
+        task_type="bug",
+        problem_statement="Something is broken",
+    )
+
+    mock_generate = Mock(return_value='{"repository_match": true, "relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
+
+    plan = create_plan(issue, "/fake/path", mock_generate, base_commit="abc123def456")
+
+    assert plan.base_commit == "abc123def456"
+    mock_generate.assert_called_once()
+
+
+def test_create_plan_with_repository_mismatch():
+    """Test that repository mismatch is handled correctly."""
+    issue = NormalizedIssue(
+        title="Add Task feature",
+        task_type="feature",
+        problem_statement="Need Task model",
+    )
+
+    mock_generate = Mock(return_value='{"repository_match": false, "repository_mismatch_reason": "No existing Task model found in repository", "relevant_files": [], "planned_changes": [], "planned_tests": [], "out_of_scope": [], "risk_level": "low"}')
+
+    plan = create_plan(issue, "/fake/path", mock_generate)
+
+    assert plan.repository_match is False
+    assert plan.repository_mismatch_reason == "No existing Task model found in repository"
+
+
+def test_create_plan_with_create_action():
+    """Test that create action is accepted for new files."""
+    issue = NormalizedIssue(
+        title="Add tests",
+        task_type="test",
+        problem_statement="Need tests",
+    )
+
+    response = """
+```json
+{
+  "repository_match": true,
+  "relevant_files": ["src/main.py"],
+  "planned_changes": [
+    {
+      "path": "tests/test_main.py",
+      "action": "create",
+      "description": "Add unit tests",
+      "acceptance_criteria": []
+    }
+  ],
+  "planned_tests": [],
+  "out_of_scope": [],
+  "risk_level": "low"
+}
+```
+"""
+
+    mock_generate = Mock(return_value=response)
+    plan = create_plan(issue, "/fake/path", mock_generate)
+
+    assert len(plan.planned_changes) == 1
+    assert plan.planned_changes[0].path == "tests/test_main.py"
+    assert plan.planned_changes[0].action == "create"
+
+
+def test_create_plan_with_delete_action():
+    """Test that delete action is accepted."""
+    issue = NormalizedIssue(
+        title="Remove deprecated",
+        task_type="refactor",
+        problem_statement="Remove deprecated code",
+    )
+
+    response = """
+```json
+{
+  "repository_match": true,
+  "relevant_files": ["src/deprecated.py"],
+  "planned_changes": [
+    {
+      "path": "src/deprecated.py",
+      "action": "delete",
+      "description": "Remove deprecated module",
+      "acceptance_criteria": []
+    }
+  ],
+  "planned_tests": [],
+  "out_of_scope": [],
+  "risk_level": "low"
+}
+```
+"""
+
+    mock_generate = Mock(return_value=response)
+    plan = create_plan(issue, "/fake/path", mock_generate)
+
+    assert len(plan.planned_changes) == 1
+    assert plan.planned_changes[0].path == "src/deprecated.py"
+    assert plan.planned_changes[0].action == "delete"
 
 
 def test_ignored_dirs_constant():
@@ -233,7 +340,8 @@ def test_check_scope_allowed_plan():
         relevant_files=["src/main.py", "src/utils.py"],
         planned_changes=[
             PlannedChange(
-                file="src/main.py",
+                path="src/main.py",
+                action="modify",
                 description="Fix bug",
                 acceptance_criteria=["AC-1"],
             )
@@ -256,7 +364,8 @@ def test_check_scope_too_many_files():
         relevant_files=[f"file{i}.py" for i in range(10)],
         planned_changes=[
             PlannedChange(
-                file=f"file{i}.py",
+                path=f"file{i}.py",
+                action="modify",
                 description="Change",
                 acceptance_criteria=[],
             )
@@ -280,7 +389,8 @@ def test_check_scope_forbidden_env_file():
         relevant_files=[".env"],
         planned_changes=[
             PlannedChange(
-                file=".env",
+                path=".env",
+                action="modify",
                 description="Update config",
                 acceptance_criteria=[],
             )
@@ -304,7 +414,8 @@ def test_check_scope_forbidden_cicd_files():
         relevant_files=[".github/workflows/test.yml"],
         planned_changes=[
             PlannedChange(
-                file=".github/workflows/test.yml",
+                path=".github/workflows/test.yml",
+                action="modify",
                 description="Update workflow",
                 acceptance_criteria=[],
             )
@@ -327,7 +438,8 @@ def test_check_scope_database_migration():
         relevant_files=["migrations/001_initial.py"],
         planned_changes=[
             PlannedChange(
-                file="migrations/001_initial.py",
+                path="migrations/001_initial.py",
+                action="modify",
                 description="Add migration",
                 acceptance_criteria=[],
             )
@@ -350,7 +462,8 @@ def test_check_scope_alembic_migration():
         relevant_files=["alembic/versions/1234_migration.py"],
         planned_changes=[
             PlannedChange(
-                file="alembic/versions/1234_migration.py",
+                path="alembic/versions/1234_migration.py",
+                action="modify",
                 description="Add alembic migration",
                 acceptance_criteria=[],
             )
@@ -373,12 +486,14 @@ def test_check_scope_file_not_in_relevant():
         relevant_files=["src/main.py"],
         planned_changes=[
             PlannedChange(
-                file="src/main.py",
+                path="src/main.py",
+                action="modify",
                 description="Fix bug",
                 acceptance_criteria=[],
             ),
             PlannedChange(
-                file="src/unrelated.py",
+                path="src/unrelated.py",
+                action="modify",
                 description="Change unrelated file",
                 acceptance_criteria=[],
             ),
@@ -403,7 +518,8 @@ def test_check_scope_high_risk_blocked():
         relevant_files=["src/main.py"],
         planned_changes=[
             PlannedChange(
-                file="src/main.py",
+                path="src/main.py",
+                action="modify",
                 description="Risky change",
                 acceptance_criteria=[],
             )
@@ -426,12 +542,14 @@ def test_check_scope_multiple_violations():
         relevant_files=[".env", ".github/workflows/test.yml"],
         planned_changes=[
             PlannedChange(
-                file=".env",
+                path=".env",
+                action="modify",
                 description="Change env",
                 acceptance_criteria=[],
             ),
             PlannedChange(
-                file=".github/workflows/test.yml",
+                path=".github/workflows/test.yml",
+                action="modify",
                 description="Change CI",
                 acceptance_criteria=[],
             ),
@@ -454,12 +572,14 @@ def test_check_scope_duplicate_files():
         relevant_files=["src/main.py"],
         planned_changes=[
             PlannedChange(
-                file="src/main.py",
+                path="src/main.py",
+                action="modify",
                 description="First change",
                 acceptance_criteria=[],
             ),
             PlannedChange(
-                file="src/main.py",
+                path="src/main.py",
+                action="modify",
                 description="Second change",
                 acceptance_criteria=[],
             ),
@@ -482,7 +602,8 @@ def test_check_scope_custom_max_files():
         relevant_files=[f"file{i}.py" for i in range(3)],
         planned_changes=[
             PlannedChange(
-                file=f"file{i}.py",
+                path=f"file{i}.py",
+                action="modify",
                 description="Change",
                 acceptance_criteria=[],
             )

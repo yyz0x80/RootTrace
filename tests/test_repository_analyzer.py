@@ -3,8 +3,6 @@
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.repository.analyzer import _extract_keywords, analyze_repository
 from patchpilot.repository.schema import RepositoryContext
