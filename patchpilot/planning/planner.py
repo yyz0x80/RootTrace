@@ -58,32 +58,29 @@ def get_repository_files(repo_path: str) -> list[str]:
 
 
 PLANNER_PROMPT = """
-You are the Change Planner of PatchPilot.
+You are creating a scoped implementation plan.
 
-Create a minimal file-level implementation plan.
+Issue:
+{issue}
+
+Repository context:
+{repository_context}
 
 Rules:
 
-1. Repository context is authoritative.
-2. action="modify" may only refer to an existing repository file.
-3. action="delete" may only refer to an existing repository file.
-4. action="create" may refer to a file that does not yet exist.
-5. Never mark an existing file as create.
-6. New files are allowed only when necessary for the Issue.
-7. Do not invent an existing file path.
-8. Do not use create as a workaround for a missing core subsystem.
-9. Every planned change must identify one concrete path.
-10. Every planned change must be related to an acceptance criterion.
-11. Do not expand product requirements.
-12. Do not modify unrelated modules.
-13. Prefer the smallest possible change.
-14. Do not modify .env.
-15. Do not modify CI/CD configuration.
-16. Identify anything intentionally out of scope.
-17. Return JSON only.
-
-If the repository does not contain the core functionality needed for the Issue,
-set repository_match to false and provide a concise repository_mismatch_reason.
+1. The repository context is authoritative.
+2. Never invent existing file paths.
+3. For action="modify" or action="delete",
+   the file must already exist in tracked_files.
+4. action="create" may reference a file that does not yet exist.
+5. New files are allowed only when necessary to implement the issue.
+6. If the issue clearly assumes an existing component but no such
+   component can be found in the repository, do not create the whole
+   subsystem from scratch.
+7. In that case set:
+   repository_match=false
+   and explain repository_mismatch_reason.
+8. Stay within the requested issue scope.
 
 Required structure:
 
@@ -164,25 +161,21 @@ def create_plan(
         Structured change plan with files, changes, tests, and risk assessment.
     """
     repository_files = get_repository_files(repo_path)
+    repository_context = json.dumps(
+        {"tracked_files": repository_files}, indent=2
+    )
 
-    prompt = f"""
-{PLANNER_PROMPT}
-
-Normalized issue:
-
-{issue.model_dump_json(indent=2)}
-
-Repository files:
-
-{json.dumps(repository_files, indent=2)}
-"""
+    prompt = PLANNER_PROMPT.format(
+        issue=issue.model_dump_json(indent=2),
+        repository_context=repository_context,
+    )
 
     response = generate(prompt)
 
     data = _extract_json(response)
 
     plan = ChangePlan.model_validate(data)
-    
+
     # Set base_commit from repository context (not from LLM)
     plan.base_commit = base_commit
 
