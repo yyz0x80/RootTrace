@@ -90,6 +90,7 @@ class TestWorkflowRunnerExecute:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is True
@@ -140,6 +141,7 @@ class TestWorkflowRunnerExecute:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is True
@@ -205,6 +207,7 @@ class TestWorkflowRunnerExecute:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is False
@@ -258,6 +261,7 @@ class TestWorkflowRunnerExecute:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is False
@@ -336,6 +340,7 @@ class TestWorkflowRunnerExecute:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is False
@@ -633,6 +638,7 @@ class TestRunWorkflow:
         mock_runner_instance.execute.assert_called_once_with(
             issue="Fix the bug",
             plan="Implement the fix",
+            change_plan=None,
         )
 
 
@@ -683,6 +689,7 @@ class TestWorkflowRunnerScopeGate:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is True
@@ -732,6 +739,7 @@ class TestWorkflowRunnerScopeGate:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is False
@@ -783,6 +791,7 @@ class TestWorkflowRunnerScopeGate:
             result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
+                change_plan=None,
             )
 
         assert result.passed is False

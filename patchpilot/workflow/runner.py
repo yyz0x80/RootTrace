@@ -26,7 +26,11 @@ from pathlib import Path
 
 from patchpilot.agent_loop import AgentLoop
 from patchpilot.planning.schema import ChangePlan, PlannedChange
-from patchpilot.planning.scope_gate import ScopeGateResult, check_scope
+from patchpilot.planning.scope_gate import (
+    ScopeGateResult,
+    check_scope,
+    validate_actual_changes,
+)
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.tools import _get_workspace_changes
@@ -135,6 +139,7 @@ class WorkflowRunner:
         self,
         issue: str,
         plan: str,
+        change_plan: ChangePlan | None = None,
     ) -> VerificationReport:
         """Execute the complete workflow from issue to verified patch.
 
@@ -143,17 +148,19 @@ class WorkflowRunner:
         2. Update agent loop tools to use temporary workspace
         3. Start Docker Sandbox
         4. Run Coding Agent for initial modification
-        5. Run Verifier
-        6. Enter repair loop if verification fails:
+        5. Runtime scope validation against approved plan
+        6. Run Verifier
+        7. Enter repair loop if verification fails:
            - Run Repair Agent
            - Get modified files via git diff --name-only
            - Validate changes against scope gate
            - Proceed to verifier only if scope gate allows
-        7. Return final verification report
+        8. Return final verification report
 
         Args:
             issue: The original issue description
             plan: The approved change plan for the agent to follow
+            change_plan: Optional ChangePlan object for runtime scope validation
 
         Returns:
             VerificationReport containing the final verification results
@@ -177,11 +184,24 @@ class WorkflowRunner:
             initial_prompt = f"Implement the following plan:\n\n{plan}"
             self.agent_loop.run(issue=initial_prompt)
 
-            # Step 5: Initial verification
+            # Step 5: Runtime scope validation against approved plan
+            if change_plan is not None:
+                logger.info("Running runtime scope validation")
+                try:
+                    actual_changes = _get_workspace_changes(self.workspace.root)
+                    validate_actual_changes(change_plan, actual_changes)
+                    logger.info("Runtime scope validation passed")
+                except RuntimeError as e:
+                    logger.error("Runtime scope validation failed: %s", e)
+                    raise WorkflowRunnerExecutionError(
+                        f"Runtime scope validation failed: {e}"
+                    ) from e
+
+            # Step 6: Initial verification
             logger.info("Running initial verification")
             report = self.verifier()
 
-            # Step 6: Repair loop if verification failed
+            # Step 7: Repair loop if verification failed
             retry_count = 0
             previous_failure = None
 
@@ -527,6 +547,7 @@ def run_workflow(
     issue: str,
     plan: str,
     sandbox: DockerSandbox | None = None,
+    change_plan: ChangePlan | None = None,
 ) -> VerificationReport:
     """Convenience function to run the complete workflow with default configuration.
 
@@ -540,6 +561,7 @@ def run_workflow(
         issue: The original issue description
         plan: The approved change plan for the agent to follow
         sandbox: Optional DockerSandbox instance (created if None)
+        change_plan: Optional ChangePlan object for runtime scope validation
 
     Returns:
         VerificationReport containing the final verification results
@@ -558,4 +580,5 @@ def run_workflow(
     return runner.execute(
         issue=issue,
         plan=plan,
+        change_plan=change_plan,
     )

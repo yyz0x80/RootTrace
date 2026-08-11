@@ -1,7 +1,8 @@
 """Scope Gate module for validating ChangePlan safety and compliance.
 
 This module provides functionality to validate change plans against security
-and scope restrictions before execution.
+and scope restrictions before execution, as well as runtime validation of
+actual changes against approved plans.
 """
 
 from pathlib import PurePosixPath
@@ -9,6 +10,7 @@ from pathlib import PurePosixPath
 from pydantic import BaseModel, Field
 
 from patchpilot.planning.schema import ChangePlan
+from patchpilot.tools import WorkspaceChange
 
 
 class ScopeGateResult(BaseModel):
@@ -114,3 +116,67 @@ def check_scope(
         violations=violations,
         warnings=warnings,
     )
+
+
+def validate_actual_changes(
+    plan: ChangePlan,
+    actual_changes: list[WorkspaceChange],
+) -> None:
+    """Validate actual workspace changes against the approved plan.
+
+    This function enforces runtime scope validation by comparing the actual
+    changes made by the agent against the approved change plan. It ensures that:
+
+    1. Forbidden files (like .env) are never modified
+    2. CI/CD workflows are never modified
+    3. All changed files were in the approved plan
+    4. The action type matches what was approved
+
+    Args:
+        plan: The approved ChangePlan containing planned changes
+        actual_changes: List of WorkspaceChange objects representing actual changes
+
+    Raises:
+        RuntimeError: If any security violation is detected:
+            - .env modification attempt
+            - CI workflow modification attempt
+            - File modification outside approved plan
+            - Action type mismatch between plan and actual change
+    """
+    # Build a lookup of planned changes for quick validation
+    planned = {
+        change.path: change.action.value
+        for change in plan.planned_changes
+    }
+
+    for actual in actual_changes:
+        # .env files are always forbidden
+        if actual.path == ".env":
+            raise RuntimeError(
+                "Modification of .env is forbidden."
+            )
+
+        # CI workflow modifications are always forbidden
+        if actual.path.startswith(".github/workflows/"):
+            raise RuntimeError(
+                "CI workflow modification is forbidden."
+            )
+
+        # Check if the file was in the approved plan
+        expected_action = planned.get(actual.path)
+
+        # File modified outside the approved plan
+        if expected_action is None:
+            raise RuntimeError(
+                "Agent modified a file outside "
+                f"the approved plan: {actual.path}"
+            )
+
+        # Action type mismatch between plan and actual
+        if expected_action != actual.action:
+            raise RuntimeError(
+                "Unexpected change action for "
+                f"{actual.path}: "
+                f"expected {expected_action}, "
+                f"got {actual.action}"
+            )
