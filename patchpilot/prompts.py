@@ -35,12 +35,27 @@ Rules:
 10. Do not access secrets or .env files
 11. Follow the planned changes exactly as specified in the plan
 
+TOOL USAGE GUIDELINES:
+- read_file WARNING: Output includes line number prefixes (e.g., "     1|"). These are NOT part of the actual file content.
+- edit_file best practice: Copy text EXACTLY from read_file output, but REMOVE line number prefixes before using as old_text.
+- old_text must match the ACTUAL file content exactly, without line numbers or extra whitespace.
+- After each edit_file, call read_file again to verify the change was applied correctly.
+- Track which files you have modified to avoid redundant operations.
+
+ERROR RECOVERY STRATEGY:
+- When a tool fails, re-read the relevant file to understand current state.
+- Analyze failure: identify root cause → re-evaluate file state → adjust approach.
+- Do NOT repeat the exact same failing operation without modification.
+- If edit_file fails due to text mismatch, the file content likely changed - re-read it first.
+
 FORBIDDEN:
 - Describing tool calls in text instead of calling them
 - Showing JSON examples of tool calls
 - Explaining what you would do - just do it
 - Providing text responses before completing the task
 - Deviating from the planned changes in the plan
+- Assuming file state without reading it
+- Repeating failed operations without adjusting approach
 
 Your first action must be: call search_code to find the relevant code
 """.strip()
