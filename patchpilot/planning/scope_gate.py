@@ -37,11 +37,48 @@ FORBIDDEN_PREFIXES = (
     ".github/workflows/",
 )
 
+# Directory names to ignore during runtime validation
+IGNORED_DIRECTORIES = (
+    "__pycache__",
+    ".pytest_cache",
+)
+
+# File patterns to ignore during runtime validation
+IGNORED_FILE_PATTERNS = (
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    ".DS_Store",
+    "*.so",
+)
+
 # Path hints that indicate database migrations requiring manual handling
 DATABASE_MIGRATION_HINTS = (
     "migrations/",
     "alembic/versions/",
 )
+
+
+def _should_ignore_file(file_path: str) -> bool:
+    """Check if a file should be ignored during runtime validation.
+    
+    Args:
+        file_path: The file path to check
+        
+    Returns:
+        True if the file should be ignored, False otherwise
+    """
+    # Check if any part of the path matches ignored directories
+    parts = file_path.split("/")
+    for part in parts:
+        # Check for exact matches (directory names like __pycache__)
+        if part in IGNORED_DIRECTORIES:
+            return True
+        # Check for file extension patterns (like *.pyc)
+        for pattern in IGNORED_FILE_PATTERNS:
+            if pattern.startswith("*") and part.endswith(pattern[1:]):
+                return True
+    return False
 
 
 def check_scope(
@@ -94,6 +131,13 @@ def check_scope(
             violations.append(
                 f"Database migration requires manual handling: "
                 f"{normalized}"
+            )
+
+        # Reject test file modifications (Day 1 restriction)
+        if "tests" in normalized.split("/") or normalized.startswith("test_"):
+            violations.append(
+                f"Test file modification is forbidden: {normalized}. "
+                "Test files must remain read-only during Day 1 implementation."
             )
 
     # 3. Verify modified files are in relevant_files
@@ -150,6 +194,10 @@ def validate_actual_changes(
     }
 
     for actual in actual_changes:
+        # Skip ignored files (cache files, build artifacts, etc.)
+        if _should_ignore_file(actual.path):
+            continue
+
         # .env files are always forbidden
         if actual.path == ".env":
             raise RuntimeError(

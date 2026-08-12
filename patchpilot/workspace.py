@@ -59,8 +59,31 @@ class Workspace:
         if resolved.name == ".git" or ".git" in resolved.parts:
             raise PermissionError(f"Writing .git directory rejected: {relative_path}")
 
-        # Reject modifying tests/ directory
-        if "tests" in resolved.parts:
-            raise PermissionError(f"Modifying tests directory rejected: {relative_path}")
+        # Reject modifying test files (Day 1 restriction)
+        if self._is_test_file(relative_path):
+            raise PermissionError(
+                f"Modifying test files is not allowed: {relative_path}. "
+                "Test files must remain read-only. Only modify source code implementation."
+            )
 
         return resolved
+
+    def _is_test_file(self, relative_path: str) -> bool:
+        """Check if a path refers to a test file.
+
+        Args:
+            relative_path: Relative path to check
+
+        Returns:
+            True if the path is a test file, False otherwise
+        """
+        # Check if path contains tests/ directory
+        if "tests" in relative_path.split("/"):
+            return True
+
+        # Check if filename starts with test_
+        parts = relative_path.split("/")
+        if parts and parts[-1].startswith("test_"):
+            return True
+
+        return False

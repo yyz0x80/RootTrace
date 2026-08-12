@@ -82,6 +82,10 @@ Rules:
    repository_match=false
    and explain repository_mismatch_reason.
 8. Stay within the requested issue scope.
+9. CRITICAL: Test files (files under tests/ or starting with test_) are READ-ONLY.
+   NEVER include test files in planned_changes. Tests should only be in planned_tests for verification.
+10. Test file modifications are FORBIDDEN. Even if the issue mentions updating tests,
+    the agent should only modify source code and rely on existing tests for verification.
 
 Required structure:
 

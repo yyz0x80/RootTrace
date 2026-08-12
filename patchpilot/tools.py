@@ -215,7 +215,7 @@ class ReadFileInput(ToolInput):
 @dataclass
 class EditFileInput(ToolInput):
     """Input for edit_file tool"""
-    description: ClassVar[str] = "Edit file using exact text replacement. Replaces the first occurrence of old_text with new_text and returns a unified diff. Provide context_lines to include surrounding context for better matching. Set preview=True to see the change without applying it."
+    description: ClassVar[str] = "Edit file using exact text replacement. Replaces the first occurrence of old_text with new_text and returns a unified diff. Provide context_lines to include surrounding context for better matching. Set preview=True to see the change without applying it. CRITICAL: old_text must NOT contain line number prefixes (e.g., '1:', '2:') - use read_file with raw=True instead."
     path: str
     old_text: str
     new_text: str
@@ -714,6 +714,22 @@ class ToolRegistry:
         except (TypeError, ValueError) as e:
             return ToolResult(ok=False, content=f"Invalid input: {e}")
 
+        # Early validation for line number prefixes in old_text
+        if input_data.old_text:
+            old_text_lines = input_data.old_text.splitlines()
+            has_line_prefixes = any(
+                line.strip().startswith(tuple(f"{i}:" for i in range(1, 1000)))
+                for line in old_text_lines
+            )
+            if has_line_prefixes:
+                return ToolResult(
+                    ok=False,
+                    content="ERROR: old_text contains line number prefixes (e.g., '1:', '2:'). "
+                           "Line numbers from read_file output are NOT part of the actual file content. "
+                           "Use read_file with raw=True to get content without line numbers, "
+                           "or remove the line number prefixes before using the text as old_text."
+                )
+
         try:
             resolved_path = self.workspace.assert_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
@@ -830,6 +846,21 @@ class ToolRegistry:
         lines = file_content.splitlines()
         old_text_lines = old_text.splitlines()
         
+        # Check if old_text contains line number prefixes (common mistake)
+        has_line_prefixes = any(
+            line.strip().startswith(tuple(f"{i}:" for i in range(1, 1000)))
+            for line in old_text_lines
+        )
+        
+        error_msg = "old_text not found in file. The exact text you provided:\n"
+        error_msg += f"  {old_text[:100]!r}{'...' if len(old_text) > 100 else ''}\n\n"
+        
+        if has_line_prefixes:
+            error_msg += "ERROR: Your old_text contains line number prefixes (e.g., '1:', '2:').\n"
+            error_msg += "Line numbers from read_file output are NOT part of the actual file content.\n"
+            error_msg += "SOLUTION: Use read_file with raw=True to get content without line numbers,\n"
+            error_msg += "or remove the line number prefixes before using the text as old_text.\n\n"
+        
         # Try to find similar content using difflib
         similar_lines = []
         for i, line in enumerate(lines):
@@ -840,9 +871,6 @@ class ToolRegistry:
                     if similarity > 0.5:  # More than 50% similar
                         similar_lines.append(f"Line {i+1}: {line[:80]}{'...' if len(line) > 80 else ''}")
                         break
-        
-        error_msg = "old_text not found in file. The exact text you provided:\n"
-        error_msg += f"  {old_text[:100]!r}{'...' if len(old_text) > 100 else ''}\n\n"
         
         if similar_lines:
             error_msg += "Similar content found in file:\n"

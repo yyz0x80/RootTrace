@@ -105,8 +105,8 @@ def main() -> None:
     run_parser.add_argument(
         "--max-rounds",
         type=int,
-        default=12,
-        help="Maximum number of agent rounds (default: 12)"
+        default=16,
+        help="Maximum number of agent rounds (default: 16)"
     )
     run_parser.add_argument(
         "--max-repairs",
@@ -144,7 +144,7 @@ def main() -> None:
     execute_parser.add_argument(
         "--max-rounds",
         type=int,
-        default=12,
+        default=16,
         help="Maximum number of agent rounds (default: 12)"
     )
     execute_parser.add_argument(
@@ -821,7 +821,7 @@ def handle_execute(args) -> None:
             # Step 10: Save verification report
             save_json(
                 "artifacts/verification_report.json",
-                verification_report.model_dump_json(indent=2),
+                verification_report.to_dict(),
             )
 
             # Step 11: Save patch

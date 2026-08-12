@@ -161,7 +161,7 @@ class AgentLoop:
         self,
         provider: LLMProvider,
         tools: ToolRegistry,
-        max_rounds: int = 12,
+        max_rounds: int = 16,
         system_prompt: str = SYSTEM_PROMPT,
         execute_log_callback: ExecuteLogCallback | None = None,
         enable_early_stopping: bool = True,
