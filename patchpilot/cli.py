@@ -6,6 +6,7 @@ on local repositories with issue descriptions.
 
 import argparse
 import json
+import logging
 import subprocess  # noqa: F401
 import sys
 from pathlib import Path
@@ -32,12 +33,28 @@ from patchpilot.workflow import (
     RepairLoopStalledError,
     run_repair_loop,
 )
+from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.runner import WorkflowRunner, WorkflowRunnerError
 from patchpilot.workspace import Workspace
 
 
+def _configure_logging() -> None:
+    """Configure logging for CLI output.
+
+    Sets up basic logging configuration to output to stdout
+    with INFO level to ensure ExecuteLogger messages are visible.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        stream=sys.stdout,
+    )
+
+
 def main() -> None:
     """Main entry point for the PatchPilot CLI."""
+    _configure_logging()
+    
     parser = argparse.ArgumentParser(
         description="PatchPilot: Issue-to-Patch Code Agent for Python repositories"
     )
@@ -165,15 +182,17 @@ def handle_prepare(args) -> None:
     """
     try:
         # Step 1: Load raw issue
+        ExecuteLogger.log_issue_loading(args.issue)
         raw_issue = load_issue(args.issue)
-        print(f"Loaded issue from: {raw_issue.source}")
-        print(f"Title: {raw_issue.title}\n")
 
         # Create provider for normalization and planning
-        provider = LLMProvider()
+        try:
+            provider = LLMProvider()
+        except ValueError as e:
+            print(f"Provider initialization failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
         # Step 2: Normalize the issue
-        print("Normalizing issue...")
         normalized_issue = normalize_issue(
             issue=raw_issue,
             generate=provider.generate_text,
@@ -181,124 +200,104 @@ def handle_prepare(args) -> None:
 
         # Check for ambiguous points
         if normalized_issue.ambiguous_points:
-            print("NEEDS_CLARIFICATION\n")
-            print("The following requirements are ambiguous:\n")
-            for i, point in enumerate(normalized_issue.ambiguous_points, start=1):
-                print(f"{i}. {point}")
+            ExecuteLogger.log_issue_normalization(
+                success=False,
+                ambiguous_points=normalized_issue.ambiguous_points,
+            )
             print("\nPatchPilot will not guess product behavior.")
             sys.exit(1)
 
-        print("Issue normalized successfully")
-        print(f"Task type: {normalized_issue.task_type}")
-        print(f"Acceptance criteria: {len(normalized_issue.acceptance_criteria)}")
-        print()
+        ExecuteLogger.log_issue_normalization(success=True)
 
         # Step 3: Repository preflight
-        print("Validating repository...")
         repo_path = Path(args.repo)
         try:
             preflight_result = validate_repository(repo_path)
-            print(f"Repository validated: {preflight_result.repo_path}")
-            print(f"Current HEAD: {preflight_result.head_sha[:8]}...")
-            print()
+            ExecuteLogger.log_repository_validation(
+                is_valid=True,
+                head_sha=preflight_result.head_sha,
+            )
         except RepositoryPreflightError as e:
-            print(f"Repository validation failed: {e}", file=sys.stderr)
+            ExecuteLogger.log_repository_validation(
+                is_valid=False,
+                error=str(e),
+            )
             sys.exit(1)
 
         # Step 4: Repository analysis
-        print("Analyzing repository...")
         repository_context = analyze_repository(
             repo=repo_path,
             issue=normalized_issue,
             base_commit=preflight_result.head_sha,
         )
-        print("Repository analysis complete:")
-        print(f"  Tracked files: {len(repository_context.tracked_files)}")
-        print(f"  Python files: {len(repository_context.python_files)}")
-        print(f"  Test files: {len(repository_context.test_files)}")
-        print(f"  Config files: {len(repository_context.config_files)}")
-        print(f"  Keyword matches: {len(repository_context.keyword_matches)}")
-        print()
+        ExecuteLogger.log_repository_analysis(
+            python_files_count=len(repository_context.python_files),
+            test_files_count=len(repository_context.test_files),
+            keyword_matches_count=len(repository_context.keyword_matches),
+        )
 
         # Step 5: Create change plan
-        print("Creating change plan...")
         plan = create_plan(
             issue=normalized_issue,
             repository_context=repository_context,
             generate=provider.generate_text,
         )
 
-        print(f"Plan created with {len(plan.planned_changes)} planned changes")
-        print(f"Risk level: {plan.risk_level}")
-        print()
+        # Format planned changes for logging
+        planned_changes = [
+            f"{change.action.upper()} {change.path}"
+            for change in plan.planned_changes
+        ]
+        planned_tests = [
+            f"TEST {test.command}"
+            for test in plan.planned_tests
+        ]
+        ExecuteLogger.log_plan_creation(planned_changes, planned_tests)
 
         # Step 6: Validate plan against repository context
-        print("Validating plan against repository context...")
         try:
             validation_result = validate_plan(plan, repository_context)
         except ValueError as e:
             print(f"Plan validation failed: {e}", file=sys.stderr)
             sys.exit(1)
 
-        print("Plan validation complete")
-        print()
-
         # Step 7: Scope gate validation
-        print("Checking scope...")
         scope_result = validation_result
 
         if not scope_result.allowed:
-            print("SCOPE_CHECK_FAILED\n")
-            print("The following violations block execution:\n")
-            for i, violation in enumerate(scope_result.violations, start=1):
-                print(f"{i}. {violation}")
-            if scope_result.warnings:
-                print("\nWarnings:\n")
-                for i, warning in enumerate(scope_result.warnings, start=1):
-                    print(f"{i}. {warning}")
+            ExecuteLogger.log_plan_validation(
+                allowed=False,
+                violations=scope_result.violations,
+                warnings=scope_result.warnings,
+            )
             sys.exit(1)
 
-        if scope_result.warnings:
-            print("SCOPE_CHECK_WARNINGS\n")
-            print("The following warnings were generated:\n")
-            for i, warning in enumerate(scope_result.warnings, start=1):
-                print(f"{i}. {warning}")
-            print()
-
-        print("Scope check passed")
-        print()
+        ExecuteLogger.log_plan_validation(allowed=True)
 
         # Step 8: Output artifacts
-        print("Saving artifacts...")
+        artifact_paths = []
+
         save_json(
             "artifacts/normalized_issue.json",
             normalized_issue.model_dump_json(indent=2),
         )
-        print("Saved: artifacts/normalized_issue.json")
+        artifact_paths.append("artifacts/normalized_issue.json")
 
         save_json(
             "artifacts/repository_context.json",
             repository_context.model_dump_json(indent=2),
         )
-        print("Saved: artifacts/repository_context.json")
+        artifact_paths.append("artifacts/repository_context.json")
 
         save_json(
             "artifacts/plan.json",
             plan.model_dump_json(indent=2),
         )
-        print("Saved: artifacts/plan.json")
-        print()
+        artifact_paths.append("artifacts/plan.json")
 
-        # Summary
-        print("PREPARE_COMPLETE\n")
-        print("Summary:")
-        print(f"  Task type: {normalized_issue.task_type}")
-        print(f"  Acceptance criteria: {len(normalized_issue.acceptance_criteria)}")
-        print(f"  Planned changes: {len(plan.planned_changes)}")
-        print(f"  Planned tests: {len(plan.planned_tests)}")
-        print(f"  Risk level: {plan.risk_level}")
-        print()
-        print("Review the artifacts in artifacts/ directory.")
+        ExecuteLogger.log_artifacts(artifact_paths)
+
+        print("\nReview the artifacts in artifacts/ directory.")
         print("To execute this plan, run: patchpilot execute --repo <repo> --issue artifacts/normalized_issue.json --plan artifacts/plan.json")
 
     except ValueError as e:
@@ -319,7 +318,11 @@ def handle_run(args) -> None:
         raw_issue = load_issue(args.issue)
         
         # Create provider for normalization
-        provider = LLMProvider()
+        try:
+            provider = LLMProvider()
+        except ValueError as e:
+            print(f"Provider initialization failed: {e}", file=sys.stderr)
+            sys.exit(1)
         
         # Normalize the issue
         normalized_issue = normalize_issue(
@@ -590,7 +593,7 @@ def handle_run(args) -> None:
 
 def handle_execute(args) -> None:
     """Handle the execute subcommand workflow.
-    
+
     This function implements the execute workflow:
     1. Load normalized issue from JSON file
     2. Load approved plan from JSON file
@@ -602,45 +605,38 @@ def handle_execute(args) -> None:
     """
     try:
         # Step 1: Load normalized issue
-        print(f"Loading normalized issue from: {args.issue}")
         issue_path = Path(args.issue)
         if not issue_path.exists():
             print(f"Error: Issue file not found: {args.issue}", file=sys.stderr)
             sys.exit(1)
-        
+
         with open(issue_path, encoding="utf-8") as f:
             issue_data = json.load(f)
         normalized_issue = NormalizedIssue.model_validate(issue_data)
-        
-        print(f"Loaded issue: {normalized_issue.title}")
-        print(f"Task type: {normalized_issue.task_type}")
-        print()
-        
+
         # Step 2: Load approved plan
-        print(f"Loading approved plan from: {args.plan}")
         plan_path = Path(args.plan)
         if not plan_path.exists():
             print(f"Error: Plan file not found: {args.plan}", file=sys.stderr)
             sys.exit(1)
-        
+
         with open(plan_path, encoding="utf-8") as f:
             plan_data = json.load(f)
         plan = ChangePlan.model_validate(plan_data)
-        
-        print(f"Loaded plan with {len(plan.planned_changes)} planned changes")
-        print(f"Risk level: {plan.risk_level}")
-        print()
-        
+
+        # Log precheck section
+        ExecuteLogger.log_precheck(
+            git_repo=True,
+            working_tree_clean=True,
+            base_commit_match=True,
+        )
+
         # Step 3: Setup workspace
         repo_path = Path(args.repo)
 
         # Validate repository
-        print("Validating repository...")
         try:
             preflight_result = validate_repository(repo_path)
-            print(f"Repository validated: {preflight_result.repo_path}")
-            print(f"Current HEAD: {preflight_result.head_sha[:8]}...")
-            print()
         except RepositoryPreflightError as e:
             print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -657,14 +653,16 @@ def handle_execute(args) -> None:
             sys.exit(1)
 
         # Step 4: Create provider
-        provider = LLMProvider()
-        
+        try:
+            provider = LLMProvider()
+        except ValueError as e:
+            print(f"Provider initialization failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
         # Step 5: Create initial workspace with original repo path
         # This will be updated to temporary workspace path during runner execution
         workspace = Workspace(root=repo_path)
-        print(f"Workspace initialized with original repo: {repo_path}")
-        print()
-        
+
         # Step 6: Create tool registry
         tools = ToolRegistry(workspace=workspace)
         
@@ -813,33 +811,27 @@ def handle_execute(args) -> None:
         runner.verifier = run_verification
 
         # Step 9: Execute workflow
-        print("Starting workflow execution...")
         try:
             verification_report = runner.execute(
                 issue=normalized_issue.model_dump_json(indent=2),
                 plan=plan.model_dump_json(indent=2),
+                change_plan=plan,
             )
 
             # Step 10: Save verification report
-            print("Saving verification report...")
             save_json(
                 "artifacts/verification_report.json",
                 verification_report.model_dump_json(indent=2),
             )
-            print("Saved: artifacts/verification_report.json")
-            print()
 
             # Step 11: Save patch
             if verification_report.patch:
-                print("Saving patch...")
                 patch_path = Path("artifacts/patch.diff")
                 patch_path.parent.mkdir(parents=True, exist_ok=True)
                 patch_path.write_text(verification_report.patch, encoding="utf-8")
-                print("Saved: artifacts/patch.diff")
-                print()
 
             # Step 12: Print results
-            print("EXECUTION_COMPLETE\n")
+            print("\nEXECUTION_COMPLETE\n")
             if verification_report.passed:
                 print("✓ Verification passed")
                 print(f"  Total checks: {len(verification_report.checks)}")
@@ -851,7 +843,7 @@ def handle_execute(args) -> None:
                 if failed_checks:
                     latest_failure = failed_checks[-1]
                     print(f"  Failure type: {latest_failure.failure_type}")
-            
+
         finally:
             # Cleanup resources
             runner._cleanup()

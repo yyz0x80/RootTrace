@@ -23,8 +23,9 @@ import tarfile
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from patchpilot.agent_loop import AgentLoop
+from patchpilot.agent_loop import AgentLoop, ExecuteLogCallback
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import (
     ScopeGateResult,
@@ -35,6 +36,7 @@ from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.tools import _get_workspace_changes, generate_patch
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
+from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workspace import Workspace
 
@@ -51,6 +53,47 @@ UNRECOVERABLE_FAILURE_TYPES = {
     FailureType.REQUIREMENT_AMBIGUITY,
     FailureType.SCOPE_VIOLATION,
 }
+
+
+class WorkflowExecuteLogCallback(ExecuteLogCallback):
+    """Execute log callback for workflow runner using ExecuteLogger.
+
+    Bridges the AgentLoop's callback interface with the structured
+    ExecuteLogger to produce clean section-based logging output.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the callback with a section flag."""
+        self._coding_section_logged = False
+
+    def on_round_start(self, round_number: int) -> None:
+        """Called at the start of each agent round.
+
+        Args:
+            round_number: Current round number
+        """
+        # Log the CODING section header only once on first round
+        if not self._coding_section_logged:
+            ExecuteLogger.log_section("CODING")
+            self._coding_section_logged = True
+
+    def on_tool_call(self, round_number: int, tool_name: str, args: dict[str, Any]) -> None:
+        """Called when the agent makes a tool call.
+
+        Args:
+            round_number: Current round number
+            tool_name: Name of the tool being called
+            args: Tool arguments
+        """
+        ExecuteLogger.log_coding_round(round_number, tool_name, args)
+
+    def on_round_complete(self, round_number: int) -> None:
+        """Called when the agent completes a round with a final answer.
+
+        Args:
+            round_number: Current round number
+        """
+        ExecuteLogger.log_coding_complete(round_number)
 
 
 def _run(command: list[str], cwd: Path) -> None:
@@ -175,6 +218,14 @@ class WorkflowRunner:
             WorkflowRunnerSetupError: If workspace or sandbox setup fails
             WorkflowRunnerExecutionError: If agent execution fails critically
         """
+        # Log issue and plan
+        ExecuteLogger.log_issue(issue)
+        if change_plan:
+            ExecuteLogger.log_plan(
+                base_commit=change_plan.base_commit,
+                planned_changes_count=len(change_plan.planned_changes),
+            )
+
         # Step 3: Create temporary workspace copy
         workspace_path = self._create_temporary_workspace()
 
@@ -183,6 +234,10 @@ class WorkflowRunner:
 
         # Step 5: Update agent loop tools to use temporary workspace
         self.agent_loop.update_workspace(self.workspace)
+
+        # Set up execute log callback for structured logging
+        execute_callback = WorkflowExecuteLogCallback()
+        self.agent_loop.execute_log_callback = execute_callback
 
         # Step 6: Start Docker Sandbox
         self._start_sandbox(workspace_path)
@@ -206,14 +261,22 @@ class WorkflowRunner:
                     )
                 logger.info("Agent completed without file changes (allowed for non-code-change tasks)")
 
+            # Log changes section
+            modified = [c.path for c in actual_changes if c.action == "modify"]
+            created = [c.path for c in actual_changes if c.action == "create"]
+            deleted = [c.path for c in actual_changes if c.action == "delete"]
+            ExecuteLogger.log_changes(modified, created, deleted)
+
             # Step 10: Runtime scope validation against approved plan
             if change_plan is not None:
                 logger.info("Running runtime scope validation")
                 try:
                     validate_actual_changes(change_plan, actual_changes)
                     logger.info("Runtime scope validation passed")
+                    ExecuteLogger.log_scope_validation(allowed=True)
                 except RuntimeError as e:
                     logger.error("Runtime scope validation failed: %s", e)
+                    ExecuteLogger.log_scope_validation(allowed=False, violations=[str(e)])
                     raise WorkflowRunnerExecutionError(
                         f"Runtime scope validation failed: {e}"
                     ) from e
@@ -221,6 +284,14 @@ class WorkflowRunner:
             # Step 11: Initial verification
             logger.info("Running initial verification")
             report = self.verifier()
+
+            # Log verification results
+            verification_results = {}
+            for check in report.checks:
+                # Use command as the check name for logging
+                check_name = check.command if check.command else check.level
+                verification_results[check_name] = check.passed
+            ExecuteLogger.log_verification(verification_results)
 
             # Step 12: Repair loop if verification failed
             retry_count = 0
@@ -234,6 +305,7 @@ class WorkflowRunner:
                     logger.warning(
                         "Same failure repeated. Stopping repair loop to avoid futile attempts."
                     )
+                    ExecuteLogger.log_repair_stopped("Same failure repeated")
                     break
 
                 previous_failure = current_failure
@@ -244,6 +316,7 @@ class WorkflowRunner:
                         "Unrecoverable failure detected: %s. Stopping repair loop.",
                         report.failure_type,
                     )
+                    ExecuteLogger.log_repair_stopped(f"Unrecoverable failure: {report.failure_type}")
                     break
 
                 # Check repair attempt limit
@@ -252,9 +325,11 @@ class WorkflowRunner:
                         "Maximum repair attempts (%d) reached. Stopping repair loop.",
                         MAX_REPAIR_ATTEMPTS,
                     )
+                    ExecuteLogger.log_repair_stopped("Maximum repair attempts reached")
                     break
 
                 retry_count += 1
+                ExecuteLogger.log_repair_attempt(retry_count, MAX_REPAIR_ATTEMPTS)
                 logger.info(
                     "Starting repair attempt %d/%d",
                     retry_count,
@@ -277,6 +352,7 @@ class WorkflowRunner:
                     logger.warning(
                         "Repair agent finished without modifying any files. Stopping repair loop."
                     )
+                    ExecuteLogger.log_repair_stopped("No changes made during repair")
                     break
 
                 # Scope gate validation after repair
@@ -286,6 +362,7 @@ class WorkflowRunner:
                         "Scope gate rejected repair changes: %s. Stopping repair loop.",
                         scope_result.violations,
                     )
+                    ExecuteLogger.log_repair_stopped(f"Scope gate rejected: {scope_result.violations}")
                     # Create a failure report indicating scope rejection
                     report.passed = False
                     report.failure_type = "SCOPE_VIOLATION"
@@ -305,6 +382,14 @@ class WorkflowRunner:
             final_changes = _get_workspace_changes(workspace_path)
             report.patch = generate_patch(workspace_path, final_changes)
             logger.info("Patch generated successfully")
+
+            # Log final result section
+            artifacts = {}
+            if report.patch:
+                artifacts["patch.diff"] = "artifacts/patch.diff"
+            artifacts["verification_report.json"] = "artifacts/verification_report.json"
+
+            ExecuteLogger.log_result(passed=report.passed, artifacts=artifacts)
 
             # Step 14: Return final verification report
             return report
@@ -392,6 +477,9 @@ class WorkflowRunner:
 
             logger.info("Temporary workspace setup complete")
 
+            # Log workspace section with structured output
+            ExecuteLogger.log_workspace_setup(str(workspace_path))
+
             return workspace_path
 
         except (OSError, subprocess.CalledProcessError, tarfile.TarError) as e:
@@ -417,6 +505,9 @@ class WorkflowRunner:
 
             self.sandbox.start()
             logger.info("Docker sandbox started successfully")
+
+            # Log sandbox section with structured output
+            ExecuteLogger.log_sandbox_start()
 
         except Exception as e:
             raise WorkflowRunnerSetupError(

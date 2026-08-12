@@ -8,9 +8,13 @@ import json
 import os
 from time import sleep
 
+from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError, RateLimitError
 
 from patchpilot.models import AssistantTurn, ToolCall
+
+# Load environment variables from .env file if it exists
+load_dotenv()
 
 
 class ToolCallParseError(Exception):
