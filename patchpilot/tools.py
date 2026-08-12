@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolResult
+from patchpilot.validation import run_intermediate_validation
 from patchpilot.workspace import Workspace
 
 
@@ -797,6 +798,17 @@ class ToolRegistry:
             with open(resolved_path, "w", encoding="utf-8") as f:
                 f.write(new_content)
 
+            # Run intermediate validation to catch syntax errors early
+            validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+            if not validation_passed:
+                # Revert the change if validation fails
+                with open(resolved_path, "w", encoding="utf-8") as f:
+                    f.write(original_content)
+                return ToolResult(
+                    ok=False,
+                    content="Edit reverted due to validation failure:\n" + "\n".join(validation_errors)
+                )
+
             return ToolResult(ok=True, content=diff_text or "(no diff)")
 
         except UnicodeDecodeError:
@@ -874,6 +886,9 @@ class ToolRegistry:
             with open(resolved_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
 
+            # Save original content for potential revert
+            original_content = "".join(lines)
+
             # Validate line range
             if input_data.start_line > len(lines):
                 return ToolResult(
@@ -896,10 +911,10 @@ class ToolRegistry:
                 new_text_with_newline = input_data.new_text + '\n'
             else:
                 new_text_with_newline = input_data.new_text
-            
+
             new_lines = (
-                lines[:start_idx] + 
-                [new_text_with_newline] + 
+                lines[:start_idx] +
+                [new_text_with_newline] +
                 lines[end_idx:]
             )
             new_content = "".join(new_lines)
@@ -922,6 +937,17 @@ class ToolRegistry:
             # Write new content
             with open(resolved_path, "w", encoding="utf-8") as f:
                 f.write(new_content)
+
+            # Run intermediate validation to catch syntax errors early
+            validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+            if not validation_passed:
+                # Revert the change if validation fails
+                with open(resolved_path, "w", encoding="utf-8") as f:
+                    f.write(original_content)
+                return ToolResult(
+                    ok=False,
+                    content="Edit reverted due to validation failure:\n" + "\n".join(validation_errors)
+                )
 
             return ToolResult(ok=True, content=diff_text or "(no diff)")
 
@@ -983,6 +1009,17 @@ class ToolRegistry:
                 with open(resolved_path, "w", encoding="utf-8") as f:
                     f.write(input_data.content)
 
+                # Run intermediate validation to catch syntax errors early
+                validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+                if not validation_passed:
+                    # Revert the change if validation fails
+                    with open(resolved_path, "w", encoding="utf-8") as f:
+                        f.write(original_content)
+                    return ToolResult(
+                        ok=False,
+                        content="Patch reverted due to validation failure:\n" + "\n".join(validation_errors)
+                    )
+
                 return ToolResult(ok=True, content=diff_text or "(no diff)")
 
             except UnicodeDecodeError:
@@ -1005,6 +1042,16 @@ class ToolRegistry:
                 # Write new content
                 with open(resolved_path, "w", encoding="utf-8") as f:
                     f.write(input_data.content)
+
+                # Run intermediate validation to catch syntax errors early
+                validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+                if not validation_passed:
+                    # Remove the file if validation fails
+                    resolved_path.unlink()
+                    return ToolResult(
+                        ok=False,
+                        content="File creation reverted due to validation failure:\n" + "\n".join(validation_errors)
+                    )
 
                 return ToolResult(
                     ok=True,

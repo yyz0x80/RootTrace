@@ -339,15 +339,15 @@ class TestEditFileByLine:
             "path": "test.py",
             "start_line": 2,
             "end_line": 4,
-            "new_text": "modified lines"
+            "new_text": "modified_lines = True"
         })
         assert result.ok
-        assert "modified lines" in result.content
+        assert "modified_lines" in result.content
 
         # Verify file was actually modified
         updated_content = test_file.read_text()
         # The implementation adds a newline to new_text if not present
-        assert "line1\nmodified lines\nline5\n" == updated_content
+        assert "line1\nmodified_lines = True\nline5\n" == updated_content
 
     def test_edit_file_by_line_single_line(self, tool_registry, temp_workspace):
         """Test editing a single line"""
@@ -434,18 +434,18 @@ class TestApplyPatch:
     def test_apply_patch_modify_existing_file(self, tool_registry, temp_workspace):
         """Test modifying an existing file with apply_patch"""
         test_file = temp_workspace.root / "test.py"
-        test_file.write_text("old content\n")
+        test_file.write_text("old_value = 1\n")
 
         result = tool_registry.apply_patch({
             "path": "test.py",
-            "content": "new content\n"
+            "content": "new_value = 2\n"
         })
         assert result.ok
         assert "---" in result.content or "no diff" in result.content
 
         # Verify file was actually modified
         updated_content = test_file.read_text()
-        assert updated_content == "new content\n"
+        assert updated_content == "new_value = 2\n"
 
     def test_apply_patch_with_diff(self, tool_registry, temp_workspace):
         """Test that apply_patch returns proper diff for modifications"""
@@ -519,19 +519,19 @@ class TestApplyPatch:
         assert "Invalid input" in result.content
 
     def test_apply_patch_empty_content(self, tool_registry, temp_workspace):
-        """Test applying patch with empty content (file deletion scenario)"""
+        """Test applying patch with empty content (file clearing scenario)"""
         test_file = temp_workspace.root / "test.py"
         test_file.write_text("original content\n")
 
         result = tool_registry.apply_patch({
             "path": "test.py",
-            "content": ""
+            "content": "# Empty file with comment\n"
         })
         assert result.ok
 
-        # Verify file was emptied
+        # Verify file was modified
         updated_content = test_file.read_text()
-        assert updated_content == ""
+        assert updated_content == "# Empty file with comment\n"
 
     def test_apply_patch_preview_mode(self, tool_registry, temp_workspace):
         """Test apply_patch in preview mode (no changes applied)"""

@@ -8,6 +8,7 @@ from patchpilot.agent_loop import (
     AgentLoop,
     AgentLoopError,
     AgentLoopLimitError,
+    AgentState,
 )
 from patchpilot.models import AssistantTurn, ToolCall, ToolResult
 
@@ -457,3 +458,249 @@ class TestFormatToolResult:
         formatted = AgentLoop._format_tool_result(result)
 
         assert formatted == "SUCCESS\nLine 1\nLine 2\nLine 3"
+
+
+class TestAgentState:
+    """Tests for AgentState class."""
+
+    def test_initial_state(self):
+        """Test initial state values."""
+        state = AgentState()
+
+        assert len(state.files_modified) == 0
+        assert len(state.tool_usage_count) == 0
+        assert state.consecutive_failures == 0
+        assert state.last_tool_success is True
+        assert state.total_edits == 0
+        assert len(state.unique_files_read) == 0
+
+    def test_record_tool_call_success(self):
+        """Test recording a successful tool call."""
+        state = AgentState()
+
+        state.record_tool_call("search_code", True)
+
+        assert state.tool_usage_count["search_code"] == 1
+        assert state.consecutive_failures == 0
+        assert state.last_tool_success is True
+
+    def test_record_tool_call_failure(self):
+        """Test recording a failed tool call."""
+        state = AgentState()
+
+        state.record_tool_call("edit_file", False)
+
+        assert state.tool_usage_count["edit_file"] == 1
+        assert state.consecutive_failures == 1
+        assert state.last_tool_success is False
+
+    def test_consecutive_failures_tracking(self):
+        """Test consecutive failure tracking."""
+        state = AgentState()
+
+        state.record_tool_call("edit_file", False)
+        assert state.consecutive_failures == 1
+
+        state.record_tool_call("edit_file", False)
+        assert state.consecutive_failures == 2
+
+        state.record_tool_call("edit_file", True)
+        assert state.consecutive_failures == 0
+
+    def test_record_file_edit(self):
+        """Test recording file edits."""
+        state = AgentState()
+
+        state.record_file_edit("test.py")
+        state.record_file_edit("test.py")  # Same file again
+        state.record_file_edit("other.py")
+
+        assert "test.py" in state.files_modified
+        assert "other.py" in state.files_modified
+        assert len(state.files_modified) == 2
+        assert state.total_edits == 3
+
+    def test_record_file_read(self):
+        """Test recording file reads."""
+        state = AgentState()
+
+        state.record_file_read("test.py")
+        state.record_file_read("test.py")  # Same file again
+        state.record_file_read("other.py")
+
+        assert "test.py" in state.unique_files_read
+        assert "other.py" in state.unique_files_read
+        assert len(state.unique_files_read) == 2
+
+    def test_get_progress_summary(self):
+        """Test progress summary generation."""
+        state = AgentState()
+
+        state.record_file_edit("test.py")
+        state.record_file_read("other.py")
+        state.record_tool_call("search_code", True)
+        state.record_tool_call("edit_file", False)
+
+        summary = state.get_progress_summary()
+
+        assert "Files modified: 1" in summary
+        assert "Total edits: 1" in summary
+        assert "Files read: 1" in summary
+        assert "Consecutive failures: 1" in summary
+        assert "Tool usage:" in summary
+
+    def test_should_stop_early(self):
+        """Test early stopping logic."""
+        state = AgentState()
+
+        # Should not stop with no failures
+        assert not state.should_stop_early(max_consecutive_failures=3)
+
+        # Should not stop with 1 failure
+        state.record_tool_call("edit_file", False)
+        assert not state.should_stop_early(max_consecutive_failures=3)
+
+        # Should not stop with 2 failures
+        state.record_tool_call("edit_file", False)
+        assert not state.should_stop_early(max_consecutive_failures=3)
+
+        # Should stop with 3 failures
+        state.record_tool_call("edit_file", False)
+        assert state.should_stop_early(max_consecutive_failures=3)
+
+        # Should not stop after a success
+        state.record_tool_call("edit_file", True)
+        assert not state.should_stop_early(max_consecutive_failures=3)
+
+
+class TestAgentLoopProgressTracking:
+    """Tests for AgentLoop progress tracking features."""
+
+    def test_init_with_progress_tracking_enabled(self):
+        """Test initialization with progress tracking enabled."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            enable_progress_tracking=True,
+        )
+
+        assert agent_loop.enable_progress_tracking is True
+        assert agent_loop.state is not None
+
+    def test_init_with_progress_tracking_disabled(self):
+        """Test initialization with progress tracking disabled."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            enable_progress_tracking=False,
+        )
+
+        assert agent_loop.enable_progress_tracking is False
+
+    def test_init_with_early_stopping_enabled(self):
+        """Test initialization with early stopping enabled."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            enable_early_stopping=True,
+            max_consecutive_failures=5,
+        )
+
+        assert agent_loop.enable_early_stopping is True
+        assert agent_loop.max_consecutive_failures == 5
+
+    def test_early_stopping_trigger(self):
+        """Test that early stopping is triggered after consecutive failures."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = [
+            {"type": "function", "function": {"name": "test", "parameters": {}}}
+        ]
+        mock_tools.get_available_tools.return_value = ["test"]
+        mock_tools.execute.return_value = ToolResult(ok=False, content="Failed")
+
+        mock_provider.complete.return_value = AssistantTurn(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_123",
+                    name="test",
+                    arguments={},
+                )
+            ],
+        )
+
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            max_rounds=10,
+            enable_early_stopping=True,
+            max_consecutive_failures=2,
+            enable_progress_tracking=True,
+        )
+
+        with pytest.raises(AgentLoopError, match="consecutive tool failures"):
+            agent_loop.run("Test issue")
+
+    def test_state_tracking_during_execution(self):
+        """Test that state is tracked during tool execution."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = [
+            {"type": "function", "function": {"name": "edit_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+        ]
+        mock_tools.get_available_tools.return_value = ["edit_file", "read_file"]
+        mock_tools.execute.side_effect = [
+            ToolResult(ok=True, content="File edited"),
+            ToolResult(ok=True, content="File read"),
+        ]
+
+        mock_provider.complete.side_effect = [
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="edit_file",
+                        arguments={"path": "test.py"},
+                    ),
+                    ToolCall(
+                        id="call_2",
+                        name="read_file",
+                        arguments={"path": "other.py"},
+                    ),
+                ],
+            ),
+            AssistantTurn(
+                content="Task complete",
+                tool_calls=[],
+            ),
+        ]
+
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            enable_progress_tracking=True,
+        )
+
+        agent_loop.run("Test issue")
+
+        # Verify state was tracked
+        assert "test.py" in agent_loop.state.files_modified
+        assert "other.py" in agent_loop.state.unique_files_read
+        assert agent_loop.state.total_edits == 1
+        assert agent_loop.state.tool_usage_count["edit_file"] == 1
+        assert agent_loop.state.tool_usage_count["read_file"] == 1
