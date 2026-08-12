@@ -18,6 +18,7 @@ CLI -> WorkflowRunner -> AgentLoop + Tools + Verifier -> Target Repository
 from __future__ import annotations
 
 import logging
+import platform
 import subprocess
 import tarfile
 import tempfile
@@ -406,6 +407,9 @@ class WorkflowRunner:
         Removes sensitive environment files and initializes a new git repository
         for baseline tracking.
 
+        On macOS, uses a Docker-friendly path in the user's home directory
+        to avoid Docker Desktop file sharing restrictions.
+
         Returns:
             Path to the temporary workspace directory
 
@@ -414,13 +418,26 @@ class WorkflowRunner:
         """
         try:
             # Create temporary directory
-            self._temp_dir = tempfile.TemporaryDirectory(prefix="patchpilot-")
+            # On macOS, use a path in home directory for better Docker compatibility
+            # Docker Desktop on macOS has restrictions on /tmp and /var/folders paths
+            if platform.system() == "Darwin":
+                # macOS: use home directory which is usually shared with Docker
+                home_temp = Path.home() / ".patchpilot_temp"
+                home_temp.mkdir(exist_ok=True)
+                self._temp_dir = tempfile.TemporaryDirectory(
+                    prefix="patchpilot-",
+                    dir=home_temp
+                )
+            else:
+                # Linux: use standard system temp directory
+                self._temp_dir = tempfile.TemporaryDirectory(prefix="patchpilot-")
+            
             temp_root = Path(self._temp_dir.name)
             logger.info("Created temporary workspace: %s", temp_root)
 
             # Create workspace directory
             workspace_path = temp_root / "repo"
-            workspace_path.mkdir()
+            workspace_path.mkdir(parents=True, exist_ok=True)
             archive_path = temp_root / "source.tar"
 
             # Export HEAD commit using git archive
@@ -500,6 +517,18 @@ class WorkflowRunner:
             WorkflowRunnerSetupError: If sandbox startup fails
         """
         try:
+            # Validate workspace path exists before starting sandbox
+            if not workspace_path.exists():
+                raise RuntimeError(
+                    f"Workspace path does not exist: {workspace_path}. "
+                    f"Cannot start Docker sandbox with non-existent directory."
+                )
+            
+            if not workspace_path.is_dir():
+                raise RuntimeError(
+                    f"Workspace path is not a directory: {workspace_path}"
+                )
+            
             if self.sandbox is None:
                 self.sandbox = DockerSandbox(workspace=workspace_path)
 

@@ -74,7 +74,18 @@ class DockerSandbox:
         cpus: float = 1.0,
         memory: str = "512m",
     ):
-        self.workspace = workspace.resolve()
+        # Use absolute path but avoid resolving symlinks on macOS
+        # Docker Desktop on macOS has better compatibility with /var/folders paths
+        self.workspace = workspace.absolute()
+        if not self.workspace.exists():
+            raise RuntimeError(
+                f"Workspace path does not exist: {self.workspace}. "
+                f"Ensure the directory is created before starting the sandbox."
+            )
+        if not self.workspace.is_dir():
+            raise RuntimeError(
+                f"Workspace path is not a directory: {self.workspace}"
+            )
         self.image = image
         self.cpus = cpus
         self.memory = memory
@@ -82,6 +93,10 @@ class DockerSandbox:
 
     def start(self) -> None:
         """Start the Docker container with security and resource limits."""
+        # On macOS, use the actual filesystem path for Docker bind mounts
+        # This avoids issues with resolved symlink paths that Docker may not recognize
+        workspace_source = str(self.workspace)
+        
         command = [
             "docker",
             "run",
@@ -119,7 +134,7 @@ class DockerSandbox:
             "--mount",
             (
                 f"type=bind,"
-                f"source={self.workspace},"
+                f"source={workspace_source},"
                 f"target=/workspace"
             ),
             
@@ -141,12 +156,23 @@ class DockerSandbox:
             "infinity",
         ]
 
-        subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            # Provide detailed error information for debugging
+            stderr = e.stderr if e.stderr else "No error output"
+            raise RuntimeError(
+                f"Failed to start Docker container. "
+                f"Exit code: {e.returncode}. "
+                f"Error: {stderr}. "
+                f"Command: {' '.join(command)}. "
+                f"Workspace path: {workspace_source}"
+            ) from e
 
     def run(
         self,
