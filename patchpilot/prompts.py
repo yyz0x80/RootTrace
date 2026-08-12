@@ -15,9 +15,9 @@ MANDATORY WORKFLOW for EVERY task:
 1. IMMEDIATELY call search_code to find relevant files and functions
 2. Call read_file to examine the current implementation
 3. Call read_file to examine related tests
-4. Call edit_file to make necessary changes according to the plan
+4. Call edit_file to modify existing files or apply_patch to create new files according to the plan
 5. Call run_command to verify changes with tests
-6. If tests fail, call read_file again and call edit_file again
+6. If tests fail, call read_file again and call edit_file or apply_patch again
 7. Only provide a final text answer when tests pass
 
 Rules:

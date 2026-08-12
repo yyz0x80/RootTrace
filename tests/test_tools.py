@@ -6,6 +6,7 @@ import pytest
 
 from patchpilot.models import ToolResult
 from patchpilot.tools import (
+    ApplyPatchInput,
     EditFileInput,
     ReadFileInput,
     RunCommandInput,
@@ -260,6 +261,126 @@ class TestEditFile:
         assert "Invalid input" in result.content
 
 
+class TestApplyPatch:
+    """Tests for apply_patch tool"""
+
+    def test_apply_patch_create_file(self, tool_registry, temp_workspace):
+        """Test creating a new file with apply_patch"""
+        result = tool_registry.apply_patch({
+            "path": "new_file.py",
+            "content": "def new_function():\n    pass\n"
+        })
+        assert result.ok
+        assert "Created file" in result.content
+
+        # Verify file was actually created
+        new_file = temp_workspace.root / "new_file.py"
+        assert new_file.exists()
+        assert new_file.read_text() == "def new_function():\n    pass\n"
+
+    def test_apply_patch_modify_existing_file(self, tool_registry, temp_workspace):
+        """Test modifying an existing file with apply_patch"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("old content\n")
+
+        result = tool_registry.apply_patch({
+            "path": "test.py",
+            "content": "new content\n"
+        })
+        assert result.ok
+        assert "---" in result.content or "no diff" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert updated_content == "new content\n"
+
+    def test_apply_patch_with_diff(self, tool_registry, temp_workspace):
+        """Test that apply_patch returns proper diff for modifications"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.apply_patch({
+            "path": "test.py",
+            "content": "line1\nline2_modified\nline3\n"
+        })
+        assert result.ok
+        assert "---" in result.content or "+++" in result.content
+
+    def test_apply_patch_create_in_subdirectory(self, tool_registry, temp_workspace):
+        """Test creating a file in a subdirectory"""
+        result = tool_registry.apply_patch({
+            "path": "subdir/new_file.py",
+            "content": "def func():\n    pass\n"
+        })
+        assert result.ok
+        assert "Created file" in result.content
+
+        # Verify file was created in subdirectory
+        new_file = temp_workspace.root / "subdir" / "new_file.py"
+        assert new_file.exists()
+        assert new_file.parent.exists()
+
+    def test_apply_patch_env_rejected(self, tool_registry, temp_workspace):
+        """Test that applying patch to .env is rejected"""
+        result = tool_registry.apply_patch({
+            "path": ".env",
+            "content": "KEY=value\n"
+        })
+        assert not result.ok
+        assert "rejected" in result.content
+
+    def test_apply_patch_git_rejected(self, tool_registry, temp_workspace):
+        """Test that applying patch to .git directory is rejected"""
+        result = tool_registry.apply_patch({
+            "path": ".git/config",
+            "content": "[core]\n"
+        })
+        assert not result.ok
+        assert "rejected" in result.content
+
+    def test_apply_patch_tests_rejected(self, tool_registry, temp_workspace):
+        """Test that applying patch to test files is rejected"""
+        tests_dir = temp_workspace.root / "tests"
+        tests_dir.mkdir()
+
+        result = tool_registry.apply_patch({
+            "path": "tests/test_example.py",
+            "content": "def test_new():\n    pass\n"
+        })
+        assert not result.ok
+        assert "tests directory rejected" in result.content
+
+    def test_apply_patch_outside_workspace(self, tool_registry):
+        """Test that applying patch outside workspace is rejected"""
+        result = tool_registry.apply_patch({
+            "path": "/etc/passwd",
+            "content": "malicious content"
+        })
+        assert not result.ok
+        assert "Path error" in result.content
+
+    def test_apply_patch_invalid_input(self, tool_registry):
+        """Test apply_patch with invalid input"""
+        result = tool_registry.apply_patch({"path": 123, "content": "test"})
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+    def test_apply_patch_empty_content(self, tool_registry, temp_workspace):
+        """Test applying patch with empty content (file deletion scenario)"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("original content\n")
+
+        result = tool_registry.apply_patch({
+            "path": "test.py",
+            "content": ""
+        })
+        assert result.ok
+
+        # Verify file was emptied
+        updated_content = test_file.read_text()
+        assert updated_content == ""
+
+
 class TestRunCommand:
     """Tests for run_command tool"""
 
@@ -425,6 +546,16 @@ class TestToolSchema:
         assert all(schema["properties"][k]["type"] == "string" for k in ["path", "old_text", "new_text"])
         assert all(k in schema["required"] for k in ["path", "old_text", "new_text"])
 
+    def test_generate_json_schema_apply_patch(self):
+        """Test JSON schema generation for ApplyPatchInput"""
+        schema = generate_json_schema(ApplyPatchInput)
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        assert "path" in schema["properties"]
+        assert "content" in schema["properties"]
+        assert all(schema["properties"][k]["type"] == "string" for k in ["path", "content"])
+        assert all(k in schema["required"] for k in ["path", "content"])
+
     def test_generate_json_schema_run_command(self):
         """Test JSON schema generation for RunCommandInput"""
         schema = generate_json_schema(RunCommandInput)
@@ -437,11 +568,11 @@ class TestToolSchema:
     def test_get_tool_schemas(self, tool_registry):
         """Test getting all tool schemas in OpenAI format"""
         schemas = tool_registry.get_tool_schemas()
-        assert len(schemas) == 4
+        assert len(schemas) == 5
         assert all(isinstance(schema, dict) for schema in schemas)
         assert all(schema["type"] == "function" for schema in schemas)
         tool_names = {schema["function"]["name"] for schema in schemas}
-        assert tool_names == {"search_code", "read_file", "edit_file", "run_command"}
+        assert tool_names == {"search_code", "read_file", "edit_file", "apply_patch", "run_command"}
 
     def test_get_tool_schema_existing(self, tool_registry):
         """Test getting a specific tool schema that exists"""

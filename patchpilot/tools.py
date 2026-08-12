@@ -10,6 +10,7 @@ Available tools:
 - search_code: Search for code patterns using ripgrep
 - read_file: Read file content with optional line ranges
 - edit_file: Edit files using exact text replacement
+- apply_patch: Apply a patch to a file (create or modify)
 - run_command: Execute allowed commands in the workspace
 
 The tool system enforces security boundaries through input validation,
@@ -175,6 +176,20 @@ class RunCommandInput(ToolInput):
 
 
 @dataclass
+class ApplyPatchInput(ToolInput):
+    """Input for apply_patch tool"""
+    description: ClassVar[str] = "Apply a patch to a file. If the file exists, replaces its entire content and returns a unified diff. If the file doesn't exist, creates it with the given content."
+    path: str
+    content: str
+
+    def __post_init__(self):
+        if not isinstance(self.path, str):
+            raise TypeError(f"path must be str, not {type(self.path).__name__}")
+        if not isinstance(self.content, str):
+            raise TypeError(f"content must be str, not {type(self.content).__name__}")
+
+
+@dataclass
 class ToolDefinition:
     """Structured definition of a tool with schema"""
     name: str
@@ -335,6 +350,11 @@ class ToolRegistry:
             name="edit_file",
             input_class=EditFileInput,
             handler=self.edit_file,
+        )
+        self.register_tool(
+            name="apply_patch",
+            input_class=ApplyPatchInput,
+            handler=self.apply_patch,
         )
         self.register_tool(
             name="run_command",
@@ -633,6 +653,78 @@ class ToolRegistry:
             return ToolResult(ok=False, content="File is not valid UTF-8 text")
         except OSError as e:
             return ToolResult(ok=False, content=f"Edit failed: {e}")
+
+    def apply_patch(self, arguments: dict[str, Any]) -> ToolResult:
+        """
+        Apply a patch to a file. Creates the file if it doesn't exist.
+
+        Args:
+            arguments: Dict with 'path' and 'content'
+
+        Returns:
+            ToolResult with unified diff (for modifications) or creation message (for new files)
+        """
+        try:
+            input_data = ApplyPatchInput(**arguments)
+        except (TypeError, ValueError) as e:
+            return ToolResult(ok=False, content=f"Invalid input: {e}")
+
+        try:
+            resolved_path = self.workspace.assert_write_allowed(input_data.path)
+        except (ValueError, PermissionError) as e:
+            return ToolResult(ok=False, content=f"Path error: {e}")
+
+        # Check if file exists
+        file_exists = resolved_path.exists()
+
+        if file_exists:
+            if not resolved_path.is_file():
+                return ToolResult(ok=False, content=f"Not a file: {input_data.path}")
+
+            try:
+                # Read current content
+                with open(resolved_path, "r", encoding="utf-8") as f:
+                    original_content = f.read()
+
+                # Generate unified diff
+                original_lines = original_content.splitlines(keepends=True)
+                new_lines = input_data.content.splitlines(keepends=True)
+                diff = difflib.unified_diff(
+                    original_lines,
+                    new_lines,
+                    fromfile=str(resolved_path),
+                    tofile=str(resolved_path),
+                    lineterm=""
+                )
+                diff_text = "".join(diff)
+
+                # Write new content
+                with open(resolved_path, "w", encoding="utf-8") as f:
+                    f.write(input_data.content)
+
+                return ToolResult(ok=True, content=diff_text or "(no diff)")
+
+            except UnicodeDecodeError:
+                return ToolResult(ok=False, content="File is not valid UTF-8 text")
+            except OSError as e:
+                return ToolResult(ok=False, content=f"Patch failed: {e}")
+        else:
+            # File doesn't exist, create it
+            try:
+                # Ensure parent directory exists
+                resolved_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Write new content
+                with open(resolved_path, "w", encoding="utf-8") as f:
+                    f.write(input_data.content)
+
+                return ToolResult(
+                    ok=True,
+                    content=f"Created file: {input_data.path}"
+                )
+
+            except OSError as e:
+                return ToolResult(ok=False, content=f"File creation failed: {e}")
 
     def run_command(self, arguments: dict[str, Any]) -> ToolResult:
         """
