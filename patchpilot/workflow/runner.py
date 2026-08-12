@@ -184,11 +184,21 @@ class WorkflowRunner:
             initial_prompt = f"Implement the following plan:\n\n{plan}"
             self.agent_loop.run(issue=initial_prompt)
 
+            # Step 4.5: Check if agent made any changes
+            actual_changes = _get_workspace_changes(workspace_path)
+            if not actual_changes:
+                # Only enforce this check for tasks that require code changes
+                if change_plan is not None and change_plan.planned_changes:
+                    raise WorkflowRunnerExecutionError(
+                        "Coding agent finished without modifying any repository files. "
+                        "Tasks requiring code changes (feature, bugfix, refactor) must modify at least one file."
+                    )
+                logger.info("Agent completed without file changes (allowed for non-code-change tasks)")
+
             # Step 5: Runtime scope validation against approved plan
             if change_plan is not None:
                 logger.info("Running runtime scope validation")
                 try:
-                    actual_changes = _get_workspace_changes(self.workspace.root)
                     validate_actual_changes(change_plan, actual_changes)
                     logger.info("Runtime scope validation passed")
                 except RuntimeError as e:
@@ -249,6 +259,14 @@ class WorkflowRunner:
 
                 # Step 6e: Run agent with repair prompt
                 self.agent_loop.run(issue=repair_prompt)
+
+                # Step 6e.5: Check if repair made any changes
+                repair_changes = _get_workspace_changes(workspace_path)
+                if not repair_changes:
+                    logger.warning(
+                        "Repair agent finished without modifying any files. Stopping repair loop."
+                    )
+                    break
 
                 # Step 6f: Scope gate check after repair
                 scope_result = self._check_repair_scope()

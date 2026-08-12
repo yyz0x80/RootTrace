@@ -15,6 +15,7 @@ from patchpilot.workflow.runner import (
     MAX_REPAIR_ATTEMPTS,
     WorkflowRunner,
     WorkflowRunnerSetupError,
+    WorkflowRunnerExecutionError,
     run_workflow,
 )
 from patchpilot.workspace import Workspace
@@ -82,10 +83,16 @@ class TestWorkflowRunnerExecute:
             sandbox=mock_sandbox,
         )
 
-        # Mock internal setup methods
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
-             patch.object(runner, '_cleanup'):
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -130,13 +137,18 @@ class TestWorkflowRunnerExecute:
         )
 
         # Mock internal setup methods and scope gate
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+             patch.object(runner, '_check_repair_scope') as mock_scope_check, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -196,13 +208,18 @@ class TestWorkflowRunnerExecute:
         )
 
         # Mock internal setup methods and scope gate
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+             patch.object(runner, '_check_repair_scope') as mock_scope_check, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -250,13 +267,18 @@ class TestWorkflowRunnerExecute:
         )
 
         # Mock internal setup methods and scope gate
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+             patch.object(runner, '_check_repair_scope') as mock_scope_check, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -329,13 +351,18 @@ class TestWorkflowRunnerExecute:
         )
 
         # Mock internal setup methods and scope gate
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_check_repair_scope') as mock_scope_check:
+             patch.object(runner, '_check_repair_scope') as mock_scope_check, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -678,13 +705,18 @@ class TestWorkflowRunnerScopeGate:
         )
 
         # Mock internal setup methods and git diff
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/module.py", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_get_modified_files') as mock_git_diff:
+             patch.object(runner, '_get_modified_files') as mock_git_diff, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock git diff to return safe files
             mock_git_diff.return_value = ["src/module.py", "README.md"]
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -728,13 +760,18 @@ class TestWorkflowRunnerScopeGate:
         )
 
         # Mock internal setup methods and git diff
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path=".env", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_get_modified_files') as mock_git_diff:
+             patch.object(runner, '_get_modified_files') as mock_git_diff, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock git diff to return forbidden file (.env)
             mock_git_diff.return_value = [".env"]
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -747,6 +784,92 @@ class TestWorkflowRunnerScopeGate:
         # Should attempt initial + 1 repair (then stop due to scope violation)
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1  # Only initial verification, scope gate blocks re-verification
+
+    def test_execute_no_changes_with_change_plan_raises_error(self):
+        """Test that agent with change plan must modify at least one file."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        # Create a change plan with planned changes
+        from patchpilot.planning.schema import ChangePlan, PlannedChange, ChangeAction
+        change_plan = ChangePlan(
+            risk_level="low",
+            planned_changes=[
+                PlannedChange(
+                    path="src/file.py",
+                    action=ChangeAction.MODIFY,
+                    description="Fix bug",
+                )
+            ]
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and empty changes
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+
+            # Mock no changes
+            mock_get_changes.return_value = []
+
+            with pytest.raises(WorkflowRunnerExecutionError) as exc_info:
+                runner.execute(
+                    issue="Fix the bug",
+                    plan="Implement the fix",
+                    change_plan=change_plan,
+                )
+
+            assert "without modifying any repository files" in str(exc_info.value)
+
+    def test_execute_no_changes_without_change_plan_allowed(self):
+        """Test that agent without change plan can complete without file changes."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and empty changes
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+
+            # Mock no changes
+            mock_get_changes.return_value = []
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        assert result.passed is True
+        assert mock_agent_loop.run.call_count == 1
+        assert mock_verifier.call_count == 1
 
     def test_scope_gate_blocks_cicd_changes(self):
         """Test that scope gate blocks CI/CD repair changes."""
@@ -780,13 +903,18 @@ class TestWorkflowRunnerScopeGate:
         )
 
         # Mock internal setup methods and git diff
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path=".github/workflows/test.yml", action="modify")]
+        
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch.object(runner, '_get_modified_files') as mock_git_diff:
+             patch.object(runner, '_get_modified_files') as mock_git_diff, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
 
             # Mock git diff to return CI/CD file
             mock_git_diff.return_value = [".github/workflows/test.yml"]
+            mock_get_changes.return_value = mock_changes
 
             result = runner.execute(
                 issue="Fix the bug",
