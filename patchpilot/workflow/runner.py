@@ -33,7 +33,7 @@ from patchpilot.planning.scope_gate import (
 )
 from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
-from patchpilot.tools import _get_workspace_changes
+from patchpilot.tools import _get_workspace_changes, generate_patch
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workspace import Workspace
@@ -160,7 +160,8 @@ class WorkflowRunner:
             - Get workspace changes via _get_workspace_changes
             - Scope gate validation
             - Run verifier
-        13. Return final verification report
+        13. Generate patch with all changes
+        14. Return final verification report
 
         Args:
             issue: The original issue description
@@ -299,7 +300,13 @@ class WorkflowRunner:
                 report = self.verifier()
                 report.retry_count = retry_count
 
-            # Step 13: Return final verification report
+            # Step 13: Generate patch with all changes
+            logger.info("Generating patch with all changes")
+            final_changes = _get_workspace_changes(workspace_path)
+            report.patch = generate_patch(workspace_path, final_changes)
+            logger.info("Patch generated successfully")
+
+            # Step 14: Return final verification report
             return report
 
         finally:

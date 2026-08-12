@@ -356,7 +356,8 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
     mock_verification_report = Mock(spec=VerificationReport)
     mock_verification_report.passed = True
     mock_verification_report.checks = []
-    mock_verification_report.total_duration_seconds = 1.0
+    mock_verification_report.total_duration = Mock(return_value=1.0)
+    mock_verification_report.patch = ""
     mock_verification_report.model_dump_json = Mock(return_value='{"passed": true}')
     mock_verification_report.get_failed_checks = Mock(return_value=[])
     mock_runner_instance.execute.return_value = mock_verification_report

@@ -110,6 +110,67 @@ def _get_workspace_changes(workspace: Path) -> list[WorkspaceChange]:
     return changes
 
 
+def generate_patch(
+    workspace: Path,
+    changes: list[WorkspaceChange],
+) -> str:
+    """Generate a git diff patch including newly created files.
+
+    This function handles the special case where newly created files
+    don't appear in normal git diff output. It uses 'git add -N' to
+    register new files with git without committing them, then generates
+    a complete diff using 'git diff HEAD'.
+
+    Args:
+        workspace: Path to the workspace directory
+        changes: List of WorkspaceChange objects representing file changes
+
+    Returns:
+        String containing the complete git diff output
+
+    Raises:
+        subprocess.CalledProcessError: If git commands fail
+    """
+    # Identify created files that need to be added to git index
+    created_files = [
+        change.path
+        for change in changes
+        if change.action == "create"
+    ]
+
+    # Register new files with git without committing (git add -N)
+    # This tells git to include these files in the diff output
+    if created_files:
+        subprocess.run(
+            [
+                "git",
+                "add",
+                "-N",
+                "--",
+                *created_files,
+            ],
+            cwd=workspace,
+            check=True,
+        )
+
+    # Generate the complete diff including new files
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--binary",
+            "--no-color",
+            "HEAD",
+        ],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    return result.stdout
+
+
 @dataclass
 class ToolInput:
     """Base class for tool input validation"""

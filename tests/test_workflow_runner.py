@@ -86,13 +86,16 @@ class TestWorkflowRunnerExecute:
         # Mock internal setup methods and workspace changes
         from patchpilot.tools import WorkspaceChange
         mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
-        
+
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -144,11 +147,13 @@ class TestWorkflowRunnerExecute:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_check_repair_scope') as mock_scope_check, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -215,11 +220,13 @@ class TestWorkflowRunnerExecute:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_check_repair_scope') as mock_scope_check, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -274,11 +281,13 @@ class TestWorkflowRunnerExecute:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_check_repair_scope') as mock_scope_check, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -358,11 +367,13 @@ class TestWorkflowRunnerExecute:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_check_repair_scope') as mock_scope_check, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -712,11 +723,13 @@ class TestWorkflowRunnerScopeGate:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_get_modified_files') as mock_git_diff, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock git diff to return safe files
             mock_git_diff.return_value = ["src/module.py", "README.md"]
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -767,11 +780,13 @@ class TestWorkflowRunnerScopeGate:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_get_modified_files') as mock_git_diff, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock git diff to return forbidden file (.env)
             mock_git_diff.return_value = [".env"]
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -820,10 +835,12 @@ class TestWorkflowRunnerScopeGate:
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock no changes
             mock_get_changes.return_value = []
+            mock_generate_patch.return_value = "diff content"
 
             with pytest.raises(WorkflowRunnerExecutionError) as exc_info:
                 runner.execute(
@@ -856,10 +873,12 @@ class TestWorkflowRunnerScopeGate:
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock no changes
             mock_get_changes.return_value = []
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -910,11 +929,13 @@ class TestWorkflowRunnerScopeGate:
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch.object(runner, '_get_modified_files') as mock_git_diff, \
-             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             # Mock git diff to return CI/CD file
             mock_git_diff.return_value = [".github/workflows/test.yml"]
             mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -940,7 +961,9 @@ class TestWorkflowRunnerScopeGate:
             workspace=mock_workspace,
         )
 
-        with patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes:
+        with patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
+            mock_generate_patch.return_value = "diff content"
             from patchpilot.tools import WorkspaceChange
             mock_get_changes.return_value = [
                 WorkspaceChange(path="src/file1.py", action="modify"),

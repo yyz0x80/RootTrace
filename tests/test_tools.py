@@ -16,6 +16,7 @@ from patchpilot.tools import (
     WorkspaceChange,
     _get_workspace_changes,
     generate_json_schema,
+    generate_patch,
 )
 from patchpilot.workspace import Workspace
 
@@ -615,6 +616,7 @@ class TestToolSchema:
         assert schema_names == handler_names, "Schema names and handler names don't match"
 
 
+class TestWorkspaceChanges:
     """Tests for _get_workspace_changes function"""
 
     def test_get_workspace_changes_modified_files(self, temp_workspace):
@@ -749,6 +751,61 @@ class TestToolSchema:
         # Get workspace changes should raise RuntimeError
         with pytest.raises(RuntimeError, match="File rename is not supported"):
             _get_workspace_changes(temp_workspace.root)
+
+    def test_generate_patch_with_new_files(self, temp_workspace):
+        """Test that generate_patch handles new files correctly"""
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+
+        # Create and commit an initial file
+        initial_file = temp_workspace.root / "initial.py"
+        initial_file.write_text("initial content\n")
+        subprocess.run(["git", "add", "initial.py"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Create a new file (not committed)
+        new_file = temp_workspace.root / "new_file.py"
+        new_file.write_text("new content\n")
+
+        # Modify the initial file
+        initial_file.write_text("modified content\n")
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        # Generate patch
+        patch_content = generate_patch(temp_workspace.root, changes)
+
+        # Verify patch contains both new and modified files
+        assert "new_file.py" in patch_content or "new content" in patch_content
+        assert "initial.py" in patch_content or "modified content" in patch_content
+
+    def test_generate_patch_without_new_files(self, temp_workspace):
+        """Test that generate_patch works when there are no new files"""
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+
+        # Create and commit an initial file
+        initial_file = temp_workspace.root / "initial.py"
+        initial_file.write_text("initial content\n")
+        subprocess.run(["git", "add", "initial.py"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Modify the initial file
+        initial_file.write_text("modified content\n")
+
+        # Get workspace changes
+        changes = _get_workspace_changes(temp_workspace.root)
+
+        # Generate patch
+        patch_content = generate_patch(temp_workspace.root, changes)
+
+        # Verify patch contains the modified file
+        assert "initial.py" in patch_content or "modified content" in patch_content
 
 
 class TestWorkspaceChange:

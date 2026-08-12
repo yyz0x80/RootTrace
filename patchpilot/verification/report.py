@@ -67,6 +67,7 @@ class VerificationReport:
         retry_count: Number of retry attempts for failed checks
         failed_level: The verification level at which failure occurred
         failure_type: Primary failure type classification from workflow
+        patch: Git diff patch containing all changes made
     """
 
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -75,6 +76,7 @@ class VerificationReport:
     retry_count: int = 0
     failed_level: str | None = None
     failure_type: str | None = None
+    patch: str = ""
 
     def add_check(self, check: CheckReport) -> None:
         """Add a check report to the verification report.
@@ -183,6 +185,7 @@ class VerificationReport:
             retry_count=data.get("retry_count", 0),
             failed_level=data.get("failed_level"),
             failure_type=data.get("failure_type"),
+            patch=data.get("patch", ""),
         )
 
 

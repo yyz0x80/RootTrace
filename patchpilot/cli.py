@@ -829,12 +829,21 @@ def handle_execute(args) -> None:
             print("Saved: artifacts/verification_report.json")
             print()
 
-            # Step 11: Print results
+            # Step 11: Save patch
+            if verification_report.patch:
+                print("Saving patch...")
+                patch_path = Path("artifacts/patch.diff")
+                patch_path.parent.mkdir(parents=True, exist_ok=True)
+                patch_path.write_text(verification_report.patch, encoding="utf-8")
+                print("Saved: artifacts/patch.diff")
+                print()
+
+            # Step 12: Print results
             print("EXECUTION_COMPLETE\n")
             if verification_report.passed:
                 print("✓ Verification passed")
                 print(f"  Total checks: {len(verification_report.checks)}")
-                print(f"  Duration: {verification_report.total_duration_seconds:.2f}s")
+                print(f"  Duration: {verification_report.total_duration():.2f}s")
             else:
                 print("✗ Verification failed")
                 failed_checks = verification_report.get_failed_checks()
