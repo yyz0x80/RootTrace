@@ -194,10 +194,11 @@ class SearchCodeInput(ToolInput):
 @dataclass
 class ReadFileInput(ToolInput):
     """Input for read_file tool"""
-    description: ClassVar[str] = "Read file content with line numbers. Supports optional line range for partial reads."
+    description: ClassVar[str] = "Read file content. By default returns content with line numbers prefixed (e.g., '1: content'). Set raw=True to get content without line numbers. Supports optional line range for partial reads."
     path: str
     start_line: int = 1
     end_line: int | None = None
+    raw: bool = False
 
     def __post_init__(self):
         if not isinstance(self.path, str):
@@ -206,15 +207,19 @@ class ReadFileInput(ToolInput):
             raise TypeError(f"start_line must be int, not {type(self.start_line).__name__}")
         if self.end_line is not None and not isinstance(self.end_line, int):
             raise TypeError(f"end_line must be int or None, not {type(self.end_line).__name__}")
+        if not isinstance(self.raw, bool):
+            raise TypeError(f"raw must be bool, not {type(self.raw).__name__}")
 
 
 @dataclass
 class EditFileInput(ToolInput):
     """Input for edit_file tool"""
-    description: ClassVar[str] = "Edit file using exact text replacement. Replaces the first occurrence of old_text with new_text and returns a unified diff."
+    description: ClassVar[str] = "Edit file using exact text replacement. Replaces the first occurrence of old_text with new_text and returns a unified diff. Provide context_lines to include surrounding context for better matching. Set preview=True to see the change without applying it."
     path: str
     old_text: str
     new_text: str
+    context_lines: int = 0
+    preview: bool = False
 
     def __post_init__(self):
         if not isinstance(self.path, str):
@@ -223,6 +228,39 @@ class EditFileInput(ToolInput):
             raise TypeError(f"old_text must be str, not {type(self.old_text).__name__}")
         if not isinstance(self.new_text, str):
             raise TypeError(f"new_text must be str, not {type(self.new_text).__name__}")
+        if not isinstance(self.context_lines, int):
+            raise TypeError(f"context_lines must be int, not {type(self.context_lines).__name__}")
+        if not isinstance(self.preview, bool):
+            raise TypeError(f"preview must be bool, not {type(self.preview).__name__}")
+        if self.context_lines < 0:
+            raise ValueError(f"context_lines must be non-negative, got {self.context_lines}")
+
+
+@dataclass
+class EditFileByLineInput(ToolInput):
+    """Input for edit_file_by_line tool"""
+    description: ClassVar[str] = "Edit file by line number range. Replaces lines from start_line to end_line (inclusive) with new_text and returns a unified diff. Set preview=True to see the change without applying it."
+    path: str
+    start_line: int
+    end_line: int
+    new_text: str
+    preview: bool = False
+
+    def __post_init__(self):
+        if not isinstance(self.path, str):
+            raise TypeError(f"path must be str, not {type(self.path).__name__}")
+        if not isinstance(self.start_line, int):
+            raise TypeError(f"start_line must be int, not {type(self.start_line).__name__}")
+        if not isinstance(self.end_line, int):
+            raise TypeError(f"end_line must be int, not {type(self.end_line).__name__}")
+        if not isinstance(self.new_text, str):
+            raise TypeError(f"new_text must be str, not {type(self.new_text).__name__}")
+        if not isinstance(self.preview, bool):
+            raise TypeError(f"preview must be bool, not {type(self.preview).__name__}")
+        if self.start_line < 1:
+            raise ValueError(f"start_line must be >= 1, got {self.start_line}")
+        if self.end_line < self.start_line:
+            raise ValueError(f"end_line must be >= start_line, got start_line={self.start_line}, end_line={self.end_line}")
 
 
 @dataclass
@@ -239,15 +277,18 @@ class RunCommandInput(ToolInput):
 @dataclass
 class ApplyPatchInput(ToolInput):
     """Input for apply_patch tool"""
-    description: ClassVar[str] = "Apply a patch to a file. If the file exists, replaces its entire content and returns a unified diff. If the file doesn't exist, creates it with the given content."
+    description: ClassVar[str] = "Apply a patch to a file. If the file exists, replaces its entire content and returns a unified diff. If the file doesn't exist, creates it with the given content. Set preview=True to see the change without applying it."
     path: str
     content: str
+    preview: bool = False
 
     def __post_init__(self):
         if not isinstance(self.path, str):
             raise TypeError(f"path must be str, not {type(self.path).__name__}")
         if not isinstance(self.content, str):
             raise TypeError(f"content must be str, not {type(self.content).__name__}")
+        if not isinstance(self.preview, bool):
+            raise TypeError(f"preview must be bool, not {type(self.preview).__name__}")
 
 
 @dataclass
@@ -411,6 +452,11 @@ class ToolRegistry:
             name="edit_file",
             input_class=EditFileInput,
             handler=self.edit_file,
+        )
+        self.register_tool(
+            name="edit_file_by_line",
+            input_class=EditFileByLineInput,
+            handler=self.edit_file_by_line,
         )
         self.register_tool(
             name="apply_patch",
@@ -586,14 +632,15 @@ class ToolRegistry:
 
     def read_file(self, arguments: dict[str, Any]) -> ToolResult:
         """
-        Read file content with line numbers.
+        Read file content with optional line numbers.
         
         Args:
             arguments: Dict with 'path', optional 'start_line' (default 1), 
-                      and optional 'end_line' (default None)
+                      optional 'end_line' (default None), and optional 'raw' (default False)
         
         Returns:
-            ToolResult with file content prefixed with line numbers
+            ToolResult with file content. If raw=False, returns content with line numbers.
+            If raw=True, returns raw content without line numbers.
         """
         try:
             input_data = ReadFileInput(**arguments)
@@ -631,8 +678,14 @@ class ToolRegistry:
                     content=f"Request exceeds maximum line limit of {self.MAX_FILE_LINES}"
                 )
 
-            # Format with line numbers
+            # Get selected lines
             selected_lines = lines[start_idx:end_idx]
+
+            # Return raw content if requested
+            if input_data.raw:
+                return ToolResult(ok=True, content="".join(selected_lines))
+
+            # Format with line numbers (default behavior)
             output_lines = []
             for i, line in enumerate(selected_lines, start=start_idx + 1):
                 output_lines.append(f"{i}: {line.rstrip()}")
@@ -646,13 +699,14 @@ class ToolRegistry:
 
     def edit_file(self, arguments: dict[str, Any]) -> ToolResult:
         """
-        Edit file using exact text replacement.
+        Edit file using exact text replacement with optional context and preview.
         
         Args:
-            arguments: Dict with 'path', 'old_text', and 'new_text'
+            arguments: Dict with 'path', 'old_text', 'new_text', optional 'context_lines' (default 0),
+                      and optional 'preview' (default False)
         
         Returns:
-            ToolResult with unified diff or error message
+            ToolResult with unified diff or error message. If preview=True, shows change without applying.
         """
         try:
             input_data = EditFileInput(**arguments)
@@ -676,21 +730,52 @@ class ToolRegistry:
             with open(resolved_path, "r", encoding="utf-8") as f:
                 original_content = f.read()
 
-            # Verify old_text appears exactly once
-            count = original_content.count(input_data.old_text)
-            if count == 0:
-                return ToolResult(
-                    ok=False,
-                    content="old_text not found in file. Please re-read the file and verify the exact text."
-                )
-            if count > 1:
-                return ToolResult(
-                    ok=False,
-                    content=f"old_text appears {count} times in file. Please provide more specific context."
-                )
+            # Build search text with context if provided
+            search_text = input_data.old_text
+            if input_data.context_lines > 0:
+                # Find the location of old_text in the file
+                lines = original_content.splitlines()
+                old_text_lines = input_data.old_text.splitlines()
+                
+                # Find the line number where old_text starts
+                match_line = -1
+                for i in range(len(lines) - len(old_text_lines) + 1):
+                    if lines[i:i+len(old_text_lines)] == old_text_lines:
+                        match_line = i
+                        break
+                
+                if match_line == -1:
+                    # old_text not found with exact line match, try substring search
+                    if input_data.old_text not in original_content:
+                        return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
+                    match_line = original_content.find(input_data.old_text)
+                    # Convert character position to approximate line number
+                    match_line = original_content[:match_line].count('\n')
+                
+                # Build context-aware search text
+                context_start = max(0, match_line - input_data.context_lines)
+                context_end = min(len(lines), match_line + len(old_text_lines) + input_data.context_lines)
+                search_text = '\n'.join(lines[context_start:context_end])
+                
+                # Replace within the context
+                if search_text not in original_content:
+                    return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
+                
+                new_search_text = search_text.replace(input_data.old_text, input_data.new_text, 1)
+                new_content = original_content.replace(search_text, new_search_text, 1)
+            else:
+                # Verify old_text appears exactly once
+                count = original_content.count(input_data.old_text)
+                if count == 0:
+                    return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
+                if count > 1:
+                    return ToolResult(
+                        ok=False,
+                        content=f"old_text appears {count} times in file. Please provide more specific context or use context_lines parameter."
+                    )
 
-            # Perform replacement
-            new_content = original_content.replace(input_data.old_text, input_data.new_text, 1)
+                # Perform replacement
+                new_content = original_content.replace(input_data.old_text, input_data.new_text, 1)
 
             # Generate unified diff
             original_lines = original_content.splitlines(keepends=True)
@@ -703,6 +788,136 @@ class ToolRegistry:
                 lineterm=""
             )
             diff_text = "".join(diff)
+
+            # If preview mode, return diff without writing
+            if input_data.preview:
+                return ToolResult(ok=True, content=f"PREVIEW MODE - No changes applied:\n{diff_text or '(no diff)'}")
+
+            # Write new content
+            with open(resolved_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            return ToolResult(ok=True, content=diff_text or "(no diff)")
+
+        except UnicodeDecodeError:
+            return ToolResult(ok=False, content="File is not valid UTF-8 text")
+        except OSError as e:
+            return ToolResult(ok=False, content=f"Edit failed: {e}")
+
+    def _enhanced_edit_error(self, file_content: str, old_text: str, file_path: Path) -> ToolResult:
+        """Generate enhanced error message for edit_file failures.
+        
+        Args:
+            file_content: Current file content
+            old_text: The text that was not found
+            file_path: Path to the file for context
+        
+        Returns:
+            ToolResult with detailed error information
+        """
+        lines = file_content.splitlines()
+        old_text_lines = old_text.splitlines()
+        
+        # Try to find similar content using difflib
+        similar_lines = []
+        for i, line in enumerate(lines):
+            # Check if any line from old_text is similar to this line
+            for old_line in old_text_lines:
+                if old_line and line:
+                    similarity = difflib.SequenceMatcher(None, old_line, line).ratio()
+                    if similarity > 0.5:  # More than 50% similar
+                        similar_lines.append(f"Line {i+1}: {line[:80]}{'...' if len(line) > 80 else ''}")
+                        break
+        
+        error_msg = "old_text not found in file. The exact text you provided:\n"
+        error_msg += f"  {old_text[:100]!r}{'...' if len(old_text) > 100 else ''}\n\n"
+        
+        if similar_lines:
+            error_msg += "Similar content found in file:\n"
+            for similar_line in similar_lines[:5]:  # Show at most 5 similar lines
+                error_msg += f"  {similar_line}\n"
+            error_msg += "\nPlease re-read the file and verify the exact text including whitespace and indentation.\n"
+        else:
+            error_msg += "No similar content found. Please re-read the file to get the exact text.\n"
+        
+        return ToolResult(ok=False, content=error_msg)
+
+    def edit_file_by_line(self, arguments: dict[str, Any]) -> ToolResult:
+        """
+        Edit file by line number range with optional preview.
+        
+        Args:
+            arguments: Dict with 'path', 'start_line', 'end_line', 'new_text', and optional 'preview' (default False)
+        
+        Returns:
+            ToolResult with unified diff or error message. If preview=True, shows change without applying.
+        """
+        try:
+            input_data = EditFileByLineInput(**arguments)
+        except (TypeError, ValueError) as e:
+            return ToolResult(ok=False, content=f"Invalid input: {e}")
+
+        try:
+            resolved_path = self.workspace.assert_write_allowed(input_data.path)
+        except (ValueError, PermissionError) as e:
+            return ToolResult(ok=False, content=f"Path error: {e}")
+
+        # Check file exists
+        if not resolved_path.exists():
+            return ToolResult(ok=False, content=f"File not found: {input_data.path}")
+
+        if not resolved_path.is_file():
+            return ToolResult(ok=False, content=f"Not a file: {input_data.path}")
+
+        try:
+            # Read current content
+            with open(resolved_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            # Validate line range
+            if input_data.start_line > len(lines):
+                return ToolResult(
+                    ok=False,
+                    content=f"start_line {input_data.start_line} exceeds file length ({len(lines)} lines)"
+                )
+            if input_data.end_line > len(lines):
+                return ToolResult(
+                    ok=False,
+                    content=f"end_line {input_data.end_line} exceeds file length ({len(lines)} lines)"
+                )
+
+            # Convert to 0-based indexing
+            start_idx = input_data.start_line - 1
+            end_idx = input_data.end_line  # end is inclusive for slicing
+
+            # Build new content
+            # Ensure new_text ends with newline if it doesn't already
+            if input_data.new_text and not input_data.new_text.endswith('\n'):
+                new_text_with_newline = input_data.new_text + '\n'
+            else:
+                new_text_with_newline = input_data.new_text
+            
+            new_lines = (
+                lines[:start_idx] + 
+                [new_text_with_newline] + 
+                lines[end_idx:]
+            )
+            new_content = "".join(new_lines)
+
+            # Generate unified diff
+            original_lines = lines[:]  # Copy for diff
+            diff = difflib.unified_diff(
+                original_lines,
+                new_lines,
+                fromfile=str(resolved_path),
+                tofile=str(resolved_path),
+                lineterm=""
+            )
+            diff_text = "".join(diff)
+
+            # If preview mode, return diff without writing
+            if input_data.preview:
+                return ToolResult(ok=True, content=f"PREVIEW MODE - No changes applied:\n{diff_text or '(no diff)'}")
 
             # Write new content
             with open(resolved_path, "w", encoding="utf-8") as f:
@@ -720,10 +935,11 @@ class ToolRegistry:
         Apply a patch to a file. Creates the file if it doesn't exist.
 
         Args:
-            arguments: Dict with 'path' and 'content'
+            arguments: Dict with 'path', 'content', and optional 'preview' (default False)
 
         Returns:
-            ToolResult with unified diff (for modifications) or creation message (for new files)
+            ToolResult with unified diff (for modifications) or creation message (for new files).
+            If preview=True, shows change without applying.
         """
         try:
             input_data = ApplyPatchInput(**arguments)
@@ -759,6 +975,10 @@ class ToolRegistry:
                 )
                 diff_text = "".join(diff)
 
+                # If preview mode, return diff without writing
+                if input_data.preview:
+                    return ToolResult(ok=True, content=f"PREVIEW MODE - No changes applied:\n{diff_text or '(no diff)'}")
+
                 # Write new content
                 with open(resolved_path, "w", encoding="utf-8") as f:
                     f.write(input_data.content)
@@ -772,6 +992,13 @@ class ToolRegistry:
         else:
             # File doesn't exist, create it
             try:
+                # If preview mode, return message without creating
+                if input_data.preview:
+                    return ToolResult(
+                        ok=True,
+                        content=f"PREVIEW MODE - Would create file: {input_data.path}\nContent preview:\n{input_data.content[:500]}{'...' if len(input_data.content) > 500 else ''}"
+                    )
+
                 # Ensure parent directory exists
                 resolved_path.parent.mkdir(parents=True, exist_ok=True)
 

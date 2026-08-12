@@ -1,14 +1,31 @@
 {
-  "title": "Test Issue",
+  "title": "Add description field to Task",
   "task_type": "feature",
-  "problem_statement": "Test problem",
-  "acceptance_criteria": [],
-  "constraints": [],
-  "ambiguous_points": [
-    "Default priority is unspecified.",
-    "Error handling strategy is not defined.",
-    "Timeout behavior is unclear."
+  "problem_statement": "The Task dataclass currently only has a title field, which limits the amount of information that can be stored per task. Adding a description field will allow for more detailed task information to be stored and retrieved.",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Add a `description: str` field to the Task dataclass"
+    },
+    {
+      "id": "AC-2",
+      "description": "Update TaskService.create_task to accept an optional description parameter"
+    },
+    {
+      "id": "AC-3",
+      "description": "When description is not provided, default to empty string"
+    },
+    {
+      "id": "AC-4",
+      "description": "Update tests to verify the new description field works correctly"
+    }
   ],
-  "expected_test_areas": [],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [
+    "Task creation with description provided",
+    "Task creation with no description provided",
+    "Task retrieval and display of description"
+  ],
   "implementation_notes": []
 }

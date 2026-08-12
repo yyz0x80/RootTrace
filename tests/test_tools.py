@@ -160,6 +160,18 @@ class TestReadFile:
         assert not result.ok
         assert "Invalid input" in result.content
 
+    def test_read_file_raw_mode(self, tool_registry, temp_workspace):
+        """Test reading file in raw mode (without line numbers)"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.read_file({"path": "test.py", "raw": True})
+        assert result.ok
+        assert "1:" not in result.content  # No line numbers
+        assert "line1" in result.content
+        assert "line2" in result.content
+        assert "line3" in result.content
+
 
 class TestEditFile:
     """Tests for edit_file tool"""
@@ -258,6 +270,146 @@ class TestEditFile:
     def test_edit_file_invalid_input(self, tool_registry):
         """Test edit with invalid input"""
         result = tool_registry.edit_file({"path": 123, "old_text": "old", "new_text": "new"})
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+    def test_edit_file_with_context(self, tool_registry, temp_workspace):
+        """Test editing with context_lines parameter"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\nline4\nline5\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "line3",
+            "new_text": "line3_modified",
+            "context_lines": 1
+        })
+        assert result.ok
+        assert "line3_modified" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "line3_modified" in updated_content
+
+    def test_edit_file_preview_mode(self, tool_registry, temp_workspace):
+        """Test editing in preview mode (no changes applied)"""
+        test_file = temp_workspace.root / "test.py"
+        original_content = "def foo():\n    pass\n"
+        test_file.write_text(original_content)
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "pass",
+            "new_text": "return 42",
+            "preview": True
+        })
+        assert result.ok
+        assert "PREVIEW MODE" in result.content
+        assert "No changes applied" in result.content
+
+        # Verify file was NOT modified
+        updated_content = test_file.read_text()
+        assert updated_content == original_content
+
+    def test_edit_file_enhanced_error_message(self, tool_registry, temp_workspace):
+        """Test enhanced error message when old_text not found"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    return items\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "def paginate(item):",  # Typo: 'item' instead of 'items'
+            "new_text": "def paginate(items):"
+        })
+        assert not result.ok
+        assert "old_text not found" in result.content
+        # Check for enhanced error with similar content
+        assert "Similar content found" in result.content or "No similar content found" in result.content
+
+
+class TestEditFileByLine:
+    """Tests for edit_file_by_line tool"""
+
+    def test_edit_file_by_line_basic(self, tool_registry, temp_workspace):
+        """Test basic line-based editing"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\nline4\nline5\n")
+
+        result = tool_registry.edit_file_by_line({
+            "path": "test.py",
+            "start_line": 2,
+            "end_line": 4,
+            "new_text": "modified lines"
+        })
+        assert result.ok
+        assert "modified lines" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        # The implementation adds a newline to new_text if not present
+        assert "line1\nmodified lines\nline5\n" == updated_content
+
+    def test_edit_file_by_line_single_line(self, tool_registry, temp_workspace):
+        """Test editing a single line"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.edit_file_by_line({
+            "path": "test.py",
+            "start_line": 2,
+            "end_line": 2,
+            "new_text": "line2_modified"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        # The implementation adds a newline to new_text if not present
+        assert "line1\nline2_modified\nline3\n" == updated_content
+
+    def test_edit_file_by_line_preview_mode(self, tool_registry, temp_workspace):
+        """Test line-based editing in preview mode"""
+        test_file = temp_workspace.root / "test.py"
+        original_content = "line1\nline2\nline3\n"
+        test_file.write_text(original_content)
+
+        result = tool_registry.edit_file_by_line({
+            "path": "test.py",
+            "start_line": 2,
+            "end_line": 2,
+            "new_text": "modified",
+            "preview": True
+        })
+        assert result.ok
+        assert "PREVIEW MODE" in result.content
+        assert "No changes applied" in result.content
+
+        # Verify file was NOT modified
+        updated_content = test_file.read_text()
+        assert updated_content == original_content
+
+    def test_edit_file_by_line_invalid_range(self, tool_registry, temp_workspace):
+        """Test editing with invalid line range"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.edit_file_by_line({
+            "path": "test.py",
+            "start_line": 10,  # Beyond file length
+            "end_line": 12,
+            "new_text": "modified"
+        })
+        assert not result.ok
+        assert "exceeds file length" in result.content
+
+    def test_edit_file_by_line_end_before_start(self, tool_registry):
+        """Test editing with end_line before start_line"""
+        result = tool_registry.edit_file_by_line({
+            "path": "test.py",
+            "start_line": 5,
+            "end_line": 3,  # Invalid: end before start
+            "new_text": "modified"
+        })
         assert not result.ok
         assert "Invalid input" in result.content
 
@@ -380,6 +532,25 @@ class TestApplyPatch:
         # Verify file was emptied
         updated_content = test_file.read_text()
         assert updated_content == ""
+
+    def test_apply_patch_preview_mode(self, tool_registry, temp_workspace):
+        """Test apply_patch in preview mode (no changes applied)"""
+        test_file = temp_workspace.root / "test.py"
+        original_content = "original content\n"
+        test_file.write_text(original_content)
+
+        result = tool_registry.apply_patch({
+            "path": "test.py",
+            "content": "new content\n",
+            "preview": True
+        })
+        assert result.ok
+        assert "PREVIEW MODE" in result.content
+        assert "No changes applied" in result.content
+
+        # Verify file was NOT modified
+        updated_content = test_file.read_text()
+        assert updated_content == original_content
 
 
 class TestRunCommand:
@@ -569,11 +740,11 @@ class TestToolSchema:
     def test_get_tool_schemas(self, tool_registry):
         """Test getting all tool schemas in OpenAI format"""
         schemas = tool_registry.get_tool_schemas()
-        assert len(schemas) == 5
+        assert len(schemas) == 6  # search_code, read_file, edit_file, edit_file_by_line, apply_patch, run_command
         assert all(isinstance(schema, dict) for schema in schemas)
         assert all(schema["type"] == "function" for schema in schemas)
         tool_names = {schema["function"]["name"] for schema in schemas}
-        assert tool_names == {"search_code", "read_file", "edit_file", "apply_patch", "run_command"}
+        assert tool_names == {"search_code", "read_file", "edit_file", "edit_file_by_line", "apply_patch", "run_command"}
 
     def test_get_tool_schema_existing(self, tool_registry):
         """Test getting a specific tool schema that exists"""
