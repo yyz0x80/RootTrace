@@ -143,19 +143,24 @@ class WorkflowRunner:
     ) -> VerificationReport:
         """Execute the complete workflow from issue to verified patch.
 
-        This method implements the core workflow logic:
-        1. Create temporary repository copy
-        2. Update agent loop tools to use temporary workspace
-        3. Start Docker Sandbox
-        4. Run Coding Agent for initial modification
-        5. Runtime scope validation against approved plan
-        6. Run Verifier
-        7. Enter repair loop if verification fails:
-           - Run Repair Agent
-           - Get modified files via git diff --name-only
-           - Validate changes against scope gate
-           - Proceed to verifier only if scope gate allows
-        8. Return final verification report
+        This method implements the core workflow logic following the proper execution order:
+        1. Preflight validation (handled in CLI before this method)
+        2. Baseline validation (handled in CLI before this method)
+        3. Create temporary workspace copy
+        4. Update workspace to use temporary path
+        5. Update agent loop tools to use temporary workspace
+        6. Start Docker Sandbox
+        7. Run Coding Agent for initial modification
+        8. Check actual changes via _get_workspace_changes
+        9. Validate agent made changes if required
+        10. Runtime scope validation against approved plan
+        11. Run Verifier
+        12. Repair loop if verification failed:
+            - Run Repair Agent
+            - Get workspace changes via _get_workspace_changes
+            - Scope gate validation
+            - Run verifier
+        13. Return final verification report
 
         Args:
             issue: The original issue description
@@ -169,23 +174,28 @@ class WorkflowRunner:
             WorkflowRunnerSetupError: If workspace or sandbox setup fails
             WorkflowRunnerExecutionError: If agent execution fails critically
         """
-        # Step 1: Create temporary repository copy
+        # Step 3: Create temporary workspace copy
         workspace_path = self._create_temporary_workspace()
 
-        # Step 2: Update agent loop tools to use temporary workspace
+        # Step 4: Update workspace to use temporary path
+        self.workspace = Workspace(workspace_path)
+
+        # Step 5: Update agent loop tools to use temporary workspace
         self.agent_loop.update_workspace(self.workspace)
 
-        # Step 3: Start Docker Sandbox
+        # Step 6: Start Docker Sandbox
         self._start_sandbox(workspace_path)
 
         try:
-            # Step 4: Coding Agent initial modification
+            # Step 7: Coding Agent initial modification
             logger.info("Running coding agent for initial implementation")
             initial_prompt = f"Implement the following plan:\n\n{plan}"
             self.agent_loop.run(issue=initial_prompt)
 
-            # Step 4.5: Check if agent made any changes
+            # Step 8: Check actual changes via _get_workspace_changes
             actual_changes = _get_workspace_changes(workspace_path)
+
+            # Step 9: Validate agent made changes if required
             if not actual_changes:
                 # Only enforce this check for tasks that require code changes
                 if change_plan is not None and change_plan.planned_changes:
@@ -195,7 +205,7 @@ class WorkflowRunner:
                     )
                 logger.info("Agent completed without file changes (allowed for non-code-change tasks)")
 
-            # Step 5: Runtime scope validation against approved plan
+            # Step 10: Runtime scope validation against approved plan
             if change_plan is not None:
                 logger.info("Running runtime scope validation")
                 try:
@@ -207,16 +217,16 @@ class WorkflowRunner:
                         f"Runtime scope validation failed: {e}"
                     ) from e
 
-            # Step 6: Initial verification
+            # Step 11: Initial verification
             logger.info("Running initial verification")
             report = self.verifier()
 
-            # Step 7: Repair loop if verification failed
+            # Step 12: Repair loop if verification failed
             retry_count = 0
             previous_failure = None
 
             while not report.passed:
-                # Step 6a: Check for repeated failure (fingerprint check)
+                # Check for repeated failure (fingerprint check)
                 current_failure = failure_fingerprint(report)
 
                 if current_failure == previous_failure:
@@ -227,7 +237,7 @@ class WorkflowRunner:
 
                 previous_failure = current_failure
 
-                # Step 6b: Check for unrecoverable errors
+                # Check for unrecoverable errors
                 if report.failure_type in UNRECOVERABLE_FAILURE_TYPES:
                     logger.warning(
                         "Unrecoverable failure detected: %s. Stopping repair loop.",
@@ -235,7 +245,7 @@ class WorkflowRunner:
                     )
                     break
 
-                # Step 6c: Check repair attempt limit
+                # Check repair attempt limit
                 if retry_count >= MAX_REPAIR_ATTEMPTS:
                     logger.warning(
                         "Maximum repair attempts (%d) reached. Stopping repair loop.",
@@ -250,17 +260,17 @@ class WorkflowRunner:
                     MAX_REPAIR_ATTEMPTS,
                 )
 
-                # Step 6d: Build repair prompt with failure feedback
+                # Build repair prompt with failure feedback
                 repair_prompt = self._build_repair_prompt(
                     issue=issue,
                     plan=plan,
                     failure_report=report,
                 )
 
-                # Step 6e: Run agent with repair prompt
+                # Run agent with repair prompt
                 self.agent_loop.run(issue=repair_prompt)
 
-                # Step 6e.5: Check if repair made any changes
+                # Get workspace changes after repair
                 repair_changes = _get_workspace_changes(workspace_path)
                 if not repair_changes:
                     logger.warning(
@@ -268,7 +278,7 @@ class WorkflowRunner:
                     )
                     break
 
-                # Step 6f: Scope gate check after repair
+                # Scope gate validation after repair
                 scope_result = self._check_repair_scope()
                 if not scope_result.allowed:
                     logger.warning(
@@ -285,10 +295,11 @@ class WorkflowRunner:
                         report.checks[-1].summary["scope_warnings"] = scope_result.warnings
                     break
 
-                # Step 6g: Re-run verification
+                # Re-run verification
                 report = self.verifier()
                 report.retry_count = retry_count
 
+            # Step 13: Return final verification report
             return report
 
         finally:
@@ -373,10 +384,6 @@ class WorkflowRunner:
             )
 
             logger.info("Temporary workspace setup complete")
-
-            # Update workspace to use temporary path
-            self.workspace = Workspace(workspace_path)
-            logger.info("Workspace updated to temporary path: %s", workspace_path)
 
             return workspace_path
 

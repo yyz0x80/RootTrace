@@ -633,7 +633,7 @@ def handle_execute(args) -> None:
         
         # Step 3: Setup workspace
         repo_path = Path(args.repo)
-        
+
         # Validate repository
         print("Validating repository...")
         try:
@@ -644,25 +644,38 @@ def handle_execute(args) -> None:
         except RepositoryPreflightError as e:
             print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
-        
-        workspace = Workspace(root=repo_path)
-        print(f"Workspace initialized: {repo_path}")
-        print()
-        
+
+        # Step 3: Verify repository baseline matches plan
+        if preflight_result.head_sha != plan.base_commit:
+            print(
+                "Repository HEAD has changed since the plan was generated.",
+                file=sys.stderr
+            )
+            print(f"Plan base commit: {plan.base_commit[:8]}...", file=sys.stderr)
+            print(f"Current HEAD: {preflight_result.head_sha[:8]}...", file=sys.stderr)
+            print("Run `patchpilot prepare` again.", file=sys.stderr)
+            sys.exit(1)
+
         # Step 4: Create provider
         provider = LLMProvider()
         
-        # Step 5: Create tool registry
+        # Step 5: Create initial workspace with original repo path
+        # This will be updated to temporary workspace path during runner execution
+        workspace = Workspace(root=repo_path)
+        print(f"Workspace initialized with original repo: {repo_path}")
+        print()
+        
+        # Step 6: Create tool registry
         tools = ToolRegistry(workspace=workspace)
         
-        # Step 6: Create agent loop
+        # Step 7: Create agent loop
         agent_loop = AgentLoop(
             provider=provider,
             tools=tools,
             max_rounds=args.max_rounds,
         )
         
-        # Step 7: Create workflow runner with placeholder verifier
+        # Step 8: Create workflow runner with placeholder verifier
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=lambda: VerificationReport(),  # Placeholder, will be replaced

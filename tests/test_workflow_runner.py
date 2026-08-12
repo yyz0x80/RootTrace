@@ -14,8 +14,8 @@ from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workflow.runner import (
     MAX_REPAIR_ATTEMPTS,
     WorkflowRunner,
-    WorkflowRunnerSetupError,
     WorkflowRunnerExecutionError,
+    WorkflowRunnerSetupError,
     run_workflow,
 )
 from patchpilot.workspace import Workspace
@@ -797,7 +797,7 @@ class TestWorkflowRunnerScopeGate:
         mock_verifier.return_value = mock_report
 
         # Create a change plan with planned changes
-        from patchpilot.planning.schema import ChangePlan, PlannedChange, ChangeAction
+        from patchpilot.planning.schema import ChangeAction, ChangePlan, PlannedChange
         change_plan = ChangePlan(
             risk_level="low",
             planned_changes=[
