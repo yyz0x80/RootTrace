@@ -360,6 +360,7 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
     mock_verification_report.patch = ""
     mock_verification_report.model_dump_json = Mock(return_value='{"passed": true}')
     mock_verification_report.get_failed_checks = Mock(return_value=[])
+    mock_verification_report.to_dict = Mock(return_value={"passed": True})
     mock_runner_instance.execute.return_value = mock_verification_report
     mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
     mock_runner_instance._cleanup = Mock()

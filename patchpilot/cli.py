@@ -821,7 +821,7 @@ def handle_execute(args) -> None:
             # Step 10: Save verification report
             save_json(
                 "artifacts/verification_report.json",
-                verification_report.to_dict(),
+                json.dumps(verification_report.to_dict(), indent=2),
             )
 
             # Step 11: Save patch
