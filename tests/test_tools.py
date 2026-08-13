@@ -8,6 +8,7 @@ from patchpilot.models import ToolResult
 from patchpilot.tools import (
     ApplyPatchInput,
     EditFileInput,
+    InsertTextInput,
     ReadFileInput,
     RunCommandInput,
     SearchCodeInput,
@@ -255,7 +256,7 @@ class TestEditFile:
             "new_text": "def test_modified():"
         })
         assert not result.ok
-        assert "tests directory rejected" in result.content
+        assert "Modifying test files is not allowed" in result.content
 
     def test_edit_file_outside_workspace(self, tool_registry):
         """Test that editing files outside workspace is rejected"""
@@ -325,6 +326,214 @@ class TestEditFile:
         assert "old_text not found" in result.content
         # Check for enhanced error with similar content
         assert "Similar content found" in result.content or "No similar content found" in result.content
+
+    def test_edit_file_empty_old_text_error(self, tool_registry, temp_workspace):
+        """Test error message when old_text is empty"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    return items\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "",  # Empty old_text
+            "new_text": "new text"
+        })
+        assert not result.ok
+        assert "old_text is empty" in result.content
+        assert "insert_text" in result.content
+        assert "insert_text(path='file.py', line_number=10, text='new content')" in result.content
+
+    def test_edit_file_whitespace_only_old_text_error(self, tool_registry, temp_workspace):
+        """Test error message when old_text contains only whitespace"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    return items\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "   ",  # Whitespace only
+            "new_text": "new text"
+        })
+        assert not result.ok
+        assert "old_text is empty" in result.content
+        assert "insert_text" in result.content
+
+    def test_edit_file_line_prefix_error_with_example(self, tool_registry, temp_workspace):
+        """Test error message with specific example when line prefixes are detected"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    return items\n")
+
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "1: def paginate(items):\n2:     return items",  # With line prefixes
+            "new_text": "def paginate(items):\n    return items"
+        })
+        assert not result.ok
+        assert "line number prefixes" in result.content
+        # Check for specific example in error message
+        assert "Example correction" in result.content or "Wrong:" in result.content
+
+
+class TestInsertTextTool:
+    """Tests for insert_text tool"""
+
+    def test_insert_text_input_validation(self):
+        """Test InsertTextInput validation"""
+        # Valid input
+        input_data = InsertTextInput(
+            path="test.py",
+            line_number=1,
+            text="new text"
+        )
+        assert input_data.path == "test.py"
+        assert input_data.line_number == 1
+        assert input_data.text == "new text"
+
+        # Invalid line number (negative)
+        with pytest.raises(ValueError, match="line_number must be >= 0"):
+            InsertTextInput(path="test.py", line_number=-1, text="text")
+
+        # Invalid path type
+        with pytest.raises(TypeError, match="path must be str"):
+            InsertTextInput(path=123, line_number=1, text="text")
+
+    def test_insert_text_basic(self, tool_registry, temp_workspace):
+        """Test basic text insertion"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 1,
+            "text": "inserted_line\n"
+        })
+        assert result.ok
+        assert "inserted_line" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "line1\ninserted_line\nline2\nline3\n" == updated_content
+
+    def test_insert_text_at_beginning(self, tool_registry, temp_workspace):
+        """Test inserting at the beginning (line_number=0)"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 0,
+            "text": "first_line\n"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "first_line\nline1\nline2\n" == updated_content
+
+    def test_insert_text_at_end(self, tool_registry, temp_workspace):
+        """Test inserting at the end of file"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 2,
+            "text": "last_line\n"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "line1\nline2\nlast_line\n" == updated_content
+
+    def test_insert_text_preview_mode(self, tool_registry, temp_workspace):
+        """Test inserting in preview mode (no changes applied)"""
+        test_file = temp_workspace.root / "test.py"
+        original_content = "line1\nline2\n"
+        test_file.write_text(original_content)
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 1,
+            "text": "inserted\n",
+            "preview": True
+        })
+        assert result.ok
+        assert "PREVIEW MODE" in result.content
+        assert "No changes applied" in result.content
+
+        # Verify file was NOT modified
+        updated_content = test_file.read_text()
+        assert updated_content == original_content
+
+    def test_insert_text_not_found(self, tool_registry):
+        """Test inserting into non-existent file"""
+        result = tool_registry.insert_text({
+            "path": "nonexistent.py",
+            "line_number": 1,
+            "text": "new text"
+        })
+        assert not result.ok
+        assert "File not found" in result.content
+
+    def test_insert_text_line_number_exceeds_file(self, tool_registry, temp_workspace):
+        """Test inserting with line_number beyond file length"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 10,  # Beyond file length
+            "text": "new text"
+        })
+        assert not result.ok
+        assert "exceeds file length" in result.content
+
+    def test_insert_text_auto_newline(self, tool_registry, temp_workspace):
+        """Test that text without newline gets one added automatically"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 1,
+            "text": "inserted_line"  # No newline
+        })
+        assert result.ok
+
+        # Verify file was actually modified with newline added
+        updated_content = test_file.read_text()
+        assert "line1\ninserted_line\nline2\n" == updated_content
+
+    def test_insert_text_invalid_input(self, tool_registry):
+        """Test insert with invalid input"""
+        result = tool_registry.insert_text({"path": 123, "line_number": 1, "text": "text"})
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+    def test_insert_text_negative_line_number(self, tool_registry):
+        """Test insert with negative line number"""
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": -1,
+            "text": "text"
+        })
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+    def test_insert_text_empty_file(self, tool_registry, temp_workspace):
+        """Test inserting into empty file"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 0,
+            "text": "first_line\n"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "first_line\n" == updated_content
 
 
 class TestEditFileByLine:
@@ -414,6 +623,150 @@ class TestEditFileByLine:
         assert "Invalid input" in result.content
 
 
+class TestInsertText:
+    """Tests for insert_text tool"""
+
+    def test_insert_text_basic(self, tool_registry, temp_workspace):
+        """Test basic text insertion"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\nline3\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 1,
+            "text": "inserted_line\n"
+        })
+        assert result.ok
+        assert "inserted_line" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "line1\ninserted_line\nline2\nline3\n" == updated_content
+
+    def test_insert_text_at_beginning(self, tool_registry, temp_workspace):
+        """Test inserting at the beginning (line_number=0)"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 0,
+            "text": "first_line\n"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "first_line\nline1\nline2\n" == updated_content
+
+    def test_insert_text_at_end(self, tool_registry, temp_workspace):
+        """Test inserting at the end of file"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 2,
+            "text": "last_line\n"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "line1\nline2\nlast_line\n" == updated_content
+
+    def test_insert_text_preview_mode(self, tool_registry, temp_workspace):
+        """Test inserting in preview mode (no changes applied)"""
+        test_file = temp_workspace.root / "test.py"
+        original_content = "line1\nline2\n"
+        test_file.write_text(original_content)
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 1,
+            "text": "inserted\n",
+            "preview": True
+        })
+        assert result.ok
+        assert "PREVIEW MODE" in result.content
+        assert "No changes applied" in result.content
+
+        # Verify file was NOT modified
+        updated_content = test_file.read_text()
+        assert updated_content == original_content
+
+    def test_insert_text_not_found(self, tool_registry):
+        """Test inserting into non-existent file"""
+        result = tool_registry.insert_text({
+            "path": "nonexistent.py",
+            "line_number": 1,
+            "text": "new text"
+        })
+        assert not result.ok
+        assert "File not found" in result.content
+
+    def test_insert_text_line_number_exceeds_file(self, tool_registry, temp_workspace):
+        """Test inserting with line_number beyond file length"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 10,  # Beyond file length
+            "text": "new text"
+        })
+        assert not result.ok
+        assert "exceeds file length" in result.content
+
+    def test_insert_text_auto_newline(self, tool_registry, temp_workspace):
+        """Test that text without newline gets one added automatically"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("line1\nline2\n")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 1,
+            "text": "inserted_line"  # No newline
+        })
+        assert result.ok
+
+        # Verify file was actually modified with newline added
+        updated_content = test_file.read_text()
+        assert "line1\ninserted_line\nline2\n" == updated_content
+
+    def test_insert_text_invalid_input(self, tool_registry):
+        """Test insert with invalid input"""
+        result = tool_registry.insert_text({"path": 123, "line_number": 1, "text": "text"})
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+    def test_insert_text_negative_line_number(self, tool_registry):
+        """Test insert with negative line number"""
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": -1,
+            "text": "text"
+        })
+        assert not result.ok
+        assert "Invalid input" in result.content
+
+    def test_insert_text_empty_file(self, tool_registry, temp_workspace):
+        """Test inserting into empty file"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("")
+
+        result = tool_registry.insert_text({
+            "path": "test.py",
+            "line_number": 0,
+            "text": "first_line\n"
+        })
+        assert result.ok
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "first_line\n" == updated_content
+
+
 class TestApplyPatch:
     """Tests for apply_patch tool"""
 
@@ -501,7 +854,7 @@ class TestApplyPatch:
             "content": "def test_new():\n    pass\n"
         })
         assert not result.ok
-        assert "tests directory rejected" in result.content
+        assert "Modifying test files is not allowed" in result.content
 
     def test_apply_patch_outside_workspace(self, tool_registry):
         """Test that applying patch outside workspace is rejected"""
@@ -740,11 +1093,11 @@ class TestToolSchema:
     def test_get_tool_schemas(self, tool_registry):
         """Test getting all tool schemas in OpenAI format"""
         schemas = tool_registry.get_tool_schemas()
-        assert len(schemas) == 6  # search_code, read_file, edit_file, edit_file_by_line, apply_patch, run_command
+        assert len(schemas) == 7  # search_code, read_file, edit_file, insert_text, edit_file_by_line, apply_patch, run_command
         assert all(isinstance(schema, dict) for schema in schemas)
         assert all(schema["type"] == "function" for schema in schemas)
         tool_names = {schema["function"]["name"] for schema in schemas}
-        assert tool_names == {"search_code", "read_file", "edit_file", "edit_file_by_line", "apply_patch", "run_command"}
+        assert tool_names == {"search_code", "read_file", "edit_file", "insert_text", "edit_file_by_line", "apply_patch", "run_command"}
 
     def test_get_tool_schema_existing(self, tool_registry):
         """Test getting a specific tool schema that exists"""
@@ -754,6 +1107,13 @@ class TestToolSchema:
         assert schema.description is not None
         assert schema.input_schema is not None
         assert isinstance(schema.input_schema, dict)
+
+        # Test the new insert_text tool schema
+        insert_schema = tool_registry.get_tool_schema("insert_text")
+        assert insert_schema is not None
+        assert insert_schema.name == "insert_text"
+        assert insert_schema.description is not None
+        assert insert_schema.input_schema is not None
 
     def test_get_tool_schema_nonexistent(self, tool_registry):
         """Test getting a specific tool schema that doesn't exist"""
