@@ -489,9 +489,11 @@ class TestWorkflowRunnerSetup:
             sandbox=mock_sandbox,
         )
 
-        runner._start_sandbox(Path("/fake/workspace"))
+        # Create a real temporary directory for the test
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner._start_sandbox(Path(temp_dir))
 
-        mock_sandbox.start.assert_called_once()
+            mock_sandbox.start.assert_called_once()
 
     def test_start_sandbox_creates_when_none(self):
         """Test that sandbox is created when not provided."""
@@ -514,11 +516,13 @@ class TestWorkflowRunnerSetup:
             mock_sandbox_instance = Mock()
             mock_docker_sandbox.return_value = mock_sandbox_instance
 
-            runner._start_sandbox(Path("/fake/workspace"))
+            # Create a real temporary directory for the test
+            with tempfile.TemporaryDirectory() as temp_dir:
+                runner._start_sandbox(Path(temp_dir))
 
-            mock_docker_sandbox.assert_called_once()
-            mock_sandbox_instance.start.assert_called_once()
-            assert runner.sandbox == mock_sandbox_instance
+                mock_docker_sandbox.assert_called_once()
+                mock_sandbox_instance.start.assert_called_once()
+                assert runner.sandbox == mock_sandbox_instance
 
     def test_cleanup_stops_sandbox(self):
         """Test that cleanup stops the sandbox."""

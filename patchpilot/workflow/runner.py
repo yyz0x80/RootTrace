@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import logging
 import platform
+import shutil
 import subprocess
 import tarfile
 import tempfile
 from collections.abc import Callable
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,127 @@ from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workspace import Workspace
 
 logger = logging.getLogger(__name__)
+
+# Standard ignore patterns for temporary and compiled files
+# These patterns are applied regardless of the target repository's .gitignore
+DEFAULT_IGNORE_PATTERNS = [
+    # Python cache files
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    "*.egg-info/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    # macOS files
+    ".DS_Store",
+    ".AppleDouble",
+    ".LSOverride",
+    # Editor temporary files
+    "*.swp",
+    "*.swo",
+    "*.swn",
+    "*.bak",
+    "*~",
+    # Build artifacts
+    "dist/",
+    "build/",
+    "*.egg",
+]
+
+
+def _should_ignore_file_in_workspace(file_path: str) -> bool:
+    """Check if a file should be ignored based on standard patterns.
+
+    This function implements a multi-layer ignore system that does not depend
+    on the target repository's .gitignore configuration, ensuring consistent
+    behavior across different projects.
+
+    Args:
+        file_path: The file path to check (relative to workspace root)
+
+    Returns:
+        True if the file should be ignored, False otherwise
+    """
+    from pathlib import PurePosixPath
+
+    normalized_path = str(PurePosixPath(file_path))
+
+    for pattern in DEFAULT_IGNORE_PATTERNS:
+        # Handle directory patterns (ending with /)
+        if pattern.endswith("/"):
+            dir_name = pattern[:-1]
+            # Check if directory name appears in path
+            if dir_name in normalized_path.split("/"):
+                return True
+        # Handle file patterns with wildcards
+        elif "*" in pattern:
+            # Check if filename matches the pattern
+            filename = normalized_path.split("/")[-1]
+            if fnmatch(filename, pattern):
+                return True
+        # Handle exact matches
+        elif normalized_path == pattern or normalized_path.startswith(pattern + "/"):
+            return True
+
+    return False
+
+
+def _clean_temporary_files(workspace_path: Path) -> None:
+    """Remove common temporary and compiled files from workspace.
+
+    This function actively cleans the workspace after extracting the git archive,
+    ensuring that cache files, build artifacts, and other temporary files are removed
+    regardless of the target repository's .gitignore configuration.
+
+    Args:
+        workspace_path: Path to the workspace directory to clean
+    """
+    # Remove Python cache directories
+    for pycache_dir in workspace_path.rglob("__pycache__"):
+        if pycache_dir.is_dir():
+            shutil.rmtree(pycache_dir)
+            logger.info("Removed __pycache__ directory: %s", pycache_dir)
+
+    # Remove Python compiled files
+    for pyc_file in workspace_path.rglob("*.pyc"):
+        if pyc_file.is_file():
+            pyc_file.unlink()
+            logger.debug("Removed .pyc file: %s", pyc_file)
+
+    for pyo_file in workspace_path.rglob("*.pyo"):
+        if pyo_file.is_file():
+            pyo_file.unlink()
+            logger.debug("Removed .pyo file: %s", pyo_file)
+
+    for pyd_file in workspace_path.rglob("*.pyd"):
+        if pyd_file.is_file():
+            pyd_file.unlink()
+            logger.debug("Removed .pyd file: %s", pyd_file)
+
+    # Remove macOS metadata files
+    for ds_store in workspace_path.rglob(".DS_Store"):
+        if ds_store.is_file():
+            ds_store.unlink()
+            logger.debug("Removed .DS_Store file: %s", ds_store)
+
+    # Remove editor temporary files
+    for swp_file in workspace_path.rglob("*.swp"):
+        if swp_file.is_file():
+            swp_file.unlink()
+            logger.debug("Removed .swp file: %s", swp_file)
+
+    for swo_file in workspace_path.rglob("*.swo"):
+        if swo_file.is_file():
+            swo_file.unlink()
+            logger.debug("Removed .swo file: %s", swo_file)
+
+    for bak_file in workspace_path.rglob("*.bak"):
+        if bak_file.is_file():
+            bak_file.unlink()
+            logger.debug("Removed .bak file: %s", bak_file)
+
 
 # Maximum number of repair attempts as specified in requirements
 MAX_REPAIR_ATTEMPTS = 2
@@ -462,6 +585,10 @@ class WorkflowRunner:
             logger.info("Extracting archive to workspace")
             with tarfile.open(archive_path) as archive:
                 archive.extractall(workspace_path, filter="data")
+
+            # Clean temporary and compiled files
+            logger.info("Cleaning temporary and compiled files from workspace")
+            _clean_temporary_files(workspace_path)
 
             # Remove sensitive environment files
             sensitive_files = [

@@ -14,7 +14,7 @@ def test_validate_plan_success():
     """Test validation passes for a valid plan with proper repository context."""
     plan = ChangePlan(
         repository_match=True,
-        relevant_files=["src/main.py", "tests/test_new.py"],
+        relevant_files=["src/main.py", "src/utils.py"],
         planned_changes=[
             PlannedChange(
                 path="src/main.py",
@@ -22,9 +22,9 @@ def test_validate_plan_success():
                 description="Fix bug"
             ),
             PlannedChange(
-                path="tests/test_new.py",
-                action="create",
-                description="Add new test"
+                path="src/utils.py",
+                action="modify",
+                description="Update utility function"
             )
         ],
         risk_level="low"

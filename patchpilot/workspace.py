@@ -83,7 +83,4 @@ class Workspace:
 
         # Check if filename starts with test_
         parts = relative_path.split("/")
-        if parts and parts[-1].startswith("test_"):
-            return True
-
-        return False
+        return bool(parts and parts[-1].startswith("test_"))

@@ -22,12 +22,78 @@ import difflib
 import shlex
 import subprocess
 from dataclasses import MISSING, dataclass, fields
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolResult
 from patchpilot.validation import run_intermediate_validation
 from patchpilot.workspace import Workspace
+
+# Standard ignore patterns for temporary and compiled files
+# These patterns are applied regardless of the target repository's .gitignore
+DEFAULT_IGNORE_PATTERNS = [
+    # Python cache files
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    "*.egg-info/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    # macOS files
+    ".DS_Store",
+    ".AppleDouble",
+    ".LSOverride",
+    # Editor temporary files
+    "*.swp",
+    "*.swo",
+    "*.swn",
+    "*.bak",
+    "*~",
+    # Build artifacts
+    "dist/",
+    "build/",
+    "*.egg",
+]
+
+
+def _should_ignore_file_in_changes(file_path: str) -> bool:
+    """Check if a file should be ignored based on standard patterns.
+
+    This function implements a multi-layer ignore system that does not depend
+    on the target repository's .gitignore configuration, ensuring consistent
+    behavior across different projects.
+
+    Args:
+        file_path: The file path to check (relative to workspace root)
+
+    Returns:
+        True if the file should be ignored, False otherwise
+    """
+    from pathlib import PurePosixPath
+
+    normalized_path = str(PurePosixPath(file_path))
+
+    for pattern in DEFAULT_IGNORE_PATTERNS:
+        # Handle directory patterns (ending with /)
+        if pattern.endswith("/"):
+            dir_name = pattern[:-1]
+            # Check if directory name appears in path
+            if dir_name in normalized_path.split("/"):
+                return True
+        # Handle file patterns with wildcards
+        elif "*" in pattern:
+            # Check if filename matches the pattern
+            filename = normalized_path.split("/")[-1]
+            if fnmatch(filename, pattern):
+                return True
+        # Handle exact matches
+        elif normalized_path == pattern or normalized_path.startswith(pattern + "/"):
+            return True
+
+    return False
 
 
 class CommandRunnerProtocol(Protocol):
@@ -55,6 +121,7 @@ def _get_workspace_changes(workspace: Path) -> list[WorkspaceChange]:
 
     Parses git status output to identify created, modified, and deleted files.
     File renames are not supported in the current MVP.
+    Filters out temporary and compiled files based on standard ignore patterns.
 
     Args:
         workspace: Path to the workspace directory
@@ -86,6 +153,10 @@ def _get_workspace_changes(workspace: Path) -> list[WorkspaceChange]:
 
         status = line[:2]
         path = line[3:].strip()
+
+        # Skip ignored files (cache files, build artifacts, etc.)
+        if _should_ignore_file_in_changes(path):
+            continue
 
         # MVP does not support file renames
         if "R" in status:

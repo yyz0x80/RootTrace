@@ -66,10 +66,10 @@ def test_rejects_test_modification():
     assert resolved == (root / "tests/test_main.py").resolve()
 
     # Reject writing to tests directory
-    with pytest.raises(PermissionError, match="Modifying tests directory rejected"):
+    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
         workspace.assert_write_allowed("tests/test_main.py")
 
-    with pytest.raises(PermissionError, match="Modifying tests directory rejected"):
+    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
         workspace.assert_write_allowed("tests/unit/test_utils.py")
 
 
