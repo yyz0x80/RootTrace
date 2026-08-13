@@ -982,3 +982,68 @@ class TestConstants:
     def test_max_repair_attempts(self):
         """Test that MAX_REPAIR_ATTEMPTS matches requirements."""
         assert MAX_REPAIR_ATTEMPTS == 2
+
+
+class TestWorkflowRunnerModifiedFilesFiltering:
+    """Tests for filtering ignored files in repair scope checking."""
+
+    def test_check_repair_scope_filters_pycache_files(self):
+        """Test that _check_repair_scope filters out __pycache__ files."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock _get_modified_files to return files including __pycache__
+        modified_files_with_cache = [
+            "src/module.py",
+            "tests/__pycache__/test_module.cpython-312.pyc",
+            "tests/__pycache__/__init__.cpython-312.pyc",
+            "README.md",
+        ]
+
+        with patch.object(runner, '_get_modified_files') as mock_get_files:
+            mock_get_files.return_value = modified_files_with_cache
+
+            result = runner._check_repair_scope()
+
+        # Should allow changes since __pycache__ files are filtered out
+        assert result.allowed is True
+        assert len(result.violations) == 0
+
+    def test_check_repair_scope_blocks_test_file_modifications(self):
+        """Test that _check_repair_scope still blocks actual test file modifications."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock _get_modified_files to return actual test file (not __pycache__)
+        modified_files_with_test = [
+            "src/module.py",
+            "tests/test_module.py",  # Actual test file, should be blocked
+        ]
+
+        with patch.object(runner, '_get_modified_files') as mock_get_files:
+            mock_get_files.return_value = modified_files_with_test
+
+            result = runner._check_repair_scope()
+
+        # Should block changes due to test file modification
+        assert result.allowed is False
+        assert len(result.violations) > 0
+        assert any("test file modification is forbidden" in v.lower() for v in result.violations)

@@ -30,6 +30,7 @@ from patchpilot.agent_loop import AgentLoop, ExecuteLogCallback
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import (
     ScopeGateResult,
+    _should_ignore_file,
     check_scope,
     validate_actual_changes,
 )
@@ -633,6 +634,13 @@ class WorkflowRunner:
             ScopeGateResult indicating whether changes are allowed
         """
         modified_files = self._get_modified_files()
+
+        # Filter out ignored files (cache files, build artifacts, etc.)
+        # to prevent false positives in scope validation
+        modified_files = [
+            file for file in modified_files
+            if not _should_ignore_file(file)
+        ]
 
         # Build a minimal ChangePlan for scope validation
         # Since this is post-repair validation, we use the actual modified files
