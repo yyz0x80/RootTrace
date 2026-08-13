@@ -45,7 +45,7 @@ class TestAgentLoopInit:
             tools=mock_tools,
         )
 
-        assert agent_loop.max_rounds == 12
+        assert agent_loop.max_rounds == 16
 
     def test_init_with_invalid_max_rounds(self):
         """Test that max_rounds must be at least 1."""
@@ -704,3 +704,85 @@ class TestAgentLoopProgressTracking:
         assert agent_loop.state.total_edits == 1
         assert agent_loop.state.tool_usage_count["edit_file"] == 1
         assert agent_loop.state.tool_usage_count["read_file"] == 1
+        assert agent_loop.state.consecutive_failures == 0  # All tools succeeded
+
+
+class TestAgentStateFailurePatternDetection:
+    """Tests for AgentState failure pattern detection."""
+
+    def test_record_tool_call_with_error_content(self):
+        """Test recording tool calls with error content for pattern detection."""
+        state = AgentState()
+
+        state.record_tool_call("edit_file", False, "old_text not found")
+        state.record_tool_call("edit_file", False, "old_text not found")
+
+        assert state.consecutive_failures == 2
+        assert len(state.recent_failures) == 2
+        assert state.recent_failures[0] == state.recent_failures[1]
+
+    def test_detect_repeated_failure_pattern(self):
+        """Test detection of repeated failure patterns."""
+        state = AgentState()
+
+        # No failures yet
+        is_repeated, desc = state.detect_repeated_failure_pattern()
+        assert not is_repeated
+        assert desc == ""
+
+        # Single failure
+        state.record_tool_call("edit_file", False, "old_text not found")
+        is_repeated, desc = state.detect_repeated_failure_pattern()
+        assert not is_repeated
+        assert desc == ""
+
+        # Repeated failure
+        state.record_tool_call("edit_file", False, "old_text not found")
+        is_repeated, desc = state.detect_repeated_failure_pattern()
+        assert is_repeated
+        assert "edit_file" in desc
+
+    def test_failure_signature_generation(self):
+        """Test failure signature generation."""
+        state = AgentState()
+
+        sig1 = state._generate_failure_signature("edit_file", "old_text not found")
+        sig2 = state._generate_failure_signature("edit_file", "old_text not found")
+        sig3 = state._generate_failure_signature("edit_file", "different error")
+
+        assert sig1 == sig2
+        assert sig1 != sig3
+
+    def test_recent_failures_limit(self):
+        """Test that recent failures list is limited to 5 entries."""
+        state = AgentState()
+
+        # Add 7 failures
+        for i in range(7):
+            state.record_tool_call("edit_file", False, f"error {i}")
+
+        assert len(state.recent_failures) == 5
+        # Should keep the most recent 5 (errors 2-6, with 0-1 being evicted)
+        assert "error 0" not in state.recent_failures[0]
+        assert "error 6" in state.recent_failures[-1]
+
+    def test_consecutive_failures_reset_on_success(self):
+        """Test that consecutive failures reset on success."""
+        state = AgentState()
+
+        state.record_tool_call("edit_file", False, "error")
+        state.record_tool_call("edit_file", False, "error")
+        assert state.consecutive_failures == 2
+
+        state.record_tool_call("edit_file", True, "")
+        assert state.consecutive_failures == 0
+
+    def test_failure_pattern_different_tools(self):
+        """Test that failures on different tools don't trigger pattern detection."""
+        state = AgentState()
+
+        state.record_tool_call("edit_file", False, "old_text not found")
+        state.record_tool_call("read_file", False, "file not found")
+
+        is_repeated, desc = state.detect_repeated_failure_pattern()
+        assert not is_repeated

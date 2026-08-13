@@ -65,6 +65,7 @@ class AgentState:
         last_tool_success: Whether the last tool call succeeded
         total_edits: Total number of edit operations performed
         unique_files_read: Set of file paths that have been read
+        recent_failures: List of recent failure signatures for pattern detection
     """
 
     files_modified: set[str]
@@ -73,6 +74,7 @@ class AgentState:
     last_tool_success: bool
     total_edits: int
     unique_files_read: set[str]
+    recent_failures: list[str]
 
     def __init__(self) -> None:
         self.files_modified = set()
@@ -81,13 +83,15 @@ class AgentState:
         self.last_tool_success = True
         self.total_edits = 0
         self.unique_files_read = set()
+        self.recent_failures = []
 
-    def record_tool_call(self, tool_name: str, success: bool) -> None:
+    def record_tool_call(self, tool_name: str, success: bool, error_content: str = "") -> None:
         """Record a tool call and update failure tracking.
 
         Args:
             tool_name: Name of the tool that was called
             success: Whether the tool call succeeded
+            error_content: Error message content for failure pattern detection
         """
         self.tool_usage_count[tool_name] += 1
         self.last_tool_success = success
@@ -96,6 +100,12 @@ class AgentState:
             self.consecutive_failures = 0
         else:
             self.consecutive_failures += 1
+            # Record failure signature for pattern detection
+            failure_signature = self._generate_failure_signature(tool_name, error_content)
+            self.recent_failures.append(failure_signature)
+            # Keep only the last 5 failures to avoid unbounded growth
+            if len(self.recent_failures) > 5:
+                self.recent_failures.pop(0)
 
     def record_file_edit(self, file_path: str) -> None:
         """Record that a file was edited.
@@ -114,6 +124,36 @@ class AgentState:
         """
         self.unique_files_read.add(file_path)
 
+    def _generate_failure_signature(self, tool_name: str, error_content: str) -> str:
+        """Generate a signature for failure pattern detection.
+
+        Args:
+            tool_name: Name of the tool that failed
+            error_content: Error message content
+
+        Returns:
+            A string signature representing the failure pattern
+        """
+        # Normalize error content for pattern matching
+        normalized_error = error_content.strip().lower()[:100]  # Limit to 100 chars
+        return f"{tool_name}:{normalized_error}"
+
+    def detect_repeated_failure_pattern(self) -> tuple[bool, str]:
+        """Detect if the same failure is being repeated.
+
+        Returns:
+            Tuple of (is_repeated, failure_description)
+        """
+        if len(self.recent_failures) < 2:
+            return False, ""
+
+        # Check if the last 2 failures are identical
+        if self.recent_failures[-1] == self.recent_failures[-2]:
+            tool_name = self.recent_failures[-1].split(":", 1)[0]
+            return True, f"Repeated {tool_name} failure detected"
+
+        return False, ""
+
     def get_progress_summary(self) -> str:
         """Generate a human-readable progress summary.
 
@@ -131,6 +171,9 @@ class AgentState:
             summary_parts.append(
                 f"Tool usage: {', '.join(f'{k}:{v}' for k, v in self.tool_usage_count.most_common(5))}"
             )
+
+        if self.recent_failures:
+            summary_parts.append(f"Recent failures: {len(self.recent_failures)}")
 
         return ", ".join(summary_parts)
 
@@ -302,7 +345,8 @@ class AgentLoop:
 
                 # Update state tracking
                 if self.enable_progress_tracking:
-                    self.state.record_tool_call(tool_call.name, tool_result.ok)
+                    error_content = tool_result.content if not tool_result.ok else ""
+                    self.state.record_tool_call(tool_call.name, tool_result.ok, error_content)
 
                     # Track file operations
                     if tool_call.name in ["edit_file", "edit_file_by_line", "apply_patch"] and tool_result.ok and "path" in tool_call.arguments:
@@ -351,6 +395,12 @@ class AgentLoop:
 
         state_summary = self.state.get_progress_summary()
         state_context = f"\n\n[Current Progress]\n{state_summary}\n"
+
+        # Check for repeated failure patterns and add recovery guidance
+        if self.enable_early_stopping:
+            is_repeated, failure_desc = self.state.detect_repeated_failure_pattern()
+            if is_repeated:
+                state_context += f"\n[WARNING] {failure_desc}. You MUST re-read the relevant file(s) before retrying. Do not repeat the same operation.\n"
 
         # Inject into the system message
         enhanced_messages = []
