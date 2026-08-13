@@ -42,6 +42,8 @@ TOOL USAGE GUIDELINES:
 - edit_file CRITICAL: ALWAYS use read_file with raw=True to get content without line numbers before editing.
 - edit_file CRITICAL: old_text must match the ACTUAL file content exactly, including whitespace and newlines.
 - edit_file CRITICAL: The old_text must be an EXACT substring match. Be careful with trailing newlines.
+- edit_file CRITICAL: old_text MUST NOT be empty. edit_file only replaces existing text, it cannot insert new content.
+- edit_file CRITICAL: To add new imports, include the existing import line(s) in old_text and add the new import in new_text.
 - edit_file recommended workflow: read_file(path="file.py", raw=True) → use exact output as old_text
 - After each edit_file, call read_file again (with raw=True) to verify the change was applied correctly.
 - Track which files you have modified to avoid redundant operations.
@@ -54,6 +56,8 @@ ERROR RECOVERY STRATEGY:
 - Analyze failure: identify root cause → re-evaluate file state → adjust approach.
 - Do NOT repeat the exact same failing operation without modification.
 - If edit_file fails due to text mismatch, the file content likely changed - re-read it first.
+- If edit_file fails with "old_text not found" or "empty old_text", you MUST re-read the file and use the exact current content.
+- If edit_file fails multiple times with the same error, stop and reconsider your approach.
 
 FORBIDDEN:
 - Describing tool calls in text instead of calling them
