@@ -1,9 +1,10 @@
-# Reject invalid pagination parameters
+# Add description field to Task
 
-The paginate function should reject invalid pagination arguments.
+The Task dataclass currently only has a title field. We need to add a description field to support more detailed task information.
 
 Acceptance requirements:
 
-- Raise ValueError when page is less than 1.
-- Raise ValueError when page_size is less than 1.
-- Preserve the existing behavior for valid page and page_size values.
+- Add a `description: str` field to the Task dataclass
+- Update TaskService.create_task to accept an optional description parameter
+- When description is not provided, default to empty string
+- Update tests to verify the new description field works correctly
