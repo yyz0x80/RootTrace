@@ -9,6 +9,7 @@ from patchpilot.tools import (
     ApplyPatchInput,
     EditFileInput,
     InsertTextInput,
+    MatchResult,
     ReadFileInput,
     RunCommandInput,
     SearchCodeInput,
@@ -324,8 +325,8 @@ class TestEditFile:
         })
         assert not result.ok
         assert "old_text not found" in result.content
-        # Check for enhanced error with similar content
-        assert "Similar content found" in result.content or "No similar content found" in result.content
+        # Check for enhanced error with closest match
+        assert "Closest match" in result.content or "Similar content" in result.content
 
     def test_edit_file_empty_old_text_error(self, tool_registry, temp_workspace):
         """Test error message when old_text is empty"""
@@ -370,6 +371,121 @@ class TestEditFile:
         assert "line number prefixes" in result.content
         # Check for specific example in error message
         assert "Example correction" in result.content or "Wrong:" in result.content
+
+    def test_edit_file_with_rstrip_fallback(self, tool_registry, temp_workspace):
+        """Test editing with trailing whitespace fallback"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    return items\n")
+
+        # Provide old_text with extra trailing whitespace
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "def paginate(items):   ",  # Extra trailing spaces
+            "new_text": "def paginate(items, page_size=10):"
+        })
+        assert result.ok
+        assert "page_size" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "page_size" in updated_content
+
+    def test_edit_file_with_strip_fallback(self, tool_registry, temp_workspace):
+        """Test editing with leading/trailing whitespace fallback"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items):\n    return items\n")
+
+        # Provide old_text with extra leading/trailing whitespace
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "  def paginate(items):  ",  # Extra leading and trailing spaces
+            "new_text": "def paginate(items, page_size=10):"
+        })
+        assert result.ok
+        assert "page_size" in result.content
+
+        # Verify file was actually modified
+        updated_content = test_file.read_text()
+        assert "page_size" in updated_content
+
+    def test_edit_file_closest_match_error(self, tool_registry, temp_workspace):
+        """Test enhanced error message with closest match and diff"""
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("def paginate(items, page, page_size):\n    start = (page - 1) * page_size\n")
+
+        # Provide old_text with small typo
+        result = tool_registry.edit_file({
+            "path": "test.py",
+            "old_text": "def paginate(item, page, page_size):",  # Typo: 'item' instead of 'items'
+            "new_text": "def paginate(items, page, page_size, sort=False):"
+        })
+        assert not result.ok
+        assert "old_text not found" in result.content
+        # Check for closest match feature
+        assert "Closest match" in result.content or "Similar content" in result.content
+        # Check for diff information
+        assert "Diff between" in result.content or "similarity" in result.content
+
+    def test_try_match_with_fallback_exact(self, tool_registry):
+        """Test _try_match_with_fallback with exact match"""
+        file_content = "def foo():\n    pass\n"
+        old_text = "def foo():"
+
+        result = tool_registry._try_match_with_fallback(file_content, old_text)
+        assert result.matched
+        assert result.matched_text == old_text
+        assert result.method == "exact"
+
+    def test_try_match_with_fallback_rstrip(self, tool_registry):
+        """Test _try_match_with_fallback with rstrip fallback"""
+        file_content = "def foo():\n    pass\n"
+        old_text = "def foo():   "  # Extra trailing spaces
+
+        result = tool_registry._try_match_with_fallback(file_content, old_text)
+        assert result.matched
+        assert result.matched_text == "def foo():"
+        assert result.method == "rstrip"
+
+    def test_try_match_with_fallback_strip(self, tool_registry):
+        """Test _try_match_with_fallback with strip fallback"""
+        file_content = "def foo():\n    pass\n"
+        old_text = "  def foo():  "  # Extra leading and trailing whitespace
+
+        result = tool_registry._try_match_with_fallback(file_content, old_text)
+        assert result.matched
+        assert result.matched_text == "def foo():"
+        assert result.method == "strip"
+
+    def test_try_match_with_fallback_no_match(self, tool_registry):
+        """Test _try_match_with_fallback when no match is found"""
+        file_content = "def bar():\n    pass\n"
+        old_text = "def foo():"  # Not in file
+
+        result = tool_registry._try_match_with_fallback(file_content, old_text)
+        assert not result.matched
+        assert result.matched_text == ""
+        assert result.method == ""
+
+    def test_find_closest_match_basic(self, tool_registry):
+        """Test _find_closest_match with basic case"""
+        file_content = "def paginate(items):\n    return items\n"
+        old_text = "def paginate(item):"  # Small typo
+
+        result = tool_registry._find_closest_match(file_content, old_text)
+        assert result is not None
+        assert "line" in result
+        assert "text" in result
+        assert "similarity" in result
+        assert result["similarity"] > 0.5  # Should be quite similar
+
+    def test_find_closest_match_no_good_match(self, tool_registry):
+        """Test _find_closest_match when no good match exists"""
+        file_content = "def completely_different():\n    pass\n"
+        old_text = "def foo():"  # Very different
+
+        result = tool_registry._find_closest_match(file_content, old_text)
+        # Should return None if similarity is below threshold
+        assert result is None or result["similarity"] < 0.5
 
 
 class TestInsertTextTool:

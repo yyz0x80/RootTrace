@@ -21,6 +21,7 @@ output size limits, and workspace policy enforcement.
 import difflib
 import shlex
 import subprocess
+import unicodedata
 from dataclasses import MISSING, dataclass, fields
 from fnmatch import fnmatch
 from pathlib import Path
@@ -114,6 +115,20 @@ class WorkspaceChange:
     """
     path: str
     action: str
+
+
+@dataclass
+class MatchResult:
+    """Result of text matching attempt.
+
+    Attributes:
+        matched: Whether a match was found
+        matched_text: The actual text that matched in the file
+        method: The matching method used ('exact', 'rstrip', 'strip', 'unicode')
+    """
+    matched: bool
+    matched_text: str = ""
+    method: str = ""
 
 
 def _get_workspace_changes(workspace: Path) -> list[WorkspaceChange]:
@@ -799,7 +814,13 @@ class ToolRegistry:
 
     def edit_file(self, arguments: dict[str, Any]) -> ToolResult:
         """
-        Edit file using exact text replacement with optional context and preview.
+        Edit file using multi-tier text replacement with optional context and preview.
+        
+        Implements a fallback matching strategy:
+        1. Exact match (preferred)
+        2. Right-stripped match (trailing whitespace)
+        3. Trimmed match (leading/trailing whitespace)
+        4. Unicode-normalized match
         
         Args:
             arguments: Dict with 'path', 'old_text', 'new_text', optional 'context_lines' (default 0),
@@ -856,52 +877,27 @@ class ToolRegistry:
             with open(resolved_path, "r", encoding="utf-8") as f:
                 original_content = f.read()
 
-            # Build search text with context if provided
-            search_text = input_data.old_text
-            if input_data.context_lines > 0:
-                # Find the location of old_text in the file
-                lines = original_content.splitlines()
-                old_text_lines = input_data.old_text.splitlines()
-                
-                # Find the line number where old_text starts
-                match_line = -1
-                for i in range(len(lines) - len(old_text_lines) + 1):
-                    if lines[i:i+len(old_text_lines)] == old_text_lines:
-                        match_line = i
-                        break
-                
-                if match_line == -1:
-                    # old_text not found with exact line match, try substring search
-                    if input_data.old_text not in original_content:
-                        return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
-                    match_line = original_content.find(input_data.old_text)
-                    # Convert character position to approximate line number
-                    match_line = original_content[:match_line].count('\n')
-                
-                # Build context-aware search text
-                context_start = max(0, match_line - input_data.context_lines)
-                context_end = min(len(lines), match_line + len(old_text_lines) + input_data.context_lines)
-                search_text = '\n'.join(lines[context_start:context_end])
-                
-                # Replace within the context
-                if search_text not in original_content:
-                    return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
-                
-                new_search_text = search_text.replace(input_data.old_text, input_data.new_text, 1)
-                new_content = original_content.replace(search_text, new_search_text, 1)
-            else:
-                # Verify old_text appears exactly once
-                count = original_content.count(input_data.old_text)
-                if count == 0:
-                    return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
-                if count > 1:
-                    return ToolResult(
-                        ok=False,
-                        content=f"old_text appears {count} times in file. Please provide more specific context or use context_lines parameter."
-                    )
+            # Try multi-tier matching strategy
+            match_result = self._try_match_with_fallback(original_content, input_data.old_text)
+            
+            if not match_result.matched:
+                return self._enhanced_edit_error(original_content, input_data.old_text, resolved_path)
+            
+            # Use the matched text for replacement
+            matched_text = match_result.matched_text
+            match_method = match_result.method
+            
+            # Verify uniqueness
+            count = original_content.count(matched_text)
+            if count > 1:
+                return ToolResult(
+                    ok=False,
+                    content=f"Matched text appears {count} times in file (matched using {match_method}). "
+                           f"Please provide more specific context or use context_lines parameter."
+                )
 
-                # Perform replacement
-                new_content = original_content.replace(input_data.old_text, input_data.new_text, 1)
+            # Perform replacement
+            new_content = original_content.replace(matched_text, input_data.new_text, 1)
 
             # Generate unified diff
             original_lines = original_content.splitlines(keepends=True)
@@ -941,20 +937,54 @@ class ToolRegistry:
         except OSError as e:
             return ToolResult(ok=False, content=f"Edit failed: {e}")
 
-    def _enhanced_edit_error(self, file_content: str, old_text: str, file_path: Path) -> ToolResult:
-        """Generate enhanced error message for edit_file failures.
+    def _try_match_with_fallback(self, file_content: str, old_text: str) -> MatchResult:
+        """Try to match old_text in file_content using multi-tier fallback strategy.
+
+        Args:
+            file_content: The current file content
+            old_text: The text to search for
+
+        Returns:
+            MatchResult with matching status and method used
+        """
+        # Tier 1: Exact match (preferred)
+        if old_text in file_content:
+            return MatchResult(matched=True, matched_text=old_text, method="exact")
         
+        # Tier 2: Right-stripped match (trailing whitespace)
+        old_text_rstrip = old_text.rstrip()
+        if old_text_rstrip and old_text_rstrip in file_content:
+            return MatchResult(matched=True, matched_text=old_text_rstrip, method="rstrip")
+        
+        # Tier 3: Trimmed match (leading and trailing whitespace)
+        old_text_stripped = old_text.strip()
+        if old_text_stripped and old_text_stripped in file_content:
+            return MatchResult(matched=True, matched_text=old_text_stripped, method="strip")
+        
+        # Tier 4: Unicode-normalized match
+        # Normalize both strings to NFKC form for consistent comparison
+        old_text_normalized = unicodedata.normalize('NFKC', old_text)
+        file_content_normalized = unicodedata.normalize('NFKC', file_content)
+        if old_text_normalized in file_content_normalized:
+            return MatchResult(matched=True, matched_text=old_text_normalized, method="unicode")
+        
+        # No match found
+        return MatchResult(matched=False, matched_text="", method="")
+
+    def _enhanced_edit_error(self, file_content: str, old_text: str, file_path: Path) -> ToolResult:
+        """Generate enhanced error message for edit_file failures with closest match and diff.
+
         Args:
             file_content: Current file content
             old_text: The text that was not found
             file_path: Path to the file for context
-        
+
         Returns:
-            ToolResult with detailed error information
+            ToolResult with detailed error information including closest match and diff
         """
         lines = file_content.splitlines()
         old_text_lines = old_text.splitlines()
-        
+
         # Check if old_text is empty
         if not old_text or not old_text.strip():
             error_msg = "ERROR: old_text is empty.\n"
@@ -962,16 +992,16 @@ class ToolRegistry:
             error_msg += "SOLUTION: If you want to insert new content, use the insert_text tool instead.\n"
             error_msg += "Example: insert_text(path='file.py', line_number=10, text='new content')\n"
             return ToolResult(ok=False, content=error_msg)
-        
+
         # Check if old_text contains line number prefixes (common mistake)
         has_line_prefixes = any(
             line.strip().startswith(tuple(f"{i}:" for i in range(1, 1000)))
             for line in old_text_lines
         )
-        
+
         error_msg = "old_text not found in file. The exact text you provided:\n"
         error_msg += f"  {old_text[:100]!r}{'...' if len(old_text) > 100 else ''}\n\n"
-        
+
         if has_line_prefixes:
             error_msg += "ERROR: Your old_text contains line number prefixes (e.g., '1:', '2:').\n"
             error_msg += "Line numbers from read_file output are NOT part of the actual file content.\n"
@@ -980,29 +1010,98 @@ class ToolRegistry:
             error_msg += "Example correction:\n"
             error_msg += "  Wrong: old_text='1: def hello():\\n2:     return world'\n"
             error_msg += "  Right: old_text='def hello():\\n    return world'\n\n"
-        
-        # Try to find similar content using difflib
-        similar_lines = []
-        for i, line in enumerate(lines):
-            # Check if any line from old_text is similar to this line
-            for old_line in old_text_lines:
-                if old_line and line:
-                    similarity = difflib.SequenceMatcher(None, old_line, line).ratio()
-                    if similarity > 0.5:  # More than 50% similar
-                        similar_lines.append(f"Line {i+1}: {line[:80]}{'...' if len(line) > 80 else ''}")
-                        break
-        
-        if similar_lines:
-            error_msg += "Similar content found in file:\n"
-            for similar_line in similar_lines[:5]:  # Show at most 5 similar lines
-                error_msg += f"  {similar_line}\n"
-            error_msg += "\nPlease re-read the file and verify the exact text including whitespace and indentation.\n"
-            error_msg += "Tip: Use read_file with raw=True to get clean content without line numbers.\n"
+
+        # Find the closest match using sliding window for multi-line blocks
+        closest_match = self._find_closest_match(file_content, old_text)
+
+        if closest_match:
+            error_msg += f"Closest match found at line {closest_match['line']} "
+            error_msg += f"(similarity: {closest_match['similarity']:.2f}):\n"
+            error_msg += f"  {closest_match['text'][:100]!r}{'...' if len(closest_match['text']) > 100 else ''}\n\n"
+
+            # Generate diff between old_text and closest match
+            error_msg += "Diff between your old_text and the closest match:\n"
+            diff_lines = difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                closest_match['text'].splitlines(keepends=True),
+                fromfile="your old_text",
+                tofile="closest match",
+                lineterm=""
+            )
+            error_msg += "".join(diff_lines)
+            error_msg += "\n"
+
+            error_msg += "SOLUTION: Re-read the file with raw=True and use the exact text from the file.\n"
+            error_msg += "Copy the closest match above as your old_text, adjusting if needed.\n"
         else:
-            error_msg += "No similar content found. Please re-read the file to get the exact text.\n"
-            error_msg += "Tip: If you want to insert new content at a specific location, use insert_text instead.\n"
-        
+            # Fallback to line-by-line similarity check
+            similar_lines = []
+            for i, line in enumerate(lines):
+                # Check if any line from old_text is similar to this line
+                for old_line in old_text_lines:
+                    if old_line and line:
+                        similarity = difflib.SequenceMatcher(None, old_line, line).ratio()
+                        if similarity > 0.5:  # More than 50% similar
+                            similar_lines.append(f"Line {i+1}: {line[:80]}{'...' if len(line) > 80 else ''}")
+                            break
+
+            if similar_lines:
+                error_msg += "Similar content found in file:\n"
+                for similar_line in similar_lines[:5]:  # Show at most 5 similar lines
+                    error_msg += f"  {similar_line}\n"
+                error_msg += "\nPlease re-read the file and verify the exact text including whitespace and indentation.\n"
+                error_msg += "Tip: Use read_file with raw=True to get clean content without line numbers.\n"
+            else:
+                error_msg += "No similar content found. Please re-read the file to get the exact text.\n"
+                error_msg += "Tip: If you want to insert new content at a specific location, use insert_text instead.\n"
+
         return ToolResult(ok=False, content=error_msg)
+
+    def _find_closest_match(self, file_content: str, old_text: str) -> dict[str, Any] | None:
+        """Find the closest matching text block in the file content.
+
+        Uses a sliding window approach to find the most similar multi-line block.
+        Similarity is calculated using difflib.SequenceMatcher.ratio().
+
+        Args:
+            file_content: The current file content
+            old_text: The text to search for
+
+        Returns:
+            Dictionary with 'line', 'text', and 'similarity' keys, or None if no good match found
+        """
+        lines = file_content.splitlines()
+        old_text_lines = old_text.splitlines()
+        num_old_lines = len(old_text_lines)
+
+        if num_old_lines == 0:
+            return None
+
+        best_match = None
+        best_similarity = 0.0
+
+        # Try different window sizes around the expected size
+        for window_size in [num_old_lines, num_old_lines + 1, num_old_lines - 1]:
+            if window_size <= 0 or window_size > len(lines):
+                continue
+
+            # Slide through the file with the window
+            for start_line in range(len(lines) - window_size + 1):
+                window_lines = lines[start_line:start_line + window_size]
+                window_text = "\n".join(window_lines)
+
+                # Calculate similarity using SequenceMatcher
+                similarity = difflib.SequenceMatcher(None, old_text, window_text).ratio()
+
+                if similarity > best_similarity and similarity > 0.3:  # Minimum threshold
+                    best_similarity = similarity
+                    best_match = {
+                        'line': start_line + 1,  # 1-based line number
+                        'text': window_text,
+                        'similarity': similarity
+                    }
+
+        return best_match
 
     def edit_file_by_line(self, arguments: dict[str, Any]) -> ToolResult:
         """
