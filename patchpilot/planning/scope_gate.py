@@ -210,6 +210,13 @@ def validate_actual_changes(
                 "CI workflow modification is forbidden."
             )
 
+        # Test file modifications are always forbidden (Day 1 restriction)
+        if "tests" in actual.path.split("/") or actual.path.startswith("test_"):
+            raise RuntimeError(
+                f"Test file modification is forbidden: {actual.path}. "
+                "Test files must remain read-only during Day 1 implementation."
+            )
+
         # Check if the file was in the approved plan
         expected_action = planned.get(actual.path)
 

@@ -59,6 +59,10 @@ class Workspace:
         if resolved.name == ".git" or ".git" in resolved.parts:
             raise PermissionError(f"Writing .git directory rejected: {relative_path}")
 
+        # Reject modifying CI/CD configuration files
+        if ".github" in resolved.parts and "workflows" in resolved.parts:
+            raise PermissionError(f"Modifying CI/CD workflows is not allowed: {relative_path}")
+
         # Reject modifying test files (Day 1 restriction)
         if self._is_test_file(relative_path):
             raise PermissionError(

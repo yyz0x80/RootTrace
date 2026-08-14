@@ -16,6 +16,7 @@ import json
 import logging
 from collections import Counter
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 from patchpilot.models import AssistantTurn, ToolCall, ToolResult
@@ -44,6 +45,24 @@ class ExecuteLogCallback:
             round_number: Current round number
             tool_name: Name of the tool being called
             args: Tool arguments
+        """
+
+    def on_tool_result(
+        self,
+        round_number: int,
+        tool_name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+        duration_seconds: float,
+    ) -> None:
+        """Called when a tool execution completes with timing information.
+
+        Args:
+            round_number: Current round number
+            tool_name: Name of the tool that was executed
+            args: Tool arguments
+            result: Result of the tool execution
+            duration_seconds: Time taken to execute the tool in seconds
         """
 
     def on_round_complete(self, round_number: int) -> None:
@@ -341,7 +360,19 @@ class AgentLoop:
                     tool_call.arguments,
                 )
 
+                started_at = perf_counter()
                 tool_result = self._execute_tool(tool_call)
+                duration_seconds = perf_counter() - started_at
+
+                # Notify callback of tool result with timing
+                if self.execute_log_callback:
+                    self.execute_log_callback.on_tool_result(
+                        round_number,
+                        tool_call.name,
+                        tool_call.arguments,
+                        tool_result,
+                        duration_seconds,
+                    )
 
                 # Update state tracking
                 if self.enable_progress_tracking:

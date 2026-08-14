@@ -86,3 +86,41 @@ def test_rejects_git_directory():
 
     with pytest.raises(PermissionError, match="Reading .git directory rejected"):
         workspace.assert_read_allowed(".git/config")
+
+
+def test_rejects_test_prefix_files():
+    """Reject modifying files starting with test_"""
+    root = Path("/tmp/test_repo")
+    workspace = Workspace(root)
+
+    # Allow reading test_*.py files
+    resolved = workspace.assert_read_allowed("test_main.py")
+    assert resolved == (root / "test_main.py").resolve()
+
+    # Reject writing to test_*.py files
+    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
+        workspace.assert_write_allowed("test_main.py")
+
+    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
+        workspace.assert_write_allowed("test_utils.py")
+
+    # Test in subdirectory
+    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
+        workspace.assert_write_allowed("src/test_module.py")
+
+
+def test_rejects_github_workflows():
+    """Reject modifying .github/workflows directory"""
+    root = Path("/tmp/test_repo")
+    workspace = Workspace(root)
+
+    # Allow reading .github/workflows for inspection
+    resolved = workspace.assert_read_allowed(".github/workflows/ci.yml")
+    assert resolved == (root / ".github/workflows/ci.yml").resolve()
+
+    # Reject writing to .github/workflows
+    with pytest.raises(PermissionError, match="Modifying CI/CD workflows is not allowed"):
+        workspace.assert_write_allowed(".github/workflows/ci.yml")
+
+    with pytest.raises(PermissionError, match="Modifying CI/CD workflows is not allowed"):
+        workspace.assert_write_allowed(".github/workflows/deploy.yml")

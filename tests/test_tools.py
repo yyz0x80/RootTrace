@@ -9,7 +9,6 @@ from patchpilot.tools import (
     ApplyPatchInput,
     EditFileInput,
     InsertTextInput,
-    MatchResult,
     ReadFileInput,
     RunCommandInput,
     SearchCodeInput,
@@ -84,6 +83,28 @@ class TestSearchCode:
         result = tool_registry.search_code({"query": 123})  # Invalid type
         assert not result.ok
         assert "Invalid input" in result.content
+
+    def test_search_code_test_files_allowed(self, tool_registry, temp_workspace):
+        """Test that searching test files is allowed (read-only)"""
+        tests_dir = temp_workspace.root / "tests"
+        tests_dir.mkdir()
+        test_file = tests_dir / "test_example.py"
+        test_file.write_text("def test_something():\n    pass\n")
+
+        result = tool_registry.search_code({"query": "test_something", "path": "tests"})
+        assert result.ok
+        assert "test_something" in result.content
+
+    def test_search_code_github_workflows_allowed(self, tool_registry, temp_workspace):
+        """Test that searching .github/workflows is allowed (read-only)"""
+        github_dir = temp_workspace.root / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+        workflow_file = github_dir / "ci.yml"
+        workflow_file.write_text("name: CI\n")
+
+        result = tool_registry.search_code({"query": "CI", "path": ".github/workflows"})
+        assert result.ok
+        assert "CI" in result.content
 
 
 class TestReadFile:
@@ -258,6 +279,34 @@ class TestEditFile:
         })
         assert not result.ok
         assert "Modifying test files is not allowed" in result.content
+
+    def test_edit_file_test_prefix_rejected(self, tool_registry, temp_workspace):
+        """Test that editing test_*.py files is rejected"""
+        test_file = temp_workspace.root / "test_main.py"
+        test_file.write_text("def test_something():\n    pass\n")
+
+        result = tool_registry.edit_file({
+            "path": "test_main.py",
+            "old_text": "def test_something():",
+            "new_text": "def test_modified():"
+        })
+        assert not result.ok
+        assert "Modifying test files is not allowed" in result.content
+
+    def test_edit_file_github_workflows_rejected(self, tool_registry, temp_workspace):
+        """Test that editing .github/workflows files is rejected"""
+        github_dir = temp_workspace.root / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+        workflow_file = github_dir / "ci.yml"
+        workflow_file.write_text("name: CI\n")
+
+        result = tool_registry.edit_file({
+            "path": ".github/workflows/ci.yml",
+            "old_text": "name: CI",
+            "new_text": "name: Modified CI"
+        })
+        assert not result.ok
+        assert "Modifying CI/CD workflows is not allowed" in result.content
 
     def test_edit_file_outside_workspace(self, tool_registry):
         """Test that editing files outside workspace is rejected"""
@@ -651,6 +700,34 @@ class TestInsertTextTool:
         updated_content = test_file.read_text()
         assert "first_line\n" == updated_content
 
+    def test_insert_text_test_prefix_rejected(self, tool_registry, temp_workspace):
+        """Test that inserting into test_*.py files is rejected"""
+        test_file = temp_workspace.root / "test_main.py"
+        test_file.write_text("def test_something():\n    pass\n")
+
+        result = tool_registry.insert_text({
+            "path": "test_main.py",
+            "line_number": 1,
+            "text": "new line\n"
+        })
+        assert not result.ok
+        assert "Modifying test files is not allowed" in result.content
+
+    def test_insert_text_github_workflows_rejected(self, tool_registry, temp_workspace):
+        """Test that inserting into .github/workflows files is rejected"""
+        github_dir = temp_workspace.root / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+        workflow_file = github_dir / "ci.yml"
+        workflow_file.write_text("name: CI\n")
+
+        result = tool_registry.insert_text({
+            "path": ".github/workflows/ci.yml",
+            "line_number": 1,
+            "text": "new step\n"
+        })
+        assert not result.ok
+        assert "Modifying CI/CD workflows is not allowed" in result.content
+
 
 class TestEditFileByLine:
     """Tests for edit_file_by_line tool"""
@@ -737,6 +814,36 @@ class TestEditFileByLine:
         })
         assert not result.ok
         assert "Invalid input" in result.content
+
+    def test_edit_file_by_line_test_prefix_rejected(self, tool_registry, temp_workspace):
+        """Test that editing test_*.py files is rejected"""
+        test_file = temp_workspace.root / "test_main.py"
+        test_file.write_text("def test_something():\n    pass\n")
+
+        result = tool_registry.edit_file_by_line({
+            "path": "test_main.py",
+            "start_line": 1,
+            "end_line": 1,
+            "new_text": "modified"
+        })
+        assert not result.ok
+        assert "Modifying test files is not allowed" in result.content
+
+    def test_edit_file_by_line_github_workflows_rejected(self, tool_registry, temp_workspace):
+        """Test that editing .github/workflows files is rejected"""
+        github_dir = temp_workspace.root / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+        workflow_file = github_dir / "ci.yml"
+        workflow_file.write_text("name: CI\n")
+
+        result = tool_registry.edit_file_by_line({
+            "path": ".github/workflows/ci.yml",
+            "start_line": 1,
+            "end_line": 1,
+            "new_text": "modified"
+        })
+        assert not result.ok
+        assert "Modifying CI/CD workflows is not allowed" in result.content
 
 
 class TestInsertText:
@@ -882,6 +989,34 @@ class TestInsertText:
         updated_content = test_file.read_text()
         assert "first_line\n" == updated_content
 
+    def test_insert_text_test_prefix_rejected(self, tool_registry, temp_workspace):
+        """Test that inserting into test_*.py files is rejected"""
+        test_file = temp_workspace.root / "test_main.py"
+        test_file.write_text("def test_something():\n    pass\n")
+
+        result = tool_registry.insert_text({
+            "path": "test_main.py",
+            "line_number": 1,
+            "text": "new line\n"
+        })
+        assert not result.ok
+        assert "Modifying test files is not allowed" in result.content
+
+    def test_insert_text_github_workflows_rejected(self, tool_registry, temp_workspace):
+        """Test that inserting into .github/workflows files is rejected"""
+        github_dir = temp_workspace.root / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+        workflow_file = github_dir / "ci.yml"
+        workflow_file.write_text("name: CI\n")
+
+        result = tool_registry.insert_text({
+            "path": ".github/workflows/ci.yml",
+            "line_number": 1,
+            "text": "new step\n"
+        })
+        assert not result.ok
+        assert "Modifying CI/CD workflows is not allowed" in result.content
+
 
 class TestApplyPatch:
     """Tests for apply_patch tool"""
@@ -971,6 +1106,24 @@ class TestApplyPatch:
         })
         assert not result.ok
         assert "Modifying test files is not allowed" in result.content
+
+    def test_apply_patch_test_prefix_rejected(self, tool_registry, temp_workspace):
+        """Test that applying patch to test_*.py files is rejected"""
+        result = tool_registry.apply_patch({
+            "path": "test_main.py",
+            "content": "def test_new():\n    pass\n"
+        })
+        assert not result.ok
+        assert "Modifying test files is not allowed" in result.content
+
+    def test_apply_patch_github_workflows_rejected(self, tool_registry, temp_workspace):
+        """Test that applying patch to .github/workflows is rejected"""
+        result = tool_registry.apply_patch({
+            "path": ".github/workflows/ci.yml",
+            "content": "name: CI\n"
+        })
+        assert not result.ok
+        assert "Modifying CI/CD workflows is not allowed" in result.content
 
     def test_apply_patch_outside_workspace(self, tool_registry):
         """Test that applying patch outside workspace is rejected"""
@@ -1084,6 +1237,13 @@ class TestRunCommand:
         result = tool_registry.run_command({"command": "git push"})
         assert not result.ok
         assert "Only 'git diff' and 'git status'" in result.content
+
+    def test_run_command_pip_install_rejected(self, tool_registry):
+        """Test that pip install is rejected"""
+        result = tool_registry.run_command({"command": "pip install requests"})
+        assert not result.ok
+        assert "not allowed" in result.content
+        assert "pip" in result.content
 
     def test_run_command_ruff_not_check(self, tool_registry):
         """Test that ruff without check is rejected"""

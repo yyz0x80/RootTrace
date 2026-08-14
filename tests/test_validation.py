@@ -6,8 +6,6 @@ from pathlib import Path
 import pytest
 
 from patchpilot.validation import (
-    SyntaxValidationError,
-    ValidationError,
     run_intermediate_validation,
     validate_file_integrity,
     validate_python_imports,

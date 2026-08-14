@@ -355,3 +355,105 @@ class TestValidateActualChanges:
 
         # Should not raise any exception
         validate_actual_changes(plan, actual_changes)
+
+    def test_validate_actual_changes_test_prefix_file(self):
+        """Test validation rejects test_*.py modifications at runtime."""
+        plan = ChangePlan(
+            repository_match=True,
+            relevant_files=["src/main.py"],
+            planned_changes=[
+                PlannedChange(
+                    path="src/main.py",
+                    action="modify",
+                    description="Fix bug"
+                )
+            ],
+            risk_level="low"
+        )
+
+        actual_changes = [
+            WorkspaceChange(path="test_utils.py", action="modify")
+        ]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            validate_actual_changes(plan, actual_changes)
+
+        assert "test_utils.py" in str(exc_info.value)
+        assert "Test file modification is forbidden" in str(exc_info.value)
+
+    def test_validate_actual_changes_github_workflow_runtime(self):
+        """Test validation rejects .github/workflows modifications at runtime."""
+        plan = ChangePlan(
+            repository_match=True,
+            relevant_files=["src/main.py"],
+            planned_changes=[
+                PlannedChange(
+                    path="src/main.py",
+                    action="modify",
+                    description="Fix bug"
+                )
+            ],
+            risk_level="low"
+        )
+
+        actual_changes = [
+            WorkspaceChange(path=".github/workflows/ci.yml", action="modify")
+        ]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            validate_actual_changes(plan, actual_changes)
+
+        assert "CI workflow" in str(exc_info.value)
+        assert "forbidden" in str(exc_info.value)
+
+    def test_validate_actual_changes_runtime_unplanned_sensitive_file(self):
+        """Test validation rejects unplanned access to sensitive files at runtime."""
+        plan = ChangePlan(
+            repository_match=True,
+            relevant_files=["src/config.py"],
+            planned_changes=[
+                PlannedChange(
+                    path="src/config.py",
+                    action="modify",
+                    description="Update config"
+                )
+            ],
+            risk_level="low"
+        )
+
+        # Agent tries to access .env at runtime (not in plan)
+        actual_changes = [
+            WorkspaceChange(path=".env", action="modify")
+        ]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            validate_actual_changes(plan, actual_changes)
+
+        assert ".env" in str(exc_info.value)
+        assert "forbidden" in str(exc_info.value)
+
+    def test_validate_actual_changes_runtime_multiple_unplanned_files(self):
+        """Test validation rejects multiple unplanned file changes at runtime."""
+        plan = ChangePlan(
+            repository_match=True,
+            relevant_files=["src/main.py"],
+            planned_changes=[
+                PlannedChange(
+                    path="src/main.py",
+                    action="modify",
+                    description="Fix bug"
+                )
+            ],
+            risk_level="low"
+        )
+
+        # Agent tries to modify multiple unplanned files at runtime
+        actual_changes = [
+            WorkspaceChange(path="src/helper.py", action="modify"),
+            WorkspaceChange(path="src/utils.py", action="create")
+        ]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            validate_actual_changes(plan, actual_changes)
+
+        assert "outside the approved plan" in str(exc_info.value)

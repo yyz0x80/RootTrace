@@ -8,6 +8,8 @@ This module provides workflow orchestration components including:
 - Complete workflow runner for end-to-end execution
 - Structured logging for execute workflow
 - Completion state determination
+- Execution tracing for workflow analysis
+- Permission audit system for security enforcement
 """
 
 from patchpilot.workflow.completion import determine_completion_state
@@ -15,6 +17,13 @@ from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import (
     FailureType,
     classify_failure,
+)
+from patchpilot.workflow.permission_audit import (
+    PermissionAuditor,
+    PermissionDecision,
+    PermissionResult,
+    RuleID,
+    audit_tool_permission,
 )
 from patchpilot.workflow.repair_loop import (
     RepairLoop,
@@ -32,20 +41,28 @@ from patchpilot.workflow.runner import (
     WorkflowRunnerSetupError,
     run_workflow,
 )
+from patchpilot.workflow.trace import TraceEvent, TraceWriter
 
 __all__ = [
     "MAX_REPAIR_ATTEMPTS",
     "ExecuteLogger",
     "FailureType",
+    "PermissionAuditor",
+    "PermissionDecision",
+    "PermissionResult",
     "RepairLoop",
     "RepairLoopError",
     "RepairLoopLimitError",
     "RepairLoopStalledError",
+    "RuleID",
+    "TraceEvent",
+    "TraceWriter",
     "WorkflowExecuteLogCallback",
     "WorkflowRunner",
     "WorkflowRunnerError",
     "WorkflowRunnerExecutionError",
     "WorkflowRunnerSetupError",
+    "audit_tool_permission",
     "classify_failure",
     "determine_completion_state",
     "run_repair_loop",

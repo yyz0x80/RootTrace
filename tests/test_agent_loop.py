@@ -784,5 +784,5 @@ class TestAgentStateFailurePatternDetection:
         state.record_tool_call("edit_file", False, "old_text not found")
         state.record_tool_call("read_file", False, "file not found")
 
-        is_repeated, desc = state.detect_repeated_failure_pattern()
+        is_repeated, _desc = state.detect_repeated_failure_pattern()
         assert not is_repeated
