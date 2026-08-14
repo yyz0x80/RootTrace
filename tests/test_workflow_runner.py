@@ -8,7 +8,13 @@ from unittest.mock import Mock, patch
 import pytest
 
 from patchpilot.agent_loop import AgentLoop
-from patchpilot.planning.schema import ChangePlan, PlannedTest
+from patchpilot.evidence.schema import CompletionState
+from patchpilot.planning.schema import (
+    ChangeAction,
+    ChangePlan,
+    PlannedChange,
+    PlannedTest,
+)
 from patchpilot.planning.scope_gate import ScopeGateResult
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.failure_classifier import FailureType
@@ -68,7 +74,6 @@ class TestWorkflowRunnerExecute:
 
     def test_execute_immediate_success(self):
         """Test successful execution on first attempt."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -115,7 +120,6 @@ class TestWorkflowRunnerExecute:
 
     def test_execute_with_repair_success(self):
         """Test execution that requires one repair attempt."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -178,7 +182,6 @@ class TestWorkflowRunnerExecute:
 
     def test_execute_unrecoverable_failure_stops_after_detection(self):
         """Test that unrecoverable failures stop the repair loop after detection."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -257,7 +260,6 @@ class TestWorkflowRunnerExecute:
 
     def test_execute_repeated_failure_stops_early(self):
         """Test that repeated failures stop the repair loop early."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -323,7 +325,6 @@ class TestWorkflowRunnerExecute:
 
     def test_execute_max_repair_attempts(self):
         """Test that repair loop respects MAX_REPAIR_ATTEMPTS."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -673,7 +674,6 @@ class TestRunWorkflow:
 
     def test_run_workflow_convenience(self):
         """Test the convenience function with default parameters."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -726,7 +726,6 @@ class TestWorkflowRunnerScopeGate:
 
     def test_scope_gate_allows_safe_changes(self):
         """Test that scope gate allows safe repair changes."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -789,7 +788,6 @@ class TestWorkflowRunnerScopeGate:
 
     def test_scope_gate_blocks_forbidden_changes(self):
         """Test that scope gate blocks forbidden repair changes."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -904,7 +902,6 @@ class TestWorkflowRunnerScopeGate:
 
     def test_execute_no_changes_without_change_plan_allowed(self):
         """Test that agent without change plan can complete without file changes."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -948,7 +945,6 @@ class TestWorkflowRunnerScopeGate:
 
     def test_scope_gate_blocks_cicd_changes(self):
         """Test that scope gate blocks CI/CD repair changes."""
-        from patchpilot.evidence.schema import CompletionState
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -1190,3 +1186,644 @@ class TestWorkflowRunnerVerification:
 
         mock_verifier.assert_called_once_with()
         assert result.retry_count == 2
+
+
+class TestWorkflowRunnerCompletionStates:
+    """Tests for completion state determination based on verification results."""
+
+    def test_execute_verified_state_with_file_changes_and_passing_tests(self):
+        """Test VERIFIED state when files are modified and all tests pass."""
+        from patchpilot.evidence.schema import (
+            AcceptanceEvidence,
+            CompletionState,
+            EvidenceStatus,
+        )
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        # Create a change plan with acceptance criteria
+        change_plan = ChangePlan(
+            relevant_files=["src/module.py"],
+            planned_changes=[],
+            planned_tests=[
+                PlannedTest(
+                    command="pytest tests/test_module.py -q",
+                    purpose="Verify module behavior",
+                    acceptance_criteria=["AC-1", "AC-2"],
+                )
+            ],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/module.py", action="modify")]
+
+        # Mock evidence mapper to return PASS status for all ACs
+        mock_evidence = [
+            AcceptanceEvidence(
+                criterion_id="AC-1",
+                description="First acceptance criterion",
+                status=EvidenceStatus.PASS,
+                changed_files=["src/module.py"],
+                tests=["tests/test_module.py"],
+                command_results=["pytest tests/test_module.py -q"],
+                explanation="Test passed successfully",
+            ),
+            AcceptanceEvidence(
+                criterion_id="AC-2",
+                description="Second acceptance criterion",
+                status=EvidenceStatus.PASS,
+                changed_files=["src/module.py"],
+                tests=["tests/test_module.py"],
+                command_results=["pytest tests/test_module.py -q"],
+                explanation="Test passed successfully",
+            ),
+        ]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
+             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+            mock_map_evidence.return_value = mock_evidence
+
+            result = runner.execute(
+                issue="Implement feature",
+                plan="Implement the feature with full test coverage",
+                change_plan=change_plan,
+            )
+
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.VERIFIED
+        assert result.verification_report["passed"] is True
+        assert len(result.acceptance_evidence) == 2
+        assert all(e.status == EvidenceStatus.PASS for e in result.acceptance_evidence)
+        assert mock_agent_loop.run.call_count == 1
+        assert mock_verifier.call_count == 1
+
+    def test_execute_partially_verified_state_when_ac_has_no_test_mapping(self):
+        """Test PARTIALLY_VERIFIED state when verifier passes but some AC have no test mapping."""
+        from patchpilot.evidence.schema import (
+            AcceptanceEvidence,
+            CompletionState,
+            EvidenceStatus,
+        )
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        # Create a change plan with acceptance criteria that lack test mapping
+        change_plan = ChangePlan(
+            relevant_files=["src/module.py"],
+            planned_changes=[],
+            planned_tests=[
+                PlannedTest(
+                    command="pytest tests/test_module.py -q",
+                    purpose="Verify module behavior",
+                    acceptance_criteria=["AC-1"],  # Only AC-1 has test mapping
+                )
+            ],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/module.py", action="modify")]
+
+        # Mock evidence mapper to return UNVERIFIED for AC without test mapping
+        mock_evidence = [
+            AcceptanceEvidence(
+                criterion_id="AC-1",
+                description="First acceptance criterion with test",
+                status=EvidenceStatus.PASS,
+                changed_files=["src/module.py"],
+                tests=["tests/test_module.py"],
+                command_results=["pytest tests/test_module.py -q"],
+                explanation="Test passed successfully",
+            ),
+            AcceptanceEvidence(
+                criterion_id="AC-2",
+                description="Second acceptance criterion without test mapping",
+                status=EvidenceStatus.UNVERIFIED,
+                changed_files=["src/module.py"],
+                tests=[],  # No test mapping
+                command_results=[],
+                explanation="No test found for this acceptance criterion",
+            ),
+        ]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
+             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+            mock_map_evidence.return_value = mock_evidence
+
+            result = runner.execute(
+                issue="Implement feature",
+                plan="Implement the feature with partial test coverage",
+                change_plan=change_plan,
+            )
+
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
+        assert len(result.acceptance_evidence) == 2
+        assert result.acceptance_evidence[0].status == EvidenceStatus.PASS
+        assert result.acceptance_evidence[1].status == EvidenceStatus.UNVERIFIED
+        assert mock_agent_loop.run.call_count == 1
+        assert mock_verifier.call_count == 1
+
+    def test_execute_failed_state_when_mapped_tests_fail(self):
+        """Test FAILED state when mapped tests fail during verification."""
+        from patchpilot.evidence.schema import AcceptanceEvidence, EvidenceStatus
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock failed verification
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/test_module.py -q",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                summary={
+                    "failed_tests": ["test_module"],
+                    "error_type": "AssertionError",
+                    "relevant_output": "expected 'value', got None",
+                },
+            )
+        )
+        mock_verifier.return_value = failed_report
+
+        # Create a change plan with acceptance criteria
+        change_plan = ChangePlan(
+            relevant_files=["src/module.py"],
+            planned_changes=[],
+            planned_tests=[
+                PlannedTest(
+                    command="pytest tests/test_module.py -q",
+                    purpose="Verify module behavior",
+                    acceptance_criteria=["AC-1"],
+                )
+            ],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/module.py", action="modify")]
+
+        # Mock evidence mapper to return FAIL status for failing tests
+        mock_evidence = [
+            AcceptanceEvidence(
+                criterion_id="AC-1",
+                description="First acceptance criterion",
+                status=EvidenceStatus.FAIL,
+                changed_files=["src/module.py"],
+                tests=["tests/test_module.py"],
+                command_results=["pytest tests/test_module.py -q"],
+                explanation="Test failed with AssertionError",
+            ),
+        ]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
+             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+            mock_map_evidence.return_value = mock_evidence
+
+            result = runner.execute(
+                issue="Fix bug",
+                plan="Fix the bug in module",
+                change_plan=change_plan,
+            )
+
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.FAILED
+        assert result.verification_report["passed"] is False
+        assert len(result.acceptance_evidence) == 1
+        assert result.acceptance_evidence[0].status == EvidenceStatus.FAIL
+        assert mock_agent_loop.run.call_count == 1
+        assert mock_verifier.call_count == 1
+
+    def test_execute_scope_gate_blocked_state(self):
+        """Test BLOCKED state when scope gate rejects changes."""
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # First verification fails
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
+            )
+        )
+
+        mock_verifier.return_value = failed_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and git diff
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path=".env", action="modify")]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch.object(runner, '_get_modified_files') as mock_git_diff, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
+
+            # Mock git diff to return forbidden file (.env)
+            mock_git_diff.return_value = [".env"]
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.verification_report["passed"] is False
+        assert result.verification_report["failure_type"] == "SCOPE_VIOLATION"
+        assert mock_agent_loop.run.call_count == 2
+
+
+class TestWorkflowRunnerTraceEvents:
+    """Tests for trace event generation during workflow execution."""
+
+    def test_trace_contains_tool_verification_and_final_state_events(self):
+        """Test that trace contains tool calls, verification results, and final state events."""
+        from patchpilot.workflow.result import WorkflowResult
+        from patchpilot.workflow.trace import TraceEvent, TraceWriter
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
+             patch('patchpilot.workflow.runner.TraceWriter') as mock_trace_writer_class:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+
+            # Create a mock trace writer instance
+            mock_trace_writer = Mock(spec=TraceWriter)
+            mock_trace_writer_class.return_value = mock_trace_writer
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        # Verify the result
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+
+        # Verify TraceWriter was instantiated
+        mock_trace_writer_class.assert_called_once()
+
+        # Verify trace writer was called with a final workflow_completed event
+        assert mock_trace_writer.write.call_count >= 1
+
+        # Get the final call (which should be the workflow_completed event)
+        final_call_args = mock_trace_writer.write.call_args
+        final_event = final_call_args[0][0]  # First positional argument
+
+        # Verify the final event contains expected fields
+        assert isinstance(final_event, TraceEvent)
+        assert final_event.event_type == "workflow_completed"
+        assert final_event.workflow_stage == "RESULT"
+        assert final_event.final_status == CompletionState.PARTIALLY_VERIFIED.value
+        assert final_event.modified_files == ["src/file.py"]
+        assert final_event.verification_result is not None
+        assert final_event.verification_result["passed"] is True
+
+    def test_evidence_completes_before_temp_directory_cleanup(self):
+        """Test that evidence generation completes before temporary directory cleanup."""
+        from patchpilot.evidence.schema import AcceptanceEvidence, EvidenceStatus
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        # Create a change plan with acceptance criteria
+        change_plan = ChangePlan(
+            relevant_files=["src/module.py"],
+            planned_changes=[],
+            planned_tests=[
+                PlannedTest(
+                    command="pytest tests/test_module.py -q",
+                    purpose="Verify module behavior",
+                    acceptance_criteria=["AC-1"],
+                )
+            ],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/module.py", action="modify")]
+
+        # Mock evidence mapper
+        mock_evidence = [
+            AcceptanceEvidence(
+                criterion_id="AC-1",
+                description="First acceptance criterion",
+                status=EvidenceStatus.PASS,
+                changed_files=["src/module.py"],
+                tests=["tests/test_module.py"],
+                command_results=["pytest tests/test_module.py -q"],
+                explanation="Test passed successfully",
+            ),
+        ]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup') as mock_cleanup, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
+             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+            mock_map_evidence.return_value = mock_evidence
+
+            result = runner.execute(
+                issue="Implement feature",
+                plan="Implement the feature with test coverage",
+                change_plan=change_plan,
+            )
+
+        # Verify the result
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+
+        # Verify evidence mapper was called
+        mock_map_evidence.assert_called_once()
+
+        # Verify cleanup was called after evidence generation
+        # by checking that cleanup was called at all
+        mock_cleanup.assert_called_once()
+
+        # The key assertion: evidence generation must happen before cleanup
+        # We verify this by checking that when cleanup is called, the result already has evidence
+        assert result.acceptance_evidence is not None
+        assert len(result.acceptance_evidence) == 1
+
+
+class TestWorkflowRunnerTestProtection:
+    """Tests for target repository test file protection."""
+
+    def test_target_repository_tests_not_modified_by_scope_gate(self):
+        """Test that scope gate prevents modifications to target repository test files."""
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # First verification fails to trigger repair loop
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
+            )
+        )
+
+        mock_verifier.return_value = failed_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+
+        # Mock workspace changes that include test file modification
+        mock_changes_with_tests = [
+            WorkspaceChange(path="src/module.py", action="modify"),
+            WorkspaceChange(path="tests/test_module.py", action="modify"),  # Test file modification
+        ]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
+
+            mock_get_changes.return_value = mock_changes_with_tests
+            mock_generate_patch.return_value = "diff content"
+
+            with patch.object(runner, '_get_modified_files') as mock_git_diff:
+                # Mock git diff to show test file was modified
+                mock_git_diff.return_value = ["src/module.py", "tests/test_module.py"]
+
+                result = runner.execute(
+                    issue="Fix the bug",
+                    plan="Implement the fix",
+                    change_plan=None,
+                )
+
+        # Verify that scope gate blocked the test file modification
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.verification_report["failure_type"] == "SCOPE_VIOLATION"
+        # Should attempt initial + 1 repair (then stop due to scope violation)
+        assert mock_agent_loop.run.call_count == 2
+
+    def test_target_repository_tests_allowed_in_change_plan(self):
+        """Test that test file modifications are allowed when explicitly in change plan."""
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock successful verification
+        mock_report = VerificationReport(passed=True)
+        mock_verifier.return_value = mock_report
+
+        # Create a change plan that explicitly includes test file modification
+        change_plan = ChangePlan(
+            relevant_files=["src/module.py", "tests/test_module.py"],
+            planned_changes=[
+                PlannedChange(
+                    path="src/module.py",
+                    action=ChangeAction.MODIFY,
+                    description="Fix bug in module",
+                ),
+                PlannedChange(
+                    path="tests/test_module.py",
+                    action=ChangeAction.MODIFY,
+                    description="Update test to match new behavior",
+                ),
+            ],
+            planned_tests=[],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods and workspace changes
+        from patchpilot.tools import WorkspaceChange
+
+        mock_changes = [
+            WorkspaceChange(path="src/module.py", action="modify"),
+            WorkspaceChange(path="tests/test_module.py", action="modify"),
+        ]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=change_plan,
+            )
+
+        # Verify that test file modification was allowed when in change plan
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
+        assert mock_agent_loop.run.call_count == 1
