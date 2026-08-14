@@ -673,180 +673,45 @@ def handle_execute(args) -> None:
             max_rounds=args.max_rounds,
         )
         
-        # Step 8: Create workflow runner with placeholder verifier
+        # Step 8: Create workflow runner
         runner = WorkflowRunner(
             agent_loop=agent_loop,
-            verifier=lambda: VerificationReport(),  # Placeholder, will be replaced
+            verifier=None,
             workspace=workspace,
         )
 
-        # Step 8: Define verifier function
-        def run_verification() -> VerificationReport:
-            """Run verification commands and return a VerificationReport."""
-            import subprocess
-            import time
-
-            report = VerificationReport()
-
-            # Use the current workspace root (which will be the temporary workspace)
-            # The workspace will be updated by the runner during execution
-            current_workspace_root = runner.workspace.root
-
-            # Run quick verification (ruff)
-            try:
-                start_time = time.time()
-                result = subprocess.run(
-                    ["ruff", "check"],
-                    cwd=current_workspace_root,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    check=False,
-                )
-                duration = time.time() - start_time
-                
-                if result.returncode == 0:
-                    ruff_check = CheckReport(
-                        level="quick",
-                        command="ruff check",
-                        passed=True,
-                        exit_code=0,
-                        duration_seconds=duration,
-                    )
-                else:
-                    # Parse the failure
-                    mock_result = CommandResult(
-                        command="ruff check",
-                        exit_code=result.returncode,
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        duration_seconds=duration,
-                        timed_out=False,
-                    )
-                    failure_summary = parse_failure(mock_result)
-                    
-                    ruff_check = CheckReport(
-                        level="quick",
-                        command="ruff check",
-                        passed=False,
-                        exit_code=result.returncode,
-                        duration_seconds=duration,
-                        failure_type=failure_summary.error_type,
-                        summary=failure_summary.__dict__,
-                    )
-                report.add_check(ruff_check)
-            except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
-                # If ruff check fails, create a failed check
-                ruff_check = CheckReport(
-                    level="quick",
-                    command="ruff check",
-                    passed=False,
-                    exit_code=1,
-                    duration_seconds=0.0,
-                    failure_type="LintError",
-                    summary={"error": str(e)},
-                )
-                report.add_check(ruff_check)
-            
-            # Only run pytest if ruff passed
-            if report.passed:
-                try:
-                    start_time = time.time()
-                    result = subprocess.run(
-                        ["python", "-m", "pytest", "tests/", "-q"],
-                        cwd=current_workspace_root,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                        check=False,
-                    )
-                    duration = time.time() - start_time
-                    
-                    if result.returncode == 0:
-                        pytest_check = CheckReport(
-                            level="standard",
-                            command="python -m pytest tests/ -q",
-                            passed=True,
-                            exit_code=0,
-                            duration_seconds=duration,
-                        )
-                    else:
-                        # Parse the failure
-                        mock_result = CommandResult(
-                            command="python -m pytest tests/ -q",
-                            exit_code=result.returncode,
-                            stdout=result.stdout,
-                            stderr=result.stderr,
-                            duration_seconds=duration,
-                            timed_out=False,
-                        )
-                        failure_summary = parse_failure(mock_result)
-                        
-                        pytest_check = CheckReport(
-                            level="standard",
-                            command="python -m pytest tests/ -q",
-                            passed=False,
-                            exit_code=result.returncode,
-                            duration_seconds=duration,
-                            failure_type=failure_summary.error_type,
-                            summary=failure_summary.__dict__,
-                        )
-                    report.add_check(pytest_check)
-                except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
-                    # If pytest fails, create a failed check
-                    pytest_check = CheckReport(
-                        level="standard",
-                        command="python -m pytest tests/ -q",
-                        passed=False,
-                        exit_code=1,
-                        duration_seconds=0.0,
-                        failure_type="TestError",
-                        summary={"error": str(e)},
-                    )
-                    report.add_check(pytest_check)
-
-            return report
-
-        # Set the verifier after definition
-        runner.verifier = run_verification
-
         # Step 9: Execute workflow
-        try:
-            verification_report = runner.execute(
-                issue=normalized_issue.model_dump_json(indent=2),
-                plan=plan.model_dump_json(indent=2),
-                change_plan=plan,
-            )
+        verification_report = runner.execute(
+            issue=normalized_issue.model_dump_json(indent=2),
+            plan=plan.model_dump_json(indent=2),
+            change_plan=plan,
+        )
 
-            # Step 10: Save verification report
-            save_json(
-                "artifacts/verification_report.json",
-                json.dumps(verification_report.to_dict(), indent=2),
-            )
+        # Step 10: Save verification report
+        save_json(
+            "artifacts/verification_report.json",
+            json.dumps(verification_report.to_dict(), indent=2),
+        )
 
-            # Step 11: Save patch
-            if verification_report.patch:
-                patch_path = Path("artifacts/patch.diff")
-                patch_path.parent.mkdir(parents=True, exist_ok=True)
-                patch_path.write_text(verification_report.patch, encoding="utf-8")
+        # Step 11: Save patch
+        if verification_report.patch:
+            patch_path = Path("artifacts/patch.diff")
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text(verification_report.patch, encoding="utf-8")
 
-            # Step 12: Print results
-            print("\nEXECUTION_COMPLETE\n")
-            if verification_report.passed:
-                print("✓ Verification passed")
-                print(f"  Total checks: {len(verification_report.checks)}")
-                print(f"  Duration: {verification_report.total_duration():.2f}s")
-            else:
-                print("✗ Verification failed")
-                failed_checks = verification_report.get_failed_checks()
-                print(f"  Failed checks: {len(failed_checks)}")
-                if failed_checks:
-                    latest_failure = failed_checks[-1]
-                    print(f"  Failure type: {latest_failure.failure_type}")
-
-        finally:
-            # Cleanup resources
-            runner._cleanup()
+        # Step 12: Print results
+        print("\nEXECUTION_COMPLETE\n")
+        if verification_report.passed:
+            print("✓ Verification passed")
+            print(f"  Total checks: {len(verification_report.checks)}")
+            print(f"  Duration: {verification_report.total_duration():.2f}s")
+        else:
+            print("✗ Verification failed")
+            failed_checks = verification_report.get_failed_checks()
+            print(f"  Failed checks: {len(failed_checks)}")
+            if failed_checks:
+                latest_failure = failed_checks[-1]
+                print(f"  Failure type: {latest_failure.failure_type}")
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

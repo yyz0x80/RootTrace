@@ -80,6 +80,7 @@ def test_verify_with_target_tests() -> None:
     report = verifier.verify(
         run_id="test-run-2",
         target_tests=["tests/test_specific.py"],
+        target_acceptance_criteria=["AC-1", "AC-2"],
     )
 
     assert report.passed is True
@@ -87,6 +88,12 @@ def test_verify_with_target_tests() -> None:
     assert report.checks[0].level == "LEVEL_1_LINT"
     assert report.checks[1].level == "LEVEL_2_TARGET_TESTS"
     assert report.checks[2].level == "LEVEL_3_REGRESSION"
+    assert report.checks[0].acceptance_criteria == []
+    assert report.checks[1].acceptance_criteria == [
+        "AC-1",
+        "AC-2",
+    ]
+    assert report.checks[2].acceptance_criteria == []
 
 
 def test_verify_ruff_fails_fail_fast() -> None:
@@ -140,6 +147,7 @@ def test_verify_target_test_fails_fail_fast() -> None:
     report = verifier.verify(
         run_id="test-run-4",
         target_tests=["tests/test_failing.py"],
+        target_acceptance_criteria=["AC-1"],
     )
 
     assert report.passed is False
@@ -149,6 +157,7 @@ def test_verify_target_test_fails_fail_fast() -> None:
     assert report.checks[1].level == "LEVEL_2_TARGET_TESTS"
     assert report.checks[1].passed is False
     assert report.failed_level == "LEVEL_2_TARGET_TESTS"
+    assert report.checks[1].acceptance_criteria == ["AC-1"]
 
     # Verify ruff and target tests were called, but not full regression
     assert sandbox_mock.run.call_count == 2

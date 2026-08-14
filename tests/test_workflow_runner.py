@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from patchpilot.agent_loop import AgentLoop
+from patchpilot.planning.schema import ChangePlan, PlannedTest
 from patchpilot.planning.scope_gate import ScopeGateResult
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.failure_classifier import FailureType
@@ -1106,3 +1107,86 @@ class TestWorkflowRunnerModifiedFilesFiltering:
         assert result.allowed is False
         assert len(result.violations) > 0
         assert any("test file modification is forbidden" in v.lower() for v in result.violations)
+
+
+class TestWorkflowRunnerVerification:
+    """Tests for _run_verification method."""
+
+    def test_run_verification_uses_sandbox_verifier(self):
+        """Test that _run_verification uses built-in Verifier when verifier is None."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        plan = ChangePlan(
+            relevant_files=[],
+            planned_changes=[],
+            planned_tests=[
+                PlannedTest(
+                    command="pytest tests/test_task.py -q",
+                    purpose="Verify task behavior",
+                    acceptance_criteria=["AC-1"],
+                )
+            ],
+            out_of_scope=[],
+            risk_level="low",
+        )
+
+        expected_report = VerificationReport(
+            run_id="run-123",
+            passed=True,
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=None,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        with patch(
+            "patchpilot.verification.verifier.Verifier"
+        ) as verifier_class:
+            verifier_class.return_value.verify.return_value = (
+                expected_report
+            )
+
+            result = runner._run_verification(
+                run_id="run-123",
+                change_plan=plan,
+                retry_count=1,
+            )
+
+        assert result is expected_report
+        verifier_class.assert_called_once_with(mock_sandbox)
+        verifier_class.return_value.verify.assert_called_once_with(
+            run_id="run-123",
+            target_tests=["tests/test_task.py"],
+            target_acceptance_criteria=["AC-1"],
+            retry_count=1,
+        )
+
+    def test_run_verification_uses_injected_callback(self):
+        """Test that _run_verification uses injected verifier callback when provided."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+        mock_verifier = Mock(
+            return_value=VerificationReport(passed=True)
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        result = runner._run_verification(
+            run_id="run-123",
+            change_plan=None,
+            retry_count=2,
+        )
+
+        mock_verifier.assert_called_once_with()
+        assert result.retry_count == 2

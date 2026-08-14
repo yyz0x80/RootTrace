@@ -42,6 +42,7 @@ from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.tools import _get_workspace_changes, generate_patch
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
+from patchpilot.verification.targets import select_target_tests
 from patchpilot.workflow.completion import determine_completion_state
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import FailureType
@@ -283,7 +284,7 @@ class WorkflowRunner:
     def __init__(
         self,
         agent_loop: AgentLoop,
-        verifier: Callable[[], VerificationReport],
+        verifier: Callable[[], VerificationReport] | None,
         workspace: Workspace,
         sandbox: DockerSandbox | None = None,
     ) -> None:
@@ -291,7 +292,8 @@ class WorkflowRunner:
 
         Args:
             agent_loop: AgentLoop instance for running the coding agent
-            verifier: Function that runs verification and returns a VerificationReport
+            verifier: Optional function that runs verification and returns a VerificationReport.
+                      If None, WorkflowRunner uses the built-in Verifier.
             workspace: Workspace instance for path resolution and security
             sandbox: Optional DockerSandbox instance (created if None)
         """
@@ -307,6 +309,51 @@ class WorkflowRunner:
         if self._temp_dir is None:
             return None
         return Path(self._temp_dir.name)
+
+    def _run_verification(
+        self,
+        *,
+        run_id: str,
+        change_plan: ChangePlan | None,
+        retry_count: int,
+    ) -> VerificationReport:
+        """Run an injected verifier or the built-in sandbox verifier.
+
+        Args:
+            run_id: Unique identifier for this workflow run
+            change_plan: Optional ChangePlan for target test selection
+            retry_count: Current retry attempt number
+
+        Returns:
+            VerificationReport containing verification results
+
+        Raises:
+            WorkflowRunnerSetupError: If sandbox is not started when using built-in verifier
+        """
+        if self.verifier is not None:
+            report = self.verifier()
+            report.retry_count = retry_count
+            return report
+
+        if self.sandbox is None:
+            raise WorkflowRunnerSetupError(
+                "Cannot run verification before the sandbox is started"
+            )
+
+        selection = select_target_tests(change_plan)
+
+        # Import here to avoid circular dependency
+        from patchpilot.verification.verifier import Verifier
+
+        verifier = Verifier(self.sandbox)
+        return verifier.verify(
+            run_id=run_id,
+            target_tests=selection.tests,
+            target_acceptance_criteria=(
+                selection.acceptance_criteria
+            ),
+            retry_count=retry_count,
+        )
 
     def execute(
         self,
@@ -352,6 +399,9 @@ class WorkflowRunner:
             WorkflowRunnerSetupError: If workspace or sandbox setup fails
             WorkflowRunnerExecutionError: If agent execution fails critically
         """
+        # Generate a stable run_id for this workflow execution
+        run_id = str(uuid.uuid4())
+
         # Log issue and plan
         ExecuteLogger.log_issue(issue)
         if change_plan:
@@ -417,7 +467,13 @@ class WorkflowRunner:
 
             # Step 11: Initial verification
             logger.info("Running initial verification")
-            report = self.verifier()
+            retry_count = 0
+
+            report = self._run_verification(
+                run_id=run_id,
+                change_plan=change_plan,
+                retry_count=retry_count,
+            )
 
             # Log verification results
             verification_results = {}
@@ -428,7 +484,6 @@ class WorkflowRunner:
             ExecuteLogger.log_verification(verification_results)
 
             # Step 12: Repair loop if verification failed
-            retry_count = 0
             previous_failure = None
 
             while not report.passed:
@@ -508,8 +563,11 @@ class WorkflowRunner:
                     break
 
                 # Re-run verification
-                report = self.verifier()
-                report.retry_count = retry_count
+                report = self._run_verification(
+                    run_id=run_id,
+                    change_plan=change_plan,
+                    retry_count=retry_count,
+                )
 
             # Step 13: Generate patch with all changes
             logger.info("Generating patch with all changes")
@@ -572,9 +630,6 @@ class WorkflowRunner:
             )
 
             # Step 16: Write final trace event before workspace cleanup
-            # Generate a run_id for this execution
-            run_id = str(uuid.uuid4())
-
             # Create trace writer and write final event
             trace_path = workspace_path.parent / "trace.jsonl"
             trace = TraceWriter(trace_path)
@@ -921,7 +976,7 @@ class WorkflowRunner:
 
 def run_workflow(
     agent_loop: AgentLoop,
-    verifier: Callable[[], VerificationReport],
+    verifier: Callable[[], VerificationReport] | None,
     workspace: Workspace,
     issue: str,
     plan: str,
@@ -935,7 +990,8 @@ def run_workflow(
 
     Args:
         agent_loop: AgentLoop instance for running the coding agent
-        verifier: Function that runs verification and returns a VerificationReport
+        verifier: Optional function that runs verification and returns a VerificationReport.
+                  If None, WorkflowRunner uses the built-in Verifier.
         workspace: Workspace instance for path resolution and security
         issue: The original issue description
         plan: The approved change plan for the agent to follow

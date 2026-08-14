@@ -402,3 +402,11 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
     mock_validate_repository.assert_called_once()
     # Verify workflow runner was called due to baseline match
     mock_workflow_runner.assert_called_once()
+    
+    # Verify that verifier was set to None (using built-in Verifier)
+    runner_kwargs = mock_workflow_runner.call_args.kwargs
+    assert runner_kwargs["verifier"] is None
+    assert runner_kwargs["workspace"] is not None
+    
+    # Verify that CLI does not directly call _cleanup
+    mock_runner_instance._cleanup.assert_not_called()
