@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from patchpilot.agent_loop import AgentLoop, AgentLoopError, AgentLoopLimitError
+from patchpilot.evidence import render_acceptance_coverage
 from patchpilot.issue.loader import load_issue
 from patchpilot.issue.normalizer import normalize_issue
 from patchpilot.issue.schema import NormalizedIssue
@@ -681,7 +682,7 @@ def handle_execute(args) -> None:
         )
 
         # Step 9: Execute workflow
-        verification_report = runner.execute(
+        result = runner.execute(
             issue=normalized_issue.model_dump_json(indent=2),
             plan=plan.model_dump_json(indent=2),
             change_plan=plan,
@@ -690,28 +691,39 @@ def handle_execute(args) -> None:
         # Step 10: Save verification report
         save_json(
             "artifacts/verification_report.json",
-            json.dumps(verification_report.to_dict(), indent=2),
+            json.dumps(result.verification_report, indent=2),
         )
 
         # Step 11: Save patch
-        if verification_report.patch:
+        if result.patch:
             patch_path = Path("artifacts/patch.diff")
             patch_path.parent.mkdir(parents=True, exist_ok=True)
-            patch_path.write_text(verification_report.patch, encoding="utf-8")
+            patch_path.write_text(result.patch, encoding="utf-8")
 
-        # Step 12: Print results
+        # Step 12: Save acceptance coverage report
+        coverage_path = Path("artifacts/acceptance_coverage.md")
+        coverage_path.parent.mkdir(parents=True, exist_ok=True)
+        coverage_path.write_text(
+            render_acceptance_coverage(
+                result.acceptance_evidence,
+                result.final_status.value,
+            ),
+            encoding="utf-8",
+        )
+
+        # Step 13: Print results
         print("\nEXECUTION_COMPLETE\n")
-        if verification_report.passed:
-            print("✓ Verification passed")
-            print(f"  Total checks: {len(verification_report.checks)}")
-            print(f"  Duration: {verification_report.total_duration():.2f}s")
-        else:
-            print("✗ Verification failed")
-            failed_checks = verification_report.get_failed_checks()
-            print(f"  Failed checks: {len(failed_checks)}")
-            if failed_checks:
-                latest_failure = failed_checks[-1]
-                print(f"  Failure type: {latest_failure.failure_type}")
+        
+        # Count acceptance criteria by status
+        pass_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "PASS")
+        fail_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "FAIL")
+        unverified_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "UNVERIFIED")
+        
+        print(f"Final status: {result.final_status.value}")
+        print("Acceptance criteria:")
+        print(f"  PASS: {pass_count}")
+        print(f"  FAIL: {fail_count}")
+        print(f"  UNVERIFIED: {unverified_count}")
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
