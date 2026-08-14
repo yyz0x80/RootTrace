@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from patchpilot.agent_loop import AgentLoop, ExecuteLogCallback
 from patchpilot.issue.schema import NormalizedIssue
@@ -50,7 +50,17 @@ from patchpilot.workflow.result import WorkflowResult
 from patchpilot.workflow.trace import TraceEvent, TraceWriter
 from patchpilot.workspace import Workspace
 
+if TYPE_CHECKING:
+    from patchpilot.evidence.schema import AcceptanceEvidence
+
 logger = logging.getLogger(__name__)
+
+
+def _map_acceptance_evidence(**kwargs: Any) -> list[AcceptanceEvidence]:
+    """Map acceptance evidence without introducing an import cycle."""
+    from patchpilot.evidence.mapper import map_acceptance_evidence
+
+    return map_acceptance_evidence(**kwargs)
 
 # Standard ignore patterns for temporary and compiled files
 # These patterns are applied regardless of the target repository's .gitignore
@@ -360,6 +370,8 @@ class WorkflowRunner:
         issue: str,
         plan: str,
         change_plan: ChangePlan | None = None,
+        normalized_issue: NormalizedIssue | None = None,
+        trace_path: Path | None = None,
     ) -> WorkflowResult:
         """Execute the complete workflow from issue to verified patch.
 
@@ -390,6 +402,11 @@ class WorkflowRunner:
             issue: The original issue description
             plan: The approved change plan for the agent to follow
             change_plan: Optional ChangePlan object for runtime scope validation
+            normalized_issue: Optional normalized issue used for acceptance
+                evidence mapping. JSON issue input is parsed as a compatibility
+                fallback when this value is not provided.
+            trace_path: Optional persistent path for the execution trace. When
+                omitted, the trace is written beside the temporary workspace.
 
         Returns:
             WorkflowResult containing the final execution results including completion state,
@@ -401,6 +418,22 @@ class WorkflowRunner:
         """
         # Generate a stable run_id for this workflow execution
         run_id = str(uuid.uuid4())
+
+        if normalized_issue is None:
+            try:
+                normalized_issue = NormalizedIssue.model_validate_json(issue)
+            except ValueError:
+                # Preserve compatibility with legacy callers that pass plain text.
+                normalized_issue = NormalizedIssue(
+                    title="Task from issue",
+                    task_type="other",
+                    problem_statement=issue,
+                    acceptance_criteria=[],
+                    constraints=[],
+                    ambiguous_points=[],
+                    expected_test_areas=[],
+                    implementation_notes=[],
+                )
 
         # Log issue and plan
         ExecuteLogger.log_issue(issue)
@@ -578,24 +611,7 @@ class WorkflowRunner:
             # Step 14: Generate acceptance evidence before workspace cleanup
             # This must happen before the temporary workspace is destroyed
             if change_plan is not None:
-                # Import here to avoid circular dependency
-                from patchpilot.evidence.mapper import map_acceptance_evidence
-
-                # Create a normalized issue from the original issue string
-                # Note: In a real implementation, this would come from the issue normalization step
-                # For now, we create a minimal NormalizedIssue for evidence mapping
-                normalized_issue = NormalizedIssue(
-                    title="Task from issue",
-                    task_type="other",
-                    problem_statement=issue,
-                    acceptance_criteria=[],
-                    constraints=[],
-                    ambiguous_points=[],
-                    expected_test_areas=[],
-                    implementation_notes=[],
-                )
-
-                evidence = map_acceptance_evidence(
+                evidence = _map_acceptance_evidence(
                     issue=normalized_issue,
                     plan=change_plan,
                     actual_changes=final_changes,
@@ -603,17 +619,6 @@ class WorkflowRunner:
                 )
             else:
                 evidence = []
-                # Create a minimal normalized issue for completion state determination
-                normalized_issue = NormalizedIssue(
-                    title="Task from issue",
-                    task_type="other",
-                    problem_statement=issue,
-                    acceptance_criteria=[],
-                    constraints=[],
-                    ambiguous_points=[],
-                    expected_test_areas=[],
-                    implementation_notes=[],
-                )
 
             # Step 15: Determine final completion state
             final_status = determine_completion_state(
@@ -630,9 +635,9 @@ class WorkflowRunner:
             )
 
             # Step 16: Write final trace event before workspace cleanup
-            # Create trace writer and write final event
-            trace_path = workspace_path.parent / "trace.jsonl"
-            trace = TraceWriter(trace_path)
+            # Use a caller-provided path so the trace can outlive workspace cleanup.
+            output_trace_path = trace_path or workspace_path.parent / "trace.jsonl"
+            trace = TraceWriter(output_trace_path)
             trace.write(
                 TraceEvent(
                     run_id=run_id,
@@ -660,6 +665,8 @@ class WorkflowRunner:
             if report.patch:
                 artifacts["patch.diff"] = "artifacts/patch.diff"
             artifacts["verification_report.json"] = "artifacts/verification_report.json"
+            if trace_path is not None:
+                artifacts["execution_trace.jsonl"] = str(trace_path)
 
             ExecuteLogger.log_result(passed=report.passed, artifacts=artifacts)
 
@@ -982,6 +989,8 @@ def run_workflow(
     plan: str,
     sandbox: DockerSandbox | None = None,
     change_plan: ChangePlan | None = None,
+    normalized_issue: NormalizedIssue | None = None,
+    trace_path: Path | None = None,
 ) -> WorkflowResult:
     """Convenience function to run the complete workflow with default configuration.
 
@@ -997,6 +1006,8 @@ def run_workflow(
         plan: The approved change plan for the agent to follow
         sandbox: Optional DockerSandbox instance (created if None)
         change_plan: Optional ChangePlan object for runtime scope validation
+        normalized_issue: Optional normalized issue used for evidence mapping
+        trace_path: Optional persistent path for the execution trace
 
     Returns:
         WorkflowResult containing the final execution results including completion state,
@@ -1013,8 +1024,16 @@ def run_workflow(
         sandbox=sandbox,
     )
 
+    execute_kwargs: dict[str, Any] = {
+        "issue": issue,
+        "plan": plan,
+        "change_plan": change_plan,
+    }
+    if normalized_issue is not None:
+        execute_kwargs["normalized_issue"] = normalized_issue
+    if trace_path is not None:
+        execute_kwargs["trace_path"] = trace_path
+
     return runner.execute(
-        issue=issue,
-        plan=plan,
-        change_plan=change_plan,
+        **execute_kwargs,
     )

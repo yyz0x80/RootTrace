@@ -310,7 +310,6 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
     from patchpilot.issue.schema import NormalizedIssue
     from patchpilot.planning.schema import ChangePlan
     from patchpilot.repository.schema import RepositoryPreflightResult
-    from patchpilot.verification.report import VerificationReport
 
     # Create mock args
     args = Namespace(
@@ -353,8 +352,8 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
 
     # Mock workflow runner
     mock_runner_instance = Mock()
-    from patchpilot.workflow.result import WorkflowResult
     from patchpilot.evidence.schema import CompletionState
+    from patchpilot.workflow.result import WorkflowResult
     
     mock_workflow_result = Mock(spec=WorkflowResult)
     mock_workflow_result.final_status = CompletionState.VERIFIED
@@ -410,3 +409,8 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
     
     # Verify that CLI does not directly call _cleanup
     mock_runner_instance._cleanup.assert_not_called()
+
+    execute_kwargs = mock_runner_instance.execute.call_args.kwargs
+    assert execute_kwargs["normalized_issue"] == issue
+    assert execute_kwargs["trace_path"] is mock_path_instance
+    mock_path.assert_any_call("artifacts/execution_trace.jsonl")

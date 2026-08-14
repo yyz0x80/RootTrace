@@ -9,6 +9,7 @@ import pytest
 
 from patchpilot.agent_loop import AgentLoop
 from patchpilot.evidence.schema import CompletionState
+from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
 from patchpilot.planning.schema import (
     ChangeAction,
     ChangePlan,
@@ -1209,10 +1210,33 @@ class TestWorkflowRunnerCompletionStates:
         mock_report = VerificationReport(passed=True)
         mock_verifier.return_value = mock_report
 
+        normalized_issue = NormalizedIssue(
+            title="Implement feature",
+            task_type="feature",
+            problem_statement="Implement the requested feature.",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    id="AC-1",
+                    description="First acceptance criterion",
+                ),
+                AcceptanceCriterion(
+                    id="AC-2",
+                    description="Second acceptance criterion",
+                ),
+            ],
+        )
+
         # Create a change plan with acceptance criteria
         change_plan = ChangePlan(
             relevant_files=["src/module.py"],
-            planned_changes=[],
+            planned_changes=[
+                PlannedChange(
+                    path="src/module.py",
+                    action=ChangeAction.MODIFY,
+                    description="Implement the requested feature",
+                    acceptance_criteria=["AC-1", "AC-2"],
+                )
+            ],
             planned_tests=[
                 PlannedTest(
                     command="pytest tests/test_module.py -q",
@@ -1262,7 +1286,7 @@ class TestWorkflowRunnerCompletionStates:
              patch.object(runner, '_cleanup'), \
              patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
              patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
-             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+             patch('patchpilot.workflow.runner._map_acceptance_evidence') as mock_map_evidence:
 
             mock_get_changes.return_value = mock_changes
             mock_generate_patch.return_value = "diff content"
@@ -1272,6 +1296,7 @@ class TestWorkflowRunnerCompletionStates:
                 issue="Implement feature",
                 plan="Implement the feature with full test coverage",
                 change_plan=change_plan,
+                normalized_issue=normalized_issue,
             )
 
         assert isinstance(result, WorkflowResult)
@@ -1281,6 +1306,7 @@ class TestWorkflowRunnerCompletionStates:
         assert all(e.status == EvidenceStatus.PASS for e in result.acceptance_evidence)
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
+        assert mock_map_evidence.call_args.kwargs["issue"] is normalized_issue
 
     def test_execute_partially_verified_state_when_ac_has_no_test_mapping(self):
         """Test PARTIALLY_VERIFIED state when verifier passes but some AC have no test mapping."""
@@ -1353,7 +1379,7 @@ class TestWorkflowRunnerCompletionStates:
              patch.object(runner, '_cleanup'), \
              patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
              patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
-             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+             patch('patchpilot.workflow.runner._map_acceptance_evidence') as mock_map_evidence:
 
             mock_get_changes.return_value = mock_changes
             mock_generate_patch.return_value = "diff content"
@@ -1448,7 +1474,7 @@ class TestWorkflowRunnerCompletionStates:
              patch.object(runner, '_cleanup'), \
              patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
              patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
-             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+             patch('patchpilot.workflow.runner._map_acceptance_evidence') as mock_map_evidence:
 
             mock_get_changes.return_value = mock_changes
             mock_generate_patch.return_value = "diff content"
@@ -1557,6 +1583,7 @@ class TestWorkflowRunnerTraceEvents:
         # Mock internal setup methods and workspace changes
         from patchpilot.tools import WorkspaceChange
         mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        persistent_trace_path = Path("artifacts/execution_trace.jsonl")
 
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
@@ -1576,6 +1603,7 @@ class TestWorkflowRunnerTraceEvents:
                 issue="Fix the bug",
                 plan="Implement the fix",
                 change_plan=None,
+                trace_path=persistent_trace_path,
             )
 
         # Verify the result
@@ -1583,7 +1611,7 @@ class TestWorkflowRunnerTraceEvents:
         assert result.final_status == CompletionState.PARTIALLY_VERIFIED
 
         # Verify TraceWriter was instantiated
-        mock_trace_writer_class.assert_called_once()
+        mock_trace_writer_class.assert_called_once_with(persistent_trace_path)
 
         # Verify trace writer was called with a final workflow_completed event
         assert mock_trace_writer.write.call_count >= 1
@@ -1659,7 +1687,7 @@ class TestWorkflowRunnerTraceEvents:
              patch.object(runner, '_cleanup') as mock_cleanup, \
              patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
              patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
-             patch('patchpilot.workflow.runner.map_acceptance_evidence') as mock_map_evidence:
+             patch('patchpilot.workflow.runner._map_acceptance_evidence') as mock_map_evidence:
 
             mock_get_changes.return_value = mock_changes
             mock_generate_patch.return_value = "diff content"

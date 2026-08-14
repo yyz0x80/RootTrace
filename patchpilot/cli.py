@@ -682,10 +682,13 @@ def handle_execute(args) -> None:
         )
 
         # Step 9: Execute workflow
+        trace_path = Path("artifacts/execution_trace.jsonl")
         result = runner.execute(
             issue=normalized_issue.model_dump_json(indent=2),
             plan=plan.model_dump_json(indent=2),
             change_plan=plan,
+            normalized_issue=normalized_issue,
+            trace_path=trace_path,
         )
 
         # Step 10: Save verification report
