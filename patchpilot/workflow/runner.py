@@ -23,12 +23,14 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import uuid
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
 from patchpilot.agent_loop import AgentLoop, ExecuteLogCallback
+from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import (
     ScopeGateResult,
@@ -40,8 +42,11 @@ from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.tools import _get_workspace_changes, generate_patch
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
+from patchpilot.workflow.completion import determine_completion_state
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import FailureType
+from patchpilot.workflow.result import WorkflowResult
+from patchpilot.workflow.trace import TraceEvent, TraceWriter
 from patchpilot.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -308,7 +313,7 @@ class WorkflowRunner:
         issue: str,
         plan: str,
         change_plan: ChangePlan | None = None,
-    ) -> VerificationReport:
+    ) -> WorkflowResult:
         """Execute the complete workflow from issue to verified patch.
 
         This method implements the core workflow logic following the proper execution order:
@@ -329,7 +334,10 @@ class WorkflowRunner:
             - Scope gate validation
             - Run verifier
         13. Generate patch with all changes
-        14. Return final verification report
+        14. Generate acceptance evidence before workspace cleanup
+        15. Determine final completion state
+        16. Write final trace event before workspace cleanup
+        17. Create and return WorkflowResult
 
         Args:
             issue: The original issue description
@@ -337,7 +345,8 @@ class WorkflowRunner:
             change_plan: Optional ChangePlan object for runtime scope validation
 
         Returns:
-            VerificationReport containing the final verification results
+            WorkflowResult containing the final execution results including completion state,
+            changed files, acceptance evidence, verification report, and patch
 
         Raises:
             WorkflowRunnerSetupError: If workspace or sandbox setup fails
@@ -508,6 +517,89 @@ class WorkflowRunner:
             report.patch = generate_patch(workspace_path, final_changes)
             logger.info("Patch generated successfully")
 
+            # Step 14: Generate acceptance evidence before workspace cleanup
+            # This must happen before the temporary workspace is destroyed
+            if change_plan is not None:
+                # Import here to avoid circular dependency
+                from patchpilot.evidence.mapper import map_acceptance_evidence
+
+                # Create a normalized issue from the original issue string
+                # Note: In a real implementation, this would come from the issue normalization step
+                # For now, we create a minimal NormalizedIssue for evidence mapping
+                normalized_issue = NormalizedIssue(
+                    title="Task from issue",
+                    task_type="other",
+                    problem_statement=issue,
+                    acceptance_criteria=[],
+                    constraints=[],
+                    ambiguous_points=[],
+                    expected_test_areas=[],
+                    implementation_notes=[],
+                )
+
+                evidence = map_acceptance_evidence(
+                    issue=normalized_issue,
+                    plan=change_plan,
+                    actual_changes=final_changes,
+                    report=report,
+                )
+            else:
+                evidence = []
+                # Create a minimal normalized issue for completion state determination
+                normalized_issue = NormalizedIssue(
+                    title="Task from issue",
+                    task_type="other",
+                    problem_statement=issue,
+                    acceptance_criteria=[],
+                    constraints=[],
+                    ambiguous_points=[],
+                    expected_test_areas=[],
+                    implementation_notes=[],
+                )
+
+            # Step 15: Determine final completion state
+            final_status = determine_completion_state(
+                has_ambiguity=bool(normalized_issue.ambiguous_points),
+                blocked=report.failure_type in {
+                    "ENVIRONMENT_FAILURE",
+                    "PERMISSION_FAILURE",
+                    "SCOPE_VIOLATION",
+                    "TIMEOUT",
+                },
+                execution_failed=not report.passed,
+                verifier_passed=report.passed,
+                evidence=evidence,
+            )
+
+            # Step 16: Write final trace event before workspace cleanup
+            # Generate a run_id for this execution
+            run_id = str(uuid.uuid4())
+
+            # Create trace writer and write final event
+            trace_path = workspace_path.parent / "trace.jsonl"
+            trace = TraceWriter(trace_path)
+            trace.write(
+                TraceEvent(
+                    run_id=run_id,
+                    event_type="workflow_completed",
+                    workflow_stage="RESULT",
+                    modified_files=[change.path for change in final_changes],
+                    verification_result=report.to_dict(),
+                    retry_count=report.retry_count,
+                    final_status=final_status.value,
+                )
+            )
+
+            # Step 17: Create and return WorkflowResult
+            result = WorkflowResult(
+                run_id=run_id,
+                final_status=final_status,
+                changed_files=[change.path for change in final_changes],
+                acceptance_evidence=evidence,
+                verification_report=report.to_dict(),
+                patch=report.patch or "",
+            )
+
             # Log final result section
             artifacts = {}
             if report.patch:
@@ -516,8 +608,8 @@ class WorkflowRunner:
 
             ExecuteLogger.log_result(passed=report.passed, artifacts=artifacts)
 
-            # Step 14: Return final verification report
-            return report
+            # Step 18: Return final workflow result
+            return result
 
         finally:
             # Cleanup: Stop sandbox and remove temporary directory
@@ -835,7 +927,7 @@ def run_workflow(
     plan: str,
     sandbox: DockerSandbox | None = None,
     change_plan: ChangePlan | None = None,
-) -> VerificationReport:
+) -> WorkflowResult:
     """Convenience function to run the complete workflow with default configuration.
 
     This function provides a simple interface for executing the complete PatchPilot
@@ -851,7 +943,8 @@ def run_workflow(
         change_plan: Optional ChangePlan object for runtime scope validation
 
     Returns:
-        VerificationReport containing the final verification results
+        WorkflowResult containing the final execution results including completion state,
+        changed files, acceptance evidence, verification report, and patch
 
     Raises:
         WorkflowRunnerSetupError: If workspace or sandbox setup fails

@@ -67,6 +67,9 @@ class TestWorkflowRunnerExecute:
 
     def test_execute_immediate_success(self):
         """Test successful execution on first attempt."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -103,12 +106,17 @@ class TestWorkflowRunnerExecute:
                 change_plan=None,
             )
 
-        assert result.passed is True
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
 
     def test_execute_with_repair_success(self):
         """Test execution that requires one repair attempt."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -142,7 +150,7 @@ class TestWorkflowRunnerExecute:
         # Mock internal setup methods and scope gate
         from patchpilot.tools import WorkspaceChange
         mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
-        
+
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
@@ -161,12 +169,17 @@ class TestWorkflowRunnerExecute:
                 change_plan=None,
             )
 
-        assert result.passed is True
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 2  # Initial + 1 repair
         assert mock_verifier.call_count == 2
 
     def test_execute_unrecoverable_failure_stops_after_detection(self):
         """Test that unrecoverable failures stop the repair loop after detection."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -234,13 +247,18 @@ class TestWorkflowRunnerExecute:
                 change_plan=None,
             )
 
-        assert result.passed is False
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.FAILED
+        assert result.verification_report["passed"] is False
         # Should attempt initial + 1 repair (then stop due to same failure)
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 2
 
     def test_execute_repeated_failure_stops_early(self):
         """Test that repeated failures stop the repair loop early."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -295,13 +313,18 @@ class TestWorkflowRunnerExecute:
                 change_plan=None,
             )
 
-        assert result.passed is False
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.FAILED
+        assert result.verification_report["passed"] is False
         # Should stop after 2 attempts (initial + 1 repair that repeats)
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 2
 
     def test_execute_max_repair_attempts(self):
         """Test that repair loop respects MAX_REPAIR_ATTEMPTS."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -381,7 +404,9 @@ class TestWorkflowRunnerExecute:
                 change_plan=None,
             )
 
-        assert result.passed is False
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.FAILED
+        assert result.verification_report["passed"] is False
         # Initial + MAX_REPAIR_ATTEMPTS (2) = 3 total
         assert mock_agent_loop.run.call_count == 3
         assert mock_verifier.call_count == 3
@@ -647,6 +672,9 @@ class TestRunWorkflow:
 
     def test_run_workflow_convenience(self):
         """Test the convenience function with default parameters."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -658,7 +686,13 @@ class TestRunWorkflow:
 
         with patch('patchpilot.workflow.runner.WorkflowRunner') as mock_runner_class:
             mock_runner_instance = Mock()
-            mock_runner_instance.execute.return_value = mock_report
+            # Mock WorkflowResult return value
+            mock_result = WorkflowResult(
+                run_id="test-run-id",
+                final_status=CompletionState.PARTIALLY_VERIFIED,
+                verification_report={"passed": True},
+            )
+            mock_runner_instance.execute.return_value = mock_result
             mock_runner_class.return_value = mock_runner_instance
 
             result = run_workflow(
@@ -670,7 +704,9 @@ class TestRunWorkflow:
                 sandbox=mock_sandbox,
             )
 
-        assert result.passed is True
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
         mock_runner_class.assert_called_once_with(
             agent_loop=mock_agent_loop,
             verifier=mock_verifier,
@@ -689,6 +725,9 @@ class TestWorkflowRunnerScopeGate:
 
     def test_scope_gate_allows_safe_changes(self):
         """Test that scope gate allows safe repair changes."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -741,12 +780,17 @@ class TestWorkflowRunnerScopeGate:
                 change_plan=None,
             )
 
-        assert result.passed is True
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 2  # Initial + 1 repair
         assert mock_verifier.call_count == 2
 
     def test_scope_gate_blocks_forbidden_changes(self):
         """Test that scope gate blocks forbidden repair changes."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -798,8 +842,10 @@ class TestWorkflowRunnerScopeGate:
                 change_plan=None,
             )
 
-        assert result.passed is False
-        assert result.failure_type == "SCOPE_VIOLATION"
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.verification_report["passed"] is False
+        assert result.verification_report["failure_type"] == "SCOPE_VIOLATION"
         # Should attempt initial + 1 repair (then stop due to scope violation)
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1  # Only initial verification, scope gate blocks re-verification
@@ -857,6 +903,9 @@ class TestWorkflowRunnerScopeGate:
 
     def test_execute_no_changes_without_change_plan_allowed(self):
         """Test that agent without change plan can complete without file changes."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -890,12 +939,17 @@ class TestWorkflowRunnerScopeGate:
                 change_plan=None,
             )
 
-        assert result.passed is True
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
 
     def test_scope_gate_blocks_cicd_changes(self):
         """Test that scope gate blocks CI/CD repair changes."""
+        from patchpilot.evidence.schema import CompletionState
+        from patchpilot.workflow.result import WorkflowResult
+
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -947,8 +1001,9 @@ class TestWorkflowRunnerScopeGate:
                 change_plan=None,
             )
 
-        assert result.passed is False
-        assert result.failure_type == "SCOPE_VIOLATION"
+        assert isinstance(result, WorkflowResult)
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.verification_report["failure_type"] == "SCOPE_VIOLATION"
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1
 

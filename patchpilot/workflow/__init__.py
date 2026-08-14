@@ -32,6 +32,7 @@ from patchpilot.workflow.repair_loop import (
     RepairLoopStalledError,
     run_repair_loop,
 )
+from patchpilot.workflow.result import WorkflowResult
 from patchpilot.workflow.runner import (
     MAX_REPAIR_ATTEMPTS,
     WorkflowExecuteLogCallback,
@@ -58,6 +59,7 @@ __all__ = [
     "TraceEvent",
     "TraceWriter",
     "WorkflowExecuteLogCallback",
+    "WorkflowResult",
     "WorkflowRunner",
     "WorkflowRunnerError",
     "WorkflowRunnerExecutionError",
