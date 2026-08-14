@@ -7,8 +7,10 @@ This module provides workflow orchestration components including:
 - Repair loop with early stopping logic
 - Complete workflow runner for end-to-end execution
 - Structured logging for execute workflow
+- Completion state determination
 """
 
+from patchpilot.workflow.completion import determine_completion_state
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import (
     FailureType,
@@ -45,6 +47,7 @@ __all__ = [
     "WorkflowRunnerExecutionError",
     "WorkflowRunnerSetupError",
     "classify_failure",
+    "determine_completion_state",
     "run_repair_loop",
     "run_workflow",
 ]
