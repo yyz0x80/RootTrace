@@ -34,6 +34,7 @@ class CheckReport:
         duration_seconds: Execution time in seconds
         failure_type: Categorized failure type if check failed (e.g., "AssertionError")
         summary: Additional structured summary data for the check result
+        acceptance_criteria: List of acceptance criteria associated with this check
     """
 
     level: str
@@ -43,6 +44,7 @@ class CheckReport:
     duration_seconds: float
     failure_type: str | None = None
     summary: dict[str, Any] | None = None
+    acceptance_criteria: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the check report to a dictionary for serialization.

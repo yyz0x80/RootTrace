@@ -47,6 +47,38 @@ def test_check_report_with_failure():
     assert report.exit_code == 1
     assert report.failure_type == "LintError"
     assert report.summary == {"errors": 5, "warnings": 2}
+    assert report.acceptance_criteria == []
+
+
+def test_check_report_with_acceptance_criteria():
+    """Test creating a CheckReport with acceptance criteria."""
+    report = CheckReport(
+        level="standard",
+        command="pytest tests/",
+        passed=True,
+        exit_code=0,
+        duration_seconds=3.0,
+        acceptance_criteria=["AC1: User can create task", "AC2: Task priority validation"],
+    )
+
+    assert report.level == "standard"
+    assert report.passed is True
+    assert report.exit_code == 0
+    assert report.acceptance_criteria == ["AC1: User can create task", "AC2: Task priority validation"]
+
+
+def test_check_report_default_acceptance_criteria():
+    """Test that acceptance_criteria defaults to empty list."""
+    report = CheckReport(
+        level="quick",
+        command="ruff check",
+        passed=True,
+        exit_code=0,
+        duration_seconds=1.0,
+    )
+
+    assert report.acceptance_criteria == []
+    assert isinstance(report.acceptance_criteria, list)
 
 
 def test_check_report_to_dict():
@@ -70,6 +102,23 @@ def test_check_report_to_dict():
     assert data["duration_seconds"] == 10.0
     assert data["failure_type"] is None
     assert data["summary"] == {"tests_run": 42}
+    assert data["acceptance_criteria"] == []
+
+
+def test_check_report_to_dict_with_acceptance_criteria():
+    """Test converting CheckReport with acceptance criteria to dictionary."""
+    report = CheckReport(
+        level="standard",
+        command="pytest tests/",
+        passed=True,
+        exit_code=0,
+        duration_seconds=5.0,
+        acceptance_criteria=["AC1: Task creation", "AC2: Validation"],
+    )
+
+    data = report.to_dict()
+
+    assert data["acceptance_criteria"] == ["AC1: Task creation", "AC2: Validation"]
 
 
 def test_verification_report_creation():
@@ -427,6 +476,32 @@ def test_verification_report_load():
         assert loaded_report.checks[1].level == "standard"
         assert loaded_report.checks[1].passed is False
         assert loaded_report.checks[1].summary == {"failed": 2}
+
+
+def test_verification_report_load_with_acceptance_criteria():
+    """Test loading VerificationReport with acceptance criteria from JSON file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # First create and save a report with acceptance criteria
+        original_report = VerificationReport(run_id="ac-test-123")
+
+        original_report.add_check(
+            CheckReport(
+                level="standard",
+                command="pytest tests/",
+                passed=True,
+                exit_code=0,
+                duration_seconds=2.0,
+                acceptance_criteria=["AC1: User can create task", "AC2: Priority validation"],
+            )
+        )
+
+        save_path = Path(tmpdir) / "verification.json"
+        original_report.save(save_path)
+
+        # Load the report back
+        loaded_report = VerificationReport.load(save_path)
+
+        assert loaded_report.checks[0].acceptance_criteria == ["AC1: User can create task", "AC2: Priority validation"]
 
 
 def test_verification_report_load_creates_directories():
