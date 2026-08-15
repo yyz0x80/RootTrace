@@ -52,6 +52,8 @@ TOOL USAGE GUIDELINES:
 - Start with the smallest possible change (e.g., add one field at a time).
 
 ERROR RECOVERY STRATEGY:
+- VERIFICATION_FAILURE means the command ran successfully but a deterministic check failed. Analyze the reported test or lint evidence and fix the source code.
+- TOOL_FAILURE means the tool could not perform the requested operation. Correct the tool name, arguments, or workspace-relative file path before retrying.
 - When a tool fails, re-read the relevant file to understand current state.
 - Analyze failure: identify root cause → re-evaluate file state → adjust approach.
 - Do NOT repeat the exact same failing operation without modification.

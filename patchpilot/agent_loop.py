@@ -14,18 +14,33 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
 
-from patchpilot.models import AssistantTurn, ToolCall, ToolResult
+from patchpilot.models import (
+    AssistantTurn,
+    ToolCall,
+    ToolFailureType,
+    ToolResult,
+)
 from patchpilot.prompts import SYSTEM_PROMPT
 from patchpilot.provider import LLMProvider
 from patchpilot.tools import ToolRegistry
 from patchpilot.workspace import Workspace
 
 logger = logging.getLogger(__name__)
+
+MAX_FAILURE_SUMMARY_CHARS = 500
+SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?i)\b([a-z0-9_]*(?:api[_-]?key|token|password|secret))\b"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
+AUTHORIZATION_PATTERN = re.compile(
+    r"(?i)(authorization\s*:\s*(?:bearer\s+)?)([^\s,;]+)"
+)
 
 
 class ExecuteLogCallback:
@@ -85,6 +100,7 @@ class AgentState:
         total_edits: Total number of edit operations performed
         unique_files_read: Set of file paths that have been read
         recent_failures: List of recent failure signatures for pattern detection
+        last_failure_type: Classification of the most recent failure.
     """
 
     files_modified: set[str]
@@ -94,6 +110,7 @@ class AgentState:
     total_edits: int
     unique_files_read: set[str]
     recent_failures: list[str]
+    last_failure_type: ToolFailureType | None
 
     def __init__(self) -> None:
         self.files_modified = set()
@@ -103,20 +120,37 @@ class AgentState:
         self.total_edits = 0
         self.unique_files_read = set()
         self.recent_failures = []
+        self.last_failure_type = None
 
-    def record_tool_call(self, tool_name: str, success: bool, error_content: str = "") -> None:
+    def record_tool_call(
+        self,
+        tool_name: str,
+        success: bool,
+        error_content: str = "",
+        failure_type: ToolFailureType | None = None,
+    ) -> None:
         """Record a tool call and update failure tracking.
 
         Args:
             tool_name: Name of the tool that was called
             success: Whether the tool call succeeded
             error_content: Error message content for failure pattern detection
+            failure_type: Classification for an unsuccessful tool result.
         """
         self.tool_usage_count[tool_name] += 1
-        self.last_tool_success = success
+        effective_failure_type = failure_type
+        if not success and effective_failure_type is None:
+            effective_failure_type = ToolFailureType.TOOL_FAILURE
+        self.last_failure_type = effective_failure_type
+        self.last_tool_success = (
+            success
+            or effective_failure_type
+            == ToolFailureType.VERIFICATION_FAILURE
+        )
 
-        if success:
+        if success or effective_failure_type == ToolFailureType.VERIFICATION_FAILURE:
             self.consecutive_failures = 0
+            self.recent_failures.clear()
         else:
             self.consecutive_failures += 1
             # Record failure signature for pattern detection
@@ -193,6 +227,11 @@ class AgentState:
 
         if self.recent_failures:
             summary_parts.append(f"Recent failures: {len(self.recent_failures)}")
+
+        if self.last_failure_type is not None:
+            summary_parts.append(
+                f"Last failure: {self.last_failure_type.value}"
+            )
 
         return ", ".join(summary_parts)
 
@@ -363,6 +402,8 @@ class AgentLoop:
                 started_at = perf_counter()
                 tool_result = self._execute_tool(tool_call)
                 duration_seconds = perf_counter() - started_at
+                if not tool_result.ok and tool_result.failure_type is None:
+                    tool_result.failure_type = ToolFailureType.TOOL_FAILURE
 
                 # Notify callback of tool result with timing
                 if self.execute_log_callback:
@@ -377,7 +418,12 @@ class AgentLoop:
                 # Update state tracking
                 if self.enable_progress_tracking:
                     error_content = tool_result.content if not tool_result.ok else ""
-                    self.state.record_tool_call(tool_call.name, tool_result.ok, error_content)
+                    self.state.record_tool_call(
+                        tool_call.name,
+                        tool_result.ok,
+                        error_content,
+                        tool_result.failure_type,
+                    )
 
                     # Track file operations
                     if tool_call.name in ["edit_file", "edit_file_by_line", "apply_patch"] and tool_result.ok and "path" in tool_call.arguments:
@@ -390,6 +436,13 @@ class AgentLoop:
                     tool_call.name,
                     tool_result.ok,
                 )
+                if not tool_result.ok:
+                    logger.warning(
+                        "Tool failure: name=%s, type=%s, summary=%s",
+                        tool_call.name,
+                        tool_result.failure_type.value,
+                        self._summarize_tool_failure(tool_result.content),
+                    )
 
                 messages.append(
                     {
@@ -490,6 +543,27 @@ class AgentLoop:
 
         return result
 
+    def _summarize_tool_failure(self, content: str) -> str:
+        """Return a redacted and bounded terminal summary for a tool failure."""
+        sanitizer = getattr(self.tools, "sanitize_workspace_paths", None)
+        if callable(sanitizer):
+            sanitized_content = sanitizer(content)
+            if isinstance(sanitized_content, str):
+                content = sanitized_content
+
+        content = SENSITIVE_VALUE_PATTERN.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}<redacted>",
+            content,
+        )
+        content = AUTHORIZATION_PATTERN.sub(
+            lambda match: f"{match.group(1)}<redacted>",
+            content,
+        )
+        summary = " ".join(content.split())
+        if len(summary) <= MAX_FAILURE_SUMMARY_CHARS:
+            return summary
+        return f"{summary[: MAX_FAILURE_SUMMARY_CHARS - 3]}..."
+
     @staticmethod
     def _build_assistant_message(
         turn: AssistantTurn,
@@ -522,7 +596,11 @@ class AgentLoop:
     @staticmethod
     def _format_tool_result(result: ToolResult) -> str:
         """Format a ToolResult as model-readable text."""
-        status = "SUCCESS" if result.ok else "ERROR"
+        if result.ok:
+            return f"SUCCESS\n{result.content}"
+
+        failure_type = result.failure_type or ToolFailureType.TOOL_FAILURE
+        status = f"ERROR [{failure_type.value}]"
         return f"{status}\n{result.content}"
 
 

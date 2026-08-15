@@ -41,6 +41,21 @@ class TestValidatePythonSyntax:
         assert not is_valid
         assert "Syntax error" in error
 
+    def test_invalid_syntax_uses_display_path(self, temp_workspace):
+        """Test that syntax errors expose only a safe display path."""
+        test_file = temp_workspace / "nested" / "invalid.py"
+        test_file.parent.mkdir()
+        test_file.write_text("def hello(\n")
+
+        is_valid, error = validate_python_syntax(
+            test_file,
+            display_path="nested/invalid.py",
+        )
+
+        assert not is_valid
+        assert "nested/invalid.py" in error
+        assert str(temp_workspace) not in error
+
     def test_non_python_file(self, temp_workspace):
         """Test validation of non-Python file"""
         test_file = temp_workspace / "test.txt"
@@ -152,6 +167,20 @@ class TestRunIntermediateValidation:
         assert not all_passed
         assert len(errors) > 0
         assert any("Syntax" in error for error in errors)
+
+    def test_intermediate_errors_use_display_path(self, temp_workspace):
+        """Test that combined validation errors use the relative path."""
+        test_file = temp_workspace / "module.py"
+        test_file.write_text("def value(\n")
+
+        all_passed, errors = run_intermediate_validation(
+            test_file,
+            display_path="src/module.py",
+        )
+
+        assert not all_passed
+        assert any("src/module.py" in error for error in errors)
+        assert all(str(temp_workspace) not in error for error in errors)
 
     def test_integrity_validation_fails(self, temp_workspace):
         """Test when integrity validation fails"""

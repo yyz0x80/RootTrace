@@ -24,20 +24,38 @@ class SyntaxValidationError(ValidationError):
     """Raised when Python syntax validation fails."""
 
 
-def validate_python_syntax(file_path: Path) -> tuple[bool, str]:
+def _display_path(file_path: Path, display_path: str | None) -> str:
+    """Return a safe path for logs and model-facing validation errors."""
+    return display_path or file_path.name
+
+
+def _replace_absolute_path(
+    message: str,
+    file_path: Path,
+    display_path: str,
+) -> str:
+    """Replace an internal absolute path with a workspace-relative path."""
+    return message.replace(str(file_path), display_path)
+
+
+def validate_python_syntax(
+    file_path: Path,
+    display_path: str | None = None,
+) -> tuple[bool, str]:
     """Validate Python syntax for a given file.
 
     Args:
-        file_path: Path to the Python file to validate
+        file_path: Absolute path to the Python file to validate.
+        display_path: Optional workspace-relative path used in messages.
 
     Returns:
         Tuple of (is_valid, error_message). If is_valid is True, error_message is empty.
     """
     if not file_path.exists():
-        return False, f"File not found: {file_path}"
+        return False, f"File not found: {_display_path(file_path, display_path)}"
 
     if not file_path.is_file():
-        return False, f"Not a file: {file_path}"
+        return False, f"Not a file: {_display_path(file_path, display_path)}"
 
     if file_path.suffix != ".py":
         # Non-Python files are considered valid for syntax checking
@@ -53,8 +71,17 @@ def validate_python_syntax(file_path: Path) -> tuple[bool, str]:
         )
 
         if result.returncode != 0:
-            error_msg = result.stderr or result.stdout
-            logger.warning("Syntax validation failed for %s: %s", file_path, error_msg)
+            safe_path = _display_path(file_path, display_path)
+            error_msg = _replace_absolute_path(
+                result.stderr or result.stdout,
+                file_path,
+                safe_path,
+            )
+            logger.warning(
+                "Syntax validation failed for %s: %s",
+                safe_path,
+                error_msg,
+            )
             return False, f"Syntax error: {error_msg}"
 
         return True, ""
@@ -65,20 +92,24 @@ def validate_python_syntax(file_path: Path) -> tuple[bool, str]:
         return False, f"Validation error: {e}"
 
 
-def validate_file_integrity(file_path: Path) -> tuple[bool, str]:
+def validate_file_integrity(
+    file_path: Path,
+    display_path: str | None = None,
+) -> tuple[bool, str]:
     """Validate file integrity including encoding and structure.
 
     Args:
-        file_path: Path to the file to validate
+        file_path: Absolute path to the file to validate.
+        display_path: Optional workspace-relative path used in messages.
 
     Returns:
         Tuple of (is_valid, error_message). If is_valid is True, error_message is empty.
     """
     if not file_path.exists():
-        return False, f"File not found: {file_path}"
+        return False, f"File not found: {_display_path(file_path, display_path)}"
 
     if not file_path.is_file():
-        return False, f"Not a file: {file_path}"
+        return False, f"Not a file: {_display_path(file_path, display_path)}"
 
     try:
         # Try to read the file to verify encoding
@@ -97,14 +128,18 @@ def validate_file_integrity(file_path: Path) -> tuple[bool, str]:
         return False, f"Integrity check failed: {e}"
 
 
-def validate_python_imports(file_path: Path) -> tuple[bool, str]:
+def validate_python_imports(
+    file_path: Path,
+    display_path: str | None = None,
+) -> tuple[bool, str]:
     """Validate that Python imports can be resolved (basic check).
 
     This is a lightweight check that doesn't actually import modules,
     but verifies the import syntax is correct.
 
     Args:
-        file_path: Path to the Python file to validate
+        file_path: Absolute path to the Python file to validate.
+        display_path: Optional workspace-relative path used in messages.
 
     Returns:
         Tuple of (is_valid, error_message). If is_valid is True, error_message is empty.
@@ -118,7 +153,7 @@ def validate_python_imports(file_path: Path) -> tuple[bool, str]:
 
         # Simple syntax check via compile (catches import errors)
         try:
-            compile(content, str(file_path), "exec")
+            compile(content, _display_path(file_path, display_path), "exec")
             return True, ""
         except SyntaxError as e:
             return False, f"Import/syntax error: {e}"
@@ -127,7 +162,10 @@ def validate_python_imports(file_path: Path) -> tuple[bool, str]:
         return False, f"Import validation failed: {e}"
 
 
-def run_intermediate_validation(file_path: Path) -> tuple[bool, list[str]]:
+def run_intermediate_validation(
+    file_path: Path,
+    display_path: str | None = None,
+) -> tuple[bool, list[str]]:
     """Run all intermediate validation checks on a file.
 
     This performs syntax checking, integrity validation, and import validation
@@ -138,7 +176,8 @@ def run_intermediate_validation(file_path: Path) -> tuple[bool, list[str]]:
     integrity checks are performed.
 
     Args:
-        file_path: Path to the file to validate
+        file_path: Absolute path to the file to validate.
+        display_path: Optional workspace-relative path used in messages.
 
     Returns:
         Tuple of (all_passed, error_messages). If all_passed is True, error_messages is empty.
@@ -146,19 +185,29 @@ def run_intermediate_validation(file_path: Path) -> tuple[bool, list[str]]:
     errors = []
 
     # Run file integrity check first
-    integrity_valid, integrity_error = validate_file_integrity(file_path)
+    safe_path = _display_path(file_path, display_path)
+    integrity_valid, integrity_error = validate_file_integrity(
+        file_path,
+        safe_path,
+    )
     if not integrity_valid:
         errors.append(f"Integrity: {integrity_error}")
 
     # Only run Python validation for .py files with content
     if file_path.suffix == ".py" and file_path.stat().st_size > 0:
         # Run syntax check for Python files
-        syntax_valid, syntax_error = validate_python_syntax(file_path)
+        syntax_valid, syntax_error = validate_python_syntax(
+            file_path,
+            safe_path,
+        )
         if not syntax_valid:
             errors.append(f"Syntax: {syntax_error}")
 
         # Run import validation for Python files
-        import_valid, import_error = validate_python_imports(file_path)
+        import_valid, import_error = validate_python_imports(
+            file_path,
+            safe_path,
+        )
         if not import_valid:
             errors.append(f"Import: {import_error}")
 
@@ -167,7 +216,7 @@ def run_intermediate_validation(file_path: Path) -> tuple[bool, list[str]]:
     if not all_passed:
         logger.warning(
             "Intermediate validation failed for %s: %s",
-            file_path,
+            safe_path,
             "; ".join(errors),
         )
 

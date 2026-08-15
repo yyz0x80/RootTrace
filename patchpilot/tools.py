@@ -27,7 +27,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
-from patchpilot.models import ToolResult
+from patchpilot.models import ToolFailureType, ToolResult
 from patchpilot.validation import run_intermediate_validation
 from patchpilot.workspace import Workspace
 
@@ -282,7 +282,12 @@ class SearchCodeInput(ToolInput):
 @dataclass
 class ReadFileInput(ToolInput):
     """Input for read_file tool"""
-    description: ClassVar[str] = "Read file content. By default returns content with line numbers prefixed (e.g., '1: content'). Set raw=True to get content without line numbers. Supports optional line range for partial reads."
+    description: ClassVar[str] = (
+        "Read one workspace file using a relative file path; absolute paths and "
+        "directories are not accepted. By default returns content with line "
+        "numbers prefixed (e.g., '1: content'). Set raw=True to get content "
+        "without line numbers. Supports optional line ranges for partial reads."
+    )
     path: str
     start_line: int = 1
     end_line: int | None = None
@@ -696,7 +701,21 @@ class ToolRegistry:
         handler = self._tool_handlers.get(name)
         if handler is None:
             raise KeyError(f"Tool not found: {name}")
-        return handler(arguments)
+        result = handler(arguments)
+        failure_type = result.failure_type
+        if not result.ok and failure_type is None:
+            failure_type = ToolFailureType.TOOL_FAILURE
+
+        return ToolResult(
+            ok=result.ok,
+            content=self.sanitize_workspace_paths(result.content),
+            failure_type=failure_type,
+        )
+
+    def sanitize_workspace_paths(self, content: str) -> str:
+        """Replace internal workspace paths in model-facing tool output."""
+        root = str(self.workspace.root)
+        return content.replace(f"{root}/", "").replace(root, ".")
 
     def search_code(self, arguments: dict[str, Any]) -> ToolResult:
         """
@@ -714,13 +733,13 @@ class ToolRegistry:
             return ToolResult(ok=False, content=f"Invalid input: {e}")
 
         try:
-            resolved_path = self.workspace.resolve(input_data.path)
+            self.workspace.resolve(input_data.path)
         except ValueError as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
         # Run ripgrep with subprocess
         try:
-            args = ["rg", "-n", input_data.query, str(resolved_path)]
+            args = ["rg", "-n", input_data.query, input_data.path]
             result = subprocess.run(
                 args,
                 cwd=self.workspace.root,
@@ -905,8 +924,8 @@ class ToolRegistry:
             diff = difflib.unified_diff(
                 original_lines,
                 new_lines,
-                fromfile=str(resolved_path),
-                tofile=str(resolved_path),
+                fromfile=input_data.path,
+                tofile=input_data.path,
                 lineterm=""
             )
             diff_text = "".join(diff)
@@ -920,7 +939,10 @@ class ToolRegistry:
                 f.write(new_content)
 
             # Run intermediate validation to catch syntax errors early
-            validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+            validation_passed, validation_errors = run_intermediate_validation(
+                resolved_path,
+                display_path=input_data.path,
+            )
             if not validation_passed:
                 # Revert the change if validation fails
                 with open(resolved_path, "w", encoding="utf-8") as f:
@@ -1173,8 +1195,8 @@ class ToolRegistry:
             diff = difflib.unified_diff(
                 original_lines,
                 new_lines,
-                fromfile=str(resolved_path),
-                tofile=str(resolved_path),
+                fromfile=input_data.path,
+                tofile=input_data.path,
                 lineterm=""
             )
             diff_text = "".join(diff)
@@ -1188,7 +1210,10 @@ class ToolRegistry:
                 f.write(new_content)
 
             # Run intermediate validation to catch syntax errors early
-            validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+            validation_passed, validation_errors = run_intermediate_validation(
+                resolved_path,
+                display_path=input_data.path,
+            )
             if not validation_passed:
                 # Revert the change if validation fails
                 with open(resolved_path, "w", encoding="utf-8") as f:
@@ -1266,8 +1291,8 @@ class ToolRegistry:
             diff = difflib.unified_diff(
                 original_lines,
                 new_lines,
-                fromfile=str(resolved_path),
-                tofile=str(resolved_path),
+                fromfile=input_data.path,
+                tofile=input_data.path,
                 lineterm=""
             )
             diff_text = "".join(diff)
@@ -1281,7 +1306,10 @@ class ToolRegistry:
                 f.write(new_content)
 
             # Run intermediate validation to catch syntax errors early
-            validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+            validation_passed, validation_errors = run_intermediate_validation(
+                resolved_path,
+                display_path=input_data.path,
+            )
             if not validation_passed:
                 # Revert the change if validation fails
                 with open(resolved_path, "w", encoding="utf-8") as f:
@@ -1337,8 +1365,8 @@ class ToolRegistry:
                 diff = difflib.unified_diff(
                     original_lines,
                     new_lines,
-                    fromfile=str(resolved_path),
-                    tofile=str(resolved_path),
+                    fromfile=input_data.path,
+                    tofile=input_data.path,
                     lineterm=""
                 )
                 diff_text = "".join(diff)
@@ -1352,7 +1380,10 @@ class ToolRegistry:
                     f.write(input_data.content)
 
                 # Run intermediate validation to catch syntax errors early
-                validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+                validation_passed, validation_errors = run_intermediate_validation(
+                    resolved_path,
+                    display_path=input_data.path,
+                )
                 if not validation_passed:
                     # Revert the change if validation fails
                     with open(resolved_path, "w", encoding="utf-8") as f:
@@ -1386,7 +1417,10 @@ class ToolRegistry:
                     f.write(input_data.content)
 
                 # Run intermediate validation to catch syntax errors early
-                validation_passed, validation_errors = run_intermediate_validation(resolved_path)
+                validation_passed, validation_errors = run_intermediate_validation(
+                    resolved_path,
+                    display_path=input_data.path,
+                )
                 if not validation_passed:
                     # Remove the file if validation fails
                     resolved_path.unlink()
@@ -1402,6 +1436,34 @@ class ToolRegistry:
 
             except OSError as e:
                 return ToolResult(ok=False, content=f"File creation failed: {e}")
+
+    @staticmethod
+    def _is_verification_command(args: list[str]) -> bool:
+        """Return whether a parsed command runs deterministic verification."""
+        if not args:
+            return False
+        if args[0] == "pytest":
+            return True
+        if args[:3] == ["python", "-m", "pytest"]:
+            return True
+        return args[:2] == ["ruff", "check"]
+
+    @classmethod
+    def _command_failure_type(
+        cls,
+        args: list[str],
+        exit_code: int,
+        *,
+        timed_out: bool = False,
+    ) -> ToolFailureType:
+        """Classify a non-zero command result by execution outcome."""
+        if (
+            cls._is_verification_command(args)
+            and exit_code == 1
+            and not timed_out
+        ):
+            return ToolFailureType.VERIFICATION_FAILURE
+        return ToolFailureType.TOOL_FAILURE
 
     def run_command(self, arguments: dict[str, Any]) -> ToolResult:
         """
@@ -1480,7 +1542,12 @@ class ToolRegistry:
                 if result.exit_code != 0:
                     return ToolResult(
                         ok=False,
-                        content=f"exit_code={result.exit_code}\n{output}"
+                        content=f"exit_code={result.exit_code}\n{output}",
+                        failure_type=self._command_failure_type(
+                            args,
+                            result.exit_code,
+                            timed_out=getattr(result, "timed_out", False),
+                        ),
                     )
 
                 return ToolResult(ok=True, content=output)
@@ -1507,7 +1574,11 @@ class ToolRegistry:
                 if result.returncode != 0:
                     return ToolResult(
                         ok=False,
-                        content=f"exit_code={result.returncode}\n{output}"
+                        content=f"exit_code={result.returncode}\n{output}",
+                        failure_type=self._command_failure_type(
+                            args,
+                            result.returncode,
+                        ),
                     )
 
                 return ToolResult(ok=True, content=output)

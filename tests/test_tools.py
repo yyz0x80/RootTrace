@@ -1,10 +1,11 @@
 import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from patchpilot.models import ToolResult
+from patchpilot.models import ToolFailureType, ToolResult
 from patchpilot.tools import (
     ApplyPatchInput,
     EditFileInput,
@@ -48,6 +49,7 @@ class TestSearchCode:
         result = tool_registry.search_code({"query": "paginate", "path": "."})
         assert result.ok
         assert "paginate" in result.content
+        assert str(temp_workspace.root) not in result.content
 
     def test_search_code_no_matches(self, tool_registry):
         """Test search with no matches"""
@@ -211,10 +213,39 @@ class TestEditFile:
         })
         assert result.ok
         assert "if page < 1:" in result.content
+        assert str(temp_workspace.root) not in result.content
+        assert "--- test.py" in result.content
+        assert "+++ test.py" in result.content
 
         # Verify file was actually modified
         updated_content = test_file.read_text()
         assert "if page < 1:" in updated_content
+
+    def test_edit_file_validation_error_uses_relative_path(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Test that validation errors do not expose the workspace root."""
+        test_file = temp_workspace.root / "module.py"
+        original_content = "def value():\n    return 1\n"
+        test_file.write_text(original_content)
+
+        result = tool_registry.execute(
+            "edit_file",
+            {
+                "path": "module.py",
+                "old_text": "return 1",
+                "new_text": "return (",
+            },
+        )
+
+        assert not result.ok
+        assert result.failure_type == ToolFailureType.TOOL_FAILURE
+        assert "module.py" in result.content
+        assert str(temp_workspace.root) not in result.content
+        assert ".patchpilot_temp" not in result.content
+        assert test_file.read_text() == original_content
 
     def test_edit_file_old_text_not_found(self, tool_registry, temp_workspace):
         """Test editing when old_text is not found"""
@@ -1199,6 +1230,54 @@ class TestRunCommand:
         result = tool_registry.run_command({"command": "python -m pytest"})
         assert result.ok or "test_pass" in result.content
 
+    @pytest.mark.parametrize(
+        "command",
+        ["pytest tests/test_example.py", "python -m pytest -q"],
+    )
+    def test_failed_pytest_is_verification_failure(
+        self,
+        temp_workspace,
+        command,
+    ):
+        """Test that a completed failing Pytest run is verification failure."""
+        runner = SimpleNamespace(
+            run=lambda **_kwargs: SimpleNamespace(
+                exit_code=1,
+                stdout="1 failed",
+                stderr="",
+                timed_out=False,
+            )
+        )
+        registry = ToolRegistry(temp_workspace, command_runner=runner)
+
+        result = registry.execute("run_command", {"command": command})
+
+        assert not result.ok
+        assert (
+            result.failure_type
+            == ToolFailureType.VERIFICATION_FAILURE
+        )
+
+    def test_timed_out_pytest_is_tool_failure(self, temp_workspace):
+        """Test that a timed-out Pytest command remains a tool failure."""
+        runner = SimpleNamespace(
+            run=lambda **_kwargs: SimpleNamespace(
+                exit_code=124,
+                stdout="",
+                stderr="timed out",
+                timed_out=True,
+            )
+        )
+        registry = ToolRegistry(temp_workspace, command_runner=runner)
+
+        result = registry.execute(
+            "run_command",
+            {"command": "pytest"},
+        )
+
+        assert not result.ok
+        assert result.failure_type == ToolFailureType.TOOL_FAILURE
+
     def test_run_command_git_status(self, tool_registry):
         """Test running git status"""
         result = tool_registry.run_command({"command": "git status"})
@@ -1272,6 +1351,22 @@ class TestRunCommand:
 
 class TestToolDispatch:
     """Tests for tool dispatch mechanism"""
+
+    def test_execute_sanitizes_workspace_paths(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Test the central model-facing workspace path sanitizer."""
+        absolute_file = temp_workspace.root / "src" / "module.py"
+        tool_registry._tool_handlers["leaky_tool"] = lambda _arguments: (
+            ToolResult(ok=False, content=f"Failed at {absolute_file}")
+        )
+
+        result = tool_registry.execute("leaky_tool", {})
+
+        assert result.content == "Failed at src/module.py"
+        assert result.failure_type == ToolFailureType.TOOL_FAILURE
 
     def test_dispatch_valid_tool(self, tool_registry):
         """Test dispatching a valid tool"""

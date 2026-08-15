@@ -5,12 +5,18 @@ from unittest.mock import Mock
 import pytest
 
 from patchpilot.agent_loop import (
+    MAX_FAILURE_SUMMARY_CHARS,
     AgentLoop,
     AgentLoopError,
     AgentLoopLimitError,
     AgentState,
 )
-from patchpilot.models import AssistantTurn, ToolCall, ToolResult
+from patchpilot.models import (
+    AssistantTurn,
+    ToolCall,
+    ToolFailureType,
+    ToolResult,
+)
 
 
 class TestAgentLoopInit:
@@ -449,7 +455,21 @@ class TestFormatToolResult:
 
         formatted = AgentLoop._format_tool_result(result)
 
-        assert formatted == "ERROR\nFile not found"
+        assert formatted == "ERROR [TOOL_FAILURE]\nFile not found"
+
+    def test_format_verification_failure(self):
+        """Test that verification failures are explicit for the model."""
+        result = ToolResult(
+            ok=False,
+            content="1 test failed",
+            failure_type=ToolFailureType.VERIFICATION_FAILURE,
+        )
+
+        formatted = AgentLoop._format_tool_result(result)
+
+        assert formatted == (
+            "ERROR [VERIFICATION_FAILURE]\n1 test failed"
+        )
 
     def test_format_multiline_content(self):
         """Test formatting multiline content."""
@@ -506,6 +526,26 @@ class TestAgentState:
 
         state.record_tool_call("edit_file", True)
         assert state.consecutive_failures == 0
+
+    def test_verification_failure_does_not_count_as_tool_failure(self):
+        """Test that a failed verification breaks the tool-failure sequence."""
+        state = AgentState()
+        state.record_tool_call("read_file", False)
+
+        state.record_tool_call(
+            "run_command",
+            False,
+            "pytest failed",
+            ToolFailureType.VERIFICATION_FAILURE,
+        )
+
+        assert state.consecutive_failures == 0
+        assert state.last_tool_success is True
+        assert (
+            state.last_failure_type
+            == ToolFailureType.VERIFICATION_FAILURE
+        )
+        assert state.recent_failures == []
 
     def test_record_file_edit(self):
         """Test recording file edits."""
@@ -653,6 +693,100 @@ class TestAgentLoopProgressTracking:
 
         with pytest.raises(AgentLoopError, match="consecutive tool failures"):
             agent_loop.run("Test issue")
+
+    def test_pytest_failure_does_not_trigger_tool_failure_stop(self):
+        """Test that a failed Pytest run does not consume the tool failure budget."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = [
+            {
+                "type": "function",
+                "function": {"name": "run_command", "parameters": {}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "read_file", "parameters": {}},
+            },
+        ]
+        mock_tools.get_available_tools.return_value = [
+            "run_command",
+            "read_file",
+        ]
+        mock_tools.execute.side_effect = [
+            ToolResult(
+                ok=False,
+                content="1 test failed",
+                failure_type=ToolFailureType.VERIFICATION_FAILURE,
+            ),
+            ToolResult(ok=False, content="Absolute path rejected"),
+            ToolResult(ok=False, content="Absolute path rejected"),
+        ]
+        mock_provider.complete.side_effect = [
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_command",
+                        arguments={"command": "pytest"},
+                    )
+                ],
+            ),
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_2",
+                        name="read_file",
+                        arguments={"path": "/tmp/repo"},
+                    )
+                ],
+            ),
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_3",
+                        name="read_file",
+                        arguments={"path": "/tmp/repo"},
+                    )
+                ],
+            ),
+            AssistantTurn(content="Recovered", tool_calls=[]),
+        ]
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            max_rounds=4,
+            max_consecutive_failures=3,
+        )
+
+        result = agent_loop.run("Fix the implementation")
+
+        assert result == "Recovered"
+        assert agent_loop.state.consecutive_failures == 2
+
+    def test_terminal_failure_summary_is_redacted_and_bounded(self):
+        """Test that terminal failure summaries hide secrets and stay bounded."""
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_tools.sanitize_workspace_paths.side_effect = (
+            lambda content: content.replace("/tmp/workspace/", "")
+        )
+        agent_loop = AgentLoop(provider=Mock(), tools=mock_tools)
+        content = (
+            "/tmp/workspace/module.py ZHIPU_API_KEY=secret-value "
+            "Authorization: Bearer bearer-value "
+            + "x" * 1_000
+        )
+
+        summary = agent_loop._summarize_tool_failure(content)
+
+        assert "/tmp/workspace" not in summary
+        assert "secret-value" not in summary
+        assert "bearer-value" not in summary
+        assert "<redacted>" in summary
+        assert len(summary) <= MAX_FAILURE_SUMMARY_CHARS
 
     def test_state_tracking_during_execution(self):
         """Test that state is tracked during tool execution."""
