@@ -1,2 +1,0 @@
-[console_scripts]
-patchpilot = patchpilot.cli:main

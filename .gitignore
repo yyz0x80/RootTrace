@@ -4,3 +4,4 @@ __pycache__/
 .ruff_cache/
 *.pyc
 /patchpilot/docs
+*.egg-info/
