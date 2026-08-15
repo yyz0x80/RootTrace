@@ -6,7 +6,10 @@ of whether each criterion has been satisfied.
 """
 
 from patchpilot.evidence.mapper import map_acceptance_evidence
-from patchpilot.evidence.renderer import render_acceptance_coverage, render_coverage_report
+from patchpilot.evidence.renderer import (
+    render_acceptance_coverage,
+    render_coverage_report,
+)
 from patchpilot.evidence.schema import (
     AcceptanceCoverageReport,
     AcceptanceEvidence,
