@@ -242,3 +242,67 @@ def test_normalize_issue_with_complex_ambiguity():
     assert len(result.ambiguous_points) == 4
     assert any("invalidation" in point for point in result.ambiguous_points)
     assert any("TTL" in point for point in result.ambiguous_points)
+
+
+def test_normalize_issue_separates_execution_constraints():
+    """Move repository execution boundaries out of acceptance criteria."""
+    issue = RawIssue(
+        title="Refactor price aggregation",
+        body=(
+            "Use sum, keep tests read-only, and do not make any changes "
+            "outside of pricing.py."
+        ),
+        source="test",
+    )
+    captured_prompt = ""
+
+    def mock_generate(prompt: str) -> str:
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        return """{
+  "title": "Refactor price aggregation",
+  "task_type": "refactor",
+  "problem_statement": "Replace a manual aggregation loop.",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Use sum(prices, start=0.0)."
+    },
+    {
+      "id": "AC-2",
+      "description": "Keep the existing tests read-only."
+    },
+    {
+      "id": "AC-3",
+      "description": "Reject non-positive page numbers."
+    },
+    {
+      "id": "AC-4",
+      "description": "Do not make any changes outside of the pricing.py file."
+    }
+  ],
+  "constraints": ["Do not run git push."],
+  "ambiguous_points": [],
+  "expected_test_areas": ["tests/test_pricing.py"],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert "execution boundaries in constraints" in captured_prompt
+    assert [
+        criterion.id
+        for criterion in result.acceptance_criteria
+    ] == ["AC-1", "AC-2"]
+    assert [
+        criterion.description
+        for criterion in result.acceptance_criteria
+    ] == [
+        "Use sum(prices, start=0.0).",
+        "Reject non-positive page numbers.",
+    ]
+    assert result.constraints == [
+        "Do not run git push.",
+        "Keep the existing tests read-only.",
+        "Do not make any changes outside of the pricing.py file.",
+    ]

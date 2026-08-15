@@ -257,7 +257,11 @@ def handle_prepare(args) -> None:
 
         # Step 6: Validate plan against repository context
         try:
-            validation_result = validate_plan(plan, repository_context)
+            validation_result = validate_plan(
+                plan,
+                repository_context,
+                issue=normalized_issue,
+            )
         except ValueError as e:
             print(f"Plan validation failed: {e}", file=sys.stderr)
             sys.exit(1)

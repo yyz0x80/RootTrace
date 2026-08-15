@@ -2,7 +2,7 @@ import json
 from collections.abc import Callable
 
 from patchpilot.issue.loader import RawIssue
-from patchpilot.issue.schema import NormalizedIssue
+from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
 
 NORMALIZER_PROMPT = """
 You are the Issue Normalizer of PatchPilot.
@@ -11,15 +11,21 @@ Your job is to convert a software issue into a structured task.
 
 Important rules:
 
-1. Only explicit product requirements may become acceptance criteria.
-2. Do NOT invent missing product behavior.
-3. If missing information could affect externally visible behavior,
+1. Only explicit, externally observable product behavior may become
+   acceptance criteria.
+2. Put execution boundaries in constraints, not acceptance criteria. This
+   includes read-only files, allowed file scope, forbidden commands,
+   dependency-install restrictions, and security or permission rules. Apply
+   this semantic distinction even when the issue lists such boundaries under
+   an "Acceptance requirements" heading.
+3. Do NOT invent missing product behavior.
+4. If missing information could affect externally visible behavior,
    put it into ambiguous_points.
-4. Reasonable implementation choices that do not change product
+5. Reasonable implementation choices that do not change product
    behavior may go into implementation_notes.
-5. Acceptance criteria must have sequential IDs:
+6. Acceptance criteria must have sequential IDs:
    AC-1, AC-2, AC-3...
-6. Return JSON only. Do not return Markdown.
+7. Return JSON only. Do not return Markdown.
 
 Allowed task_type:
 bug, feature, test, refactor, dependency, other.
@@ -42,6 +48,92 @@ Required JSON shape:
   "implementation_notes": []
 }
 """
+
+
+_EXECUTION_BOUNDARY_MARKERS = (
+    "do not access",
+    "do not install",
+    "do not make any changes",
+    "do not modify",
+    "do not run",
+    "keep unchanged",
+    "must not access",
+    "must not install",
+    "must not make any changes",
+    "must not modify",
+    "must not run",
+    "no changes outside",
+    "only modify",
+    "read only",
+    "read-only",
+)
+
+_EXECUTION_SCOPE_MARKERS = (
+    ".env",
+    "ci configuration",
+    "ci workflow",
+    "command",
+    "dependency",
+    "dependencies",
+    "file",
+    "files",
+    "git push",
+    "lockfile",
+    "permission",
+    "secret",
+    "ssh key",
+    "test",
+    "tests",
+)
+
+
+def _is_execution_constraint(description: str) -> bool:
+    """Return whether an AC describes an execution boundary.
+
+    The rule is intentionally narrow: a negative phrase must refer to a
+    repository, command, dependency, or security boundary. User-visible
+    negative behavior, such as rejecting invalid input, remains an acceptance
+    criterion.
+    """
+    normalized = " ".join(description.lower().split())
+
+    has_boundary = any(
+        marker in normalized
+        for marker in _EXECUTION_BOUNDARY_MARKERS
+    )
+    has_scope = any(
+        marker in normalized
+        for marker in _EXECUTION_SCOPE_MARKERS
+    )
+    return has_boundary and has_scope
+
+
+def _separate_execution_constraints(
+    issue: NormalizedIssue,
+) -> NormalizedIssue:
+    """Move execution-boundary ACs into constraints and renumber AC IDs."""
+    product_criteria: list[AcceptanceCriterion] = []
+    constraints = list(issue.constraints)
+
+    for criterion in issue.acceptance_criteria:
+        if _is_execution_constraint(criterion.description):
+            if criterion.description not in constraints:
+                constraints.append(criterion.description)
+            continue
+
+        product_criteria.append(criterion)
+
+    normalized_criteria = [
+        criterion.model_copy(update={"id": f"AC-{index}"})
+        for index, criterion in enumerate(product_criteria, start=1)
+    ]
+
+    return issue.model_copy(
+        update={
+            "acceptance_criteria": normalized_criteria,
+            "constraints": constraints,
+        }
+    )
 
 
 def _extract_json(text: str) -> dict:
@@ -116,4 +208,5 @@ Issue body:
 
     data = _extract_json(response)
 
-    return NormalizedIssue.model_validate(data)
+    normalized_issue = NormalizedIssue.model_validate(data)
+    return _separate_execution_constraints(normalized_issue)

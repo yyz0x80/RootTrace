@@ -2,8 +2,14 @@
 
 import pytest
 
-from patchpilot.planning.schema import ChangePlan, PlannedChange
+from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
+from patchpilot.planning.schema import (
+    ChangePlan,
+    PlannedChange,
+    PlannedTest,
+)
 from patchpilot.planning.validator import (
+    validate_acceptance_coverage,
     validate_plan,
     validate_plan_against_repository,
 )
@@ -317,3 +323,122 @@ def test_validate_plan_against_repository_mixed_actions():
 
     # Should not raise
     validate_plan_against_repository(plan, repo_context)
+
+
+def _make_issue(
+    criterion_ids: list[str] | None = None,
+) -> NormalizedIssue:
+    """Create a normalized issue for AC coverage validation tests."""
+    ids = criterion_ids or ["AC-1", "AC-2"]
+    return NormalizedIssue(
+        title="Test issue",
+        task_type="feature",
+        problem_statement="Implement observable behavior.",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id=criterion_id,
+                description=f"Requirement {criterion_id}",
+            )
+            for criterion_id in ids
+        ],
+    )
+
+
+def _make_covered_plan() -> ChangePlan:
+    """Create a plan with complete change and verification mappings."""
+    return ChangePlan(
+        relevant_files=["src/main.py", "tests/test_main.py"],
+        planned_changes=[
+            PlannedChange(
+                path="src/main.py",
+                action="modify",
+                description="Implement requirements",
+                acceptance_criteria=["AC-1", "AC-2"],
+            )
+        ],
+        planned_tests=[
+            PlannedTest(
+                command="pytest tests/test_main.py -q",
+                purpose="Verify requirements",
+                acceptance_criteria=["AC-1", "AC-2"],
+            )
+        ],
+        risk_level="low",
+    )
+
+
+def test_validate_acceptance_coverage_success():
+    """Accept plans that map every AC to changes and verification."""
+    validate_acceptance_coverage(
+        _make_covered_plan(),
+        _make_issue(),
+    )
+
+
+def test_validate_acceptance_coverage_rejects_unknown_id():
+    """Reject plan mappings that reference an AC absent from the issue."""
+    plan = _make_covered_plan()
+    plan.planned_tests[0].acceptance_criteria.append("AC-99")
+
+    with pytest.raises(
+        ValueError,
+        match="unknown acceptance criterion IDs: AC-99",
+    ):
+        validate_acceptance_coverage(plan, _make_issue())
+
+
+def test_validate_acceptance_coverage_requires_source_change():
+    """Reject ACs without a planned source implementation."""
+    plan = _make_covered_plan()
+    plan.planned_changes[0].acceptance_criteria.remove("AC-2")
+
+    with pytest.raises(
+        ValueError,
+        match="missing planned source changes: AC-2",
+    ):
+        validate_acceptance_coverage(plan, _make_issue())
+
+
+def test_validate_acceptance_coverage_requires_verification():
+    """Reject ACs without planned deterministic verification."""
+    plan = _make_covered_plan()
+    plan.planned_tests[0].acceptance_criteria.remove("AC-2")
+
+    with pytest.raises(
+        ValueError,
+        match="missing planned verification: AC-2",
+    ):
+        validate_acceptance_coverage(plan, _make_issue())
+
+
+def test_validate_acceptance_coverage_rejects_duplicate_issue_ids():
+    """Reject duplicate AC IDs in the authoritative normalized issue."""
+    with pytest.raises(
+        ValueError,
+        match="duplicate acceptance criterion IDs",
+    ):
+        validate_acceptance_coverage(
+            _make_covered_plan(),
+            _make_issue(["AC-1", "AC-1"]),
+        )
+
+
+def test_validate_plan_checks_acceptance_coverage_when_issue_is_given():
+    """Run AC coverage validation through the public validator entry point."""
+    plan = _make_covered_plan()
+    repo_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["src/main.py", "tests/test_main.py"],
+        python_files=["src/main.py"],
+        test_files=["tests/test_main.py"],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    result = validate_plan(
+        plan,
+        repo_context,
+        issue=_make_issue(),
+    )
+
+    assert result.allowed is True
