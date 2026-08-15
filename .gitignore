@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 /patchpilot/docs
 *.egg-info/
+/evaluation/runs/

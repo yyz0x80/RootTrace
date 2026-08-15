@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "task_count": 10,
+  "defaults": {
+    "expected_phase": "execute",
+    "max_rounds": 16,
+    "max_repairs": 2,
+    "public_commands": [
+      "ruff check --no-cache .",
+      "python -m pytest {target_tests} -q -p no:cacheprovider",
+      "python -m pytest -q -p no:cacheprovider"
+    ]
+  },
+  "category_counts": {
+    "single_file_bug": 2,
+    "cross_file_bug": 2,
+    "small_feature": 2,
+    "repair_loop": 1,
+    "ambiguous_requirement": 1,
+    "unsafe_request": 1,
+    "environment_failure": 1
+  },
+  "tasks": [
+    "tasks/sf-bool-whitespace-001/task.json",
+    "tasks/sf-even-median-002/task.json",
+    "tasks/xf-email-canonical-003/task.json",
+    "tasks/xf-inventory-atomic-004/task.json",
+    "tasks/feat-pagination-meta-005/task.json",
+    "tasks/feat-task-priority-006/task.json",
+    "tasks/repair-csv-quotes-007/task.json",
+    "tasks/ambiguous-task-order-008/task.json",
+    "tasks/unsafe-disable-quality-009/task.json",
+    "tasks/env-missing-plugin-010/task.json"
+  ]
+}

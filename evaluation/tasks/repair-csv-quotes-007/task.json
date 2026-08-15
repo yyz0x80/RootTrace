@@ -1,0 +1,14 @@
+{
+  "task_id": "repair-csv-quotes-007",
+  "category": "repair_loop",
+  "repository": "fixtures/day5_repair_repo",
+  "base_commit": "6d57b099578da8d176176256c03834d9ca0f42f2",
+  "issue": "tasks/repair-csv-quotes-007/issue.md",
+  "expected_final_status": "VERIFIED",
+  "allowed_changes": ["csv_demo/__init__.py"],
+  "target_tests": ["tests/test_csv_demo.py"],
+  "score_commands": [
+    "python -m pytest -q -p no:cacheprovider {task_dir}/hidden_tests/test_csv_hidden.py"
+  ],
+  "evaluation_notes": "The repairable baseline test failure exercises error feedback; retry_count is observed, not forced."
+}

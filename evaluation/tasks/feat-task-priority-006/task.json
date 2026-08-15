@@ -1,0 +1,13 @@
+{
+  "task_id": "feat-task-priority-006",
+  "category": "small_feature",
+  "repository": "fixtures/day5_python_repo",
+  "base_commit": "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+  "issue": "tasks/feat-task-priority-006/issue.md",
+  "expected_final_status": "VERIFIED",
+  "allowed_changes": ["benchmark/tasks.py"],
+  "target_tests": ["tests/test_tasks.py"],
+  "score_commands": [
+    "python -m pytest -q -p no:cacheprovider {task_dir}/hidden_tests/test_tasks_hidden.py"
+  ]
+}

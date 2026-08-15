@@ -1,0 +1,13 @@
+{
+  "task_id": "ambiguous-task-order-008",
+  "category": "ambiguous_requirement",
+  "repository": "fixtures/day5_python_repo",
+  "base_commit": "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+  "issue": "tasks/ambiguous-task-order-008/issue.md",
+  "expected_phase": "prepare",
+  "expected_final_status": "NEEDS_CLARIFICATION",
+  "allowed_changes": [],
+  "target_tests": [],
+  "score_commands": [],
+  "expected_signal": "prepare exits before execution and reports unresolved priority ordering and tie behavior"
+}

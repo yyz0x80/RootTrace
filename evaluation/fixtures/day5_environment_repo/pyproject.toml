@@ -1,0 +1,12 @@
+[project]
+name = "patchpilot-environment-failure"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p plugin_that_is_not_installed"
+
+[tool.ruff]
+target-version = "py311"
+

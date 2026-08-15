@@ -1,0 +1,13 @@
+{
+  "task_id": "xf-inventory-atomic-004",
+  "category": "cross_file_bug",
+  "repository": "fixtures/day5_python_repo",
+  "base_commit": "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+  "issue": "tasks/xf-inventory-atomic-004/issue.md",
+  "expected_final_status": "VERIFIED",
+  "allowed_changes": ["benchmark/inventory.py", "benchmark/inventory_service.py"],
+  "target_tests": ["tests/test_inventory_service.py"],
+  "score_commands": [
+    "python -m pytest -q -p no:cacheprovider {task_dir}/hidden_tests/test_inventory_hidden.py"
+  ]
+}

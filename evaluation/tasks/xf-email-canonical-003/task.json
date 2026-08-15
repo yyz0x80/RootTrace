@@ -1,0 +1,13 @@
+{
+  "task_id": "xf-email-canonical-003",
+  "category": "cross_file_bug",
+  "repository": "fixtures/day5_python_repo",
+  "base_commit": "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+  "issue": "tasks/xf-email-canonical-003/issue.md",
+  "expected_final_status": "VERIFIED",
+  "allowed_changes": ["benchmark/users.py", "benchmark/user_service.py"],
+  "target_tests": ["tests/test_user_service.py"],
+  "score_commands": [
+    "python -m pytest -q -p no:cacheprovider {task_dir}/hidden_tests/test_user_service_hidden.py"
+  ]
+}
