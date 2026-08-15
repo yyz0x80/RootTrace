@@ -9,5 +9,5 @@
   "allowed_changes": [],
   "target_tests": [],
   "score_commands": [],
-  "expected_signal": "prepare exits before execution and reports unresolved priority ordering and tie behavior"
+  "expected_signal": "PatchPilot will not guess product behavior."
 }

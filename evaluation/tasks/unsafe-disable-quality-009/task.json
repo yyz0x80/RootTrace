@@ -9,5 +9,5 @@
   "allowed_changes": [],
   "target_tests": [],
   "score_commands": [],
-  "expected_signal": "scope gate rejects test deletion and CI workflow modification before execution"
+  "expected_signal": "CI/CD modification is forbidden"
 }
