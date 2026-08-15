@@ -47,7 +47,6 @@ def test_main_with_ambiguous_points_stops(
     )
 
     # Mock Path operations - use real Path for output_dir operations
-    from pathlib import Path as RealPath
     with patch("pathlib.Path.mkdir") as mock_mkdir:
         mock_mkdir.side_effect = lambda *args, **kwargs: None
         # Mock sys.argv to simulate CLI call
@@ -136,7 +135,6 @@ def test_main_without_ambiguous_points_proceeds(
     mock_agent_loop.return_value = mock_agent_loop_instance
 
     # Mock Path operations - use real Path for output_dir operations
-    from pathlib import Path as RealPath
     with patch("pathlib.Path.mkdir") as mock_mkdir:
         mock_mkdir.side_effect = lambda *args, **kwargs: None
         # Mock sys.argv to simulate CLI call
@@ -189,7 +187,6 @@ def test_main_with_multiple_ambiguous_points_shows_all(
     )
 
     # Mock Path operations - use real Path for output_dir operations
-    from pathlib import Path as RealPath
     with patch("pathlib.Path.mkdir") as mock_mkdir:
         mock_mkdir.side_effect = lambda *args, **kwargs: None
         # Mock sys.argv to simulate CLI call
@@ -344,30 +341,32 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
     # Mock workflow runner
     mock_runner_instance = Mock()
     from patchpilot.evidence.schema import CompletionState
-    from patchpilot.workflow.result import WorkflowResult
+    from patchpilot.workflow.result import RunSummary, WorkflowResult
     
     mock_workflow_result = Mock(spec=WorkflowResult)
     mock_workflow_result.final_status = CompletionState.VERIFIED
     mock_workflow_result.acceptance_evidence = []
     mock_workflow_result.patch = ""
     mock_workflow_result.verification_report = {"passed": True}
-    # Mock to_run_summary to return a real dict
-    mock_workflow_result.to_run_summary.return_value = {
-        "run_id": "test-run-id",
-        "phase": "execute",
-        "base_commit": "same123",
-        "model": "test-model",
-        "max_rounds": 12,
-        "max_repairs": 3,
-        "retry_count": 0,
-        "final_status": "VERIFIED",
-        "exit_code": 0,
-        "duration_seconds": 10.0,
-        "artifacts": {
-            "patch": "",
-            "verification_report": {"passed": True},
+    # Mock to_run_summary to return a RunSummary object
+    mock_run_summary = RunSummary(
+        run_id="test-run-id",
+        task_id="test-task-123",
+        phase="execute",
+        base_commit="same123",
+        model="test-model",
+        max_rounds=12,
+        max_repairs=3,
+        retry_count=0,
+        final_status="VERIFIED",
+        exit_code=0,
+        duration_seconds=10.0,
+        artifacts={
+            "patch": "artifacts/patch.diff",
+            "verification_report": "artifacts/verification_report.json",
         },
-    }
+    )
+    mock_workflow_result.to_run_summary.return_value = mock_run_summary
     mock_runner_instance.execute.return_value = mock_workflow_result
     mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
     mock_runner_instance._cleanup = Mock()
@@ -405,7 +404,12 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
                 patch("patchpilot.cli.AgentLoop"),
                 patch("patchpilot.cli.save_json"),
             ):
-                handle_execute(args)
+                # Handle the SystemExit that occurs at the end of handle_execute
+                with pytest.raises(SystemExit) as exc_info:
+                    handle_execute(args)
+                
+                # Verify exit code is 0 for VERIFIED status
+                assert exc_info.value.code == 0
 
     # Verify repository validation was called
     mock_validate_repository.assert_called_once()
@@ -444,11 +448,14 @@ def test_prepare_writes_to_configured_output_dir(
     """Test that prepare command writes artifacts to configured output directory."""
     from argparse import Namespace
     from pathlib import Path
+
     from patchpilot.cli import handle_prepare
     from patchpilot.issue.schema import NormalizedIssue
     from patchpilot.planning.schema import ChangePlan
-    from patchpilot.repository.schema import RepositoryPreflightResult
-    from patchpilot.repository.schema import RepositoryContext
+    from patchpilot.repository.schema import (
+        RepositoryContext,
+        RepositoryPreflightResult,
+    )
 
     # Create mock args with custom output directory
     args = Namespace(
@@ -530,6 +537,7 @@ def test_execute_writes_to_configured_output_dir(
     """Test that execute command writes artifacts to configured output directory."""
     from argparse import Namespace
     from pathlib import Path
+
     from patchpilot.cli import handle_execute
     from patchpilot.evidence.schema import CompletionState
     from patchpilot.issue.schema import NormalizedIssue
@@ -579,6 +587,8 @@ def test_execute_writes_to_configured_output_dir(
 
     # Mock workflow runner
     mock_runner_instance = Mock()
+    from patchpilot.workflow.result import RunSummary
+    
     mock_workflow_result = Mock(spec=WorkflowResult)
     mock_workflow_result.final_status = CompletionState.VERIFIED
     mock_workflow_result.acceptance_evidence = []
@@ -588,23 +598,25 @@ def test_execute_writes_to_configured_output_dir(
     mock_workflow_result.duration_seconds = 10.0
     mock_workflow_result.retry_count = 0
     mock_workflow_result.max_repairs = 3
-    # Mock to_run_summary to return a real dict
-    mock_workflow_result.to_run_summary.return_value = {
-        "run_id": "test-run-id",
-        "phase": "execute",
-        "base_commit": "same123",
-        "model": "test-model",
-        "max_rounds": 12,
-        "max_repairs": 3,
-        "retry_count": 0,
-        "final_status": "VERIFIED",
-        "exit_code": 0,
-        "duration_seconds": 10.0,
-        "artifacts": {
-            "patch": "",
-            "verification_report": {"passed": True},
+    # Mock to_run_summary to return a RunSummary object
+    mock_run_summary = RunSummary(
+        run_id="test-run-id",
+        task_id="test-task-123",
+        phase="execute",
+        base_commit="same123",
+        model="test-model",
+        max_rounds=12,
+        max_repairs=3,
+        retry_count=0,
+        final_status="VERIFIED",
+        exit_code=0,
+        duration_seconds=10.0,
+        artifacts={
+            "patch": "/custom/output/patch.diff",
+            "verification_report": "/custom/output/verification_report.json",
         },
-    }
+    )
+    mock_workflow_result.to_run_summary.return_value = mock_run_summary
     mock_runner_instance.execute.return_value = mock_workflow_result
     mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
     mock_runner_instance._cleanup = Mock()
@@ -644,7 +656,13 @@ def test_execute_writes_to_configured_output_dir(
             patch("patchpilot.cli.render_acceptance_coverage") as mock_render_coverage,
         ):
             mock_render_coverage.return_value = "# Coverage"
-            handle_execute(args)
+            
+            # Handle the SystemExit that occurs at the end of handle_execute
+            with pytest.raises(SystemExit) as exc_info:
+                handle_execute(args)
+            
+            # Verify exit code is 0 for VERIFIED status
+            assert exc_info.value.code == 0
 
             # Verify save_json was called with custom output directory paths
             actual_calls = [call[0][0] for call in mock_save_json.call_args_list]
@@ -660,6 +678,7 @@ def test_execute_saves_run_summary(
 ):
     """Test that execute command saves run summary with expected fields."""
     from argparse import Namespace
+
     from patchpilot.cli import handle_execute
     from patchpilot.evidence.schema import CompletionState
     from patchpilot.issue.schema import NormalizedIssue
@@ -714,7 +733,7 @@ def test_execute_saves_run_summary(
         final_status=CompletionState.VERIFIED,
         changed_files=["src/file.py"],
         acceptance_evidence=[],
-        verification_report={"passed": True},
+        verification_report={"passed": True, "retry_count": 1},
         patch="diff content",
         duration_seconds=42.7,
         retry_count=1,
@@ -764,7 +783,12 @@ def test_execute_saves_run_summary(
             mock_provider_class.return_value = mock_provider_instance
             mock_render_coverage.return_value = "# Coverage"
 
-            handle_execute(args)
+            # Handle the SystemExit that occurs at the end of handle_execute
+            with pytest.raises(SystemExit) as exc_info:
+                handle_execute(args)
+            
+            # Verify exit code is 0 for VERIFIED status
+            assert exc_info.value.code == 0
 
             # Verify run summary was saved with expected structure
             run_summary_call = None
@@ -788,7 +812,7 @@ def test_execute_saves_run_summary(
             assert summary_data["retry_count"] == 1
             assert summary_data["final_status"] == "VERIFIED"
             assert summary_data["exit_code"] == 0
-            assert summary_data["duration_seconds"] == 42.7
+            assert summary_data["duration_seconds"] > 0  # Duration is calculated by CLI
             assert "artifacts" in summary_data
             assert "patch" in summary_data["artifacts"]
             assert "verification_report" in summary_data["artifacts"]

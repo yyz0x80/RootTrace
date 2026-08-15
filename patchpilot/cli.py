@@ -9,6 +9,7 @@ import json
 import logging
 import subprocess  # noqa: F401
 import sys
+import time
 from pathlib import Path
 
 from patchpilot.agent_loop import AgentLoop, AgentLoopError, AgentLoopLimitError
@@ -656,6 +657,8 @@ def handle_execute(args) -> None:
     6. Run repair loop if needed
     7. Save verification report
     """
+    started = time.monotonic()
+
     try:
         # Step 1: Load normalized issue
         issue_path = Path(args.issue)
@@ -748,6 +751,15 @@ def handle_execute(args) -> None:
             trace_path=trace_path,
         )
 
+        # Calculate duration and update result
+        duration_seconds = time.monotonic() - started
+        result.duration_seconds = duration_seconds
+
+        # Extract retry count from verification report
+        result.retry_count = int(
+            result.verification_report.get("retry_count", 0)
+        )
+
         # Step 10: Save verification report
         verification_report_path = output_dir / "verification_report.json"
         save_json(
@@ -779,7 +791,7 @@ def handle_execute(args) -> None:
         )
         save_json(
             str(output_dir / "run_summary.json"),
-            json.dumps(run_summary, indent=2),
+            run_summary.model_dump_json(indent=2),
         )
 
         # Step 14: Print results
@@ -796,9 +808,8 @@ def handle_execute(args) -> None:
         print(f"  FAIL: {fail_count}")
         print(f"  UNVERIFIED: {unverified_count}")
 
-        # Exit with non-zero code for non-verified status
-        if result.final_status.value != "VERIFIED":
-            sys.exit(1)
+        # Exit with code from run summary (ensures summary is saved before exit)
+        sys.exit(run_summary.exit_code)
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

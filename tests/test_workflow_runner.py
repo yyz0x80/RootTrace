@@ -1,6 +1,5 @@
 """Tests for the Workflow Runner orchestration component."""
 
-import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,18 +9,15 @@ import pytest
 
 from patchpilot.agent_loop import AgentLoop
 from patchpilot.evidence.schema import CompletionState
-from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
 from patchpilot.planning.schema import (
     ChangeAction,
     ChangePlan,
     PlannedChange,
-    PlannedTest,
 )
 from patchpilot.planning.scope_gate import ScopeGateResult
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workflow.runner import (
-    MAX_REPAIR_ATTEMPTS,
     WorkflowRunner,
     WorkflowRunnerExecutionError,
     WorkflowRunnerSetupError,
@@ -863,7 +859,6 @@ class TestWorkflowRunnerScopeGate:
         mock_verifier.return_value = mock_report
 
         # Create a change plan with planned changes
-        from patchpilot.planning.schema import ChangeAction, ChangePlan, PlannedChange
         change_plan = ChangePlan(
             risk_level="low",
             planned_changes=[
@@ -1203,8 +1198,8 @@ class TestWorkflowRunnerExitCodes:
         )
 
         # PARTIALLY_VERIFIED should result in exit code 1
-        assert summary["exit_code"] == 1
-        assert summary["final_status"] == "PARTIALLY_VERIFIED"
+        assert summary.exit_code == 1
+        assert summary.final_status == "PARTIALLY_VERIFIED"
 
     def test_verified_returns_zero_exit_code(self):
         """Test that VERIFIED status results in zero exit code."""
@@ -1237,8 +1232,8 @@ class TestWorkflowRunnerExitCodes:
         )
 
         # VERIFIED should result in exit code 0
-        assert summary["exit_code"] == 0
-        assert summary["final_status"] == "VERIFIED"
+        assert summary.exit_code == 0
+        assert summary.final_status == "VERIFIED"
 
     def test_failed_returns_nonzero_exit_code(self):
         """Test that FAILED status results in non-zero exit code."""
@@ -1271,8 +1266,8 @@ class TestWorkflowRunnerExitCodes:
         )
 
         # FAILED should result in exit code 1
-        assert summary["exit_code"] == 1
-        assert summary["final_status"] == "FAILED"
+        assert summary.exit_code == 1
+        assert summary.final_status == "FAILED"
 
     def test_blocked_returns_nonzero_exit_code(self):
         """Test that BLOCKED status results in non-zero exit code."""
@@ -1297,5 +1292,5 @@ class TestWorkflowRunnerExitCodes:
         )
 
         # BLOCKED should result in exit code 1
-        assert summary["exit_code"] == 1
-        assert summary["final_status"] == "BLOCKED"
+        assert summary.exit_code == 1
+        assert summary.final_status == "BLOCKED"

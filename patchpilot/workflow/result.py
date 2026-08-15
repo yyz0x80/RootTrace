@@ -9,12 +9,52 @@ combining execution metadata with verification results and acceptance criteria
 coverage into a single structured result.
 """
 
-import time
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from patchpilot.evidence.schema import AcceptanceEvidence, CompletionState
+
+
+class RunSummary(BaseModel):
+    """Summary of a workflow execution run.
+
+    Aggregates key execution metadata and results for monitoring and evaluation.
+    Includes run identification, configuration, timing, token usage, and artifact locations.
+
+    Attributes:
+        run_id: Unique identifier for this workflow execution run.
+        task_id: Stable task identifier for evaluation tracking.
+        phase: Execution phase (e.g., "execute").
+        base_commit: Base commit SHA for the repository.
+        model: Model identifier used for the run.
+        max_rounds: Maximum number of agent rounds allowed.
+        max_repairs: Maximum number of repair attempts allowed.
+        retry_count: Number of repair attempts actually made.
+        final_status: Overall completion state (e.g., VERIFIED, FAILED, BLOCKED).
+        exit_code: CLI exit code based on final status.
+        duration_seconds: Total execution time in seconds.
+        prompt_tokens: Total prompt tokens used (null if not available).
+        completion_tokens: Total completion tokens used (null if not available).
+        total_cost: Total cost of the run (null if not available).
+        artifacts: Dictionary mapping artifact names to their file paths.
+    """
+
+    run_id: str
+    task_id: str
+    phase: str
+    base_commit: str
+    model: str
+    max_rounds: int
+    max_repairs: int
+    retry_count: int
+    final_status: str
+    exit_code: int
+    duration_seconds: float
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_cost: float | None = None
+    artifacts: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkflowResult(BaseModel):
@@ -64,7 +104,7 @@ class WorkflowResult(BaseModel):
         base_commit: str = "",
         model: str = "",
         output_dir: str = "artifacts",
-    ) -> dict[str, Any]:
+    ) -> RunSummary:
         """Convert workflow result to run summary format.
 
         Args:
@@ -74,9 +114,11 @@ class WorkflowResult(BaseModel):
             output_dir: Directory where artifacts are saved.
 
         Returns:
-            Dictionary in run summary format suitable for JSON serialization.
+            RunSummary object with execution metadata and results.
         """
         # Determine exit code based on final status
+        # VERIFIED → 0, all other states → 1
+        # PARTIALLY_VERIFIED is valuable but should not be treated as complete success for CI
         exit_code = 0 if self.final_status == CompletionState.VERIFIED else 1
 
         # Build artifacts dictionary
@@ -87,20 +129,20 @@ class WorkflowResult(BaseModel):
             "execution_trace": f"{output_dir}/execution_trace.jsonl",
         }
 
-        return {
-            "run_id": self.run_id,
-            "task_id": task_id,
-            "phase": "execute",
-            "base_commit": base_commit,
-            "model": model,
-            "max_rounds": self.max_rounds,
-            "max_repairs": self.max_repairs,
-            "retry_count": self.retry_count,
-            "final_status": self.final_status.value,
-            "exit_code": exit_code,
-            "duration_seconds": self.duration_seconds,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_cost": self.total_cost,
-            "artifacts": artifacts,
-        }
+        return RunSummary(
+            run_id=self.run_id,
+            task_id=task_id,
+            phase="execute",
+            base_commit=base_commit,
+            model=model,
+            max_rounds=self.max_rounds,
+            max_repairs=self.max_repairs,
+            retry_count=self.retry_count,
+            final_status=self.final_status.value,
+            exit_code=exit_code,
+            duration_seconds=self.duration_seconds,
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+            total_cost=self.total_cost,
+            artifacts=artifacts,
+        )
