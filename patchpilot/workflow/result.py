@@ -9,6 +9,7 @@ combining execution metadata with verification results and acceptance criteria
 coverage into a single structured result.
 """
 
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,6 +35,13 @@ class WorkflowResult(BaseModel):
             report data from deterministic checks (ruff, pytest, etc.).
         patch: Git diff patch string containing all code changes made during
             the workflow execution.
+        duration_seconds: Total execution time in seconds.
+        retry_count: Number of repair attempts made.
+        max_rounds: Maximum number of agent rounds allowed.
+        max_repairs: Maximum number of repair attempts allowed.
+        prompt_tokens: Total prompt tokens used (null if not available).
+        completion_tokens: Total completion tokens used (null if not available).
+        total_cost: Total cost of the run (null if not available).
     """
 
     run_id: str
@@ -42,3 +50,57 @@ class WorkflowResult(BaseModel):
     acceptance_evidence: list[AcceptanceEvidence] = Field(default_factory=list)
     verification_report: dict[str, Any] = Field(default_factory=dict)
     patch: str = ""
+    duration_seconds: float = 0.0
+    retry_count: int = 0
+    max_rounds: int = 16
+    max_repairs: int = 2
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_cost: float | None = None
+
+    def to_run_summary(
+        self,
+        task_id: str = "",
+        base_commit: str = "",
+        model: str = "",
+        output_dir: str = "artifacts",
+    ) -> dict[str, Any]:
+        """Convert workflow result to run summary format.
+
+        Args:
+            task_id: Optional task identifier for the run.
+            base_commit: Base commit SHA for the repository.
+            model: Model identifier used for the run.
+            output_dir: Directory where artifacts are saved.
+
+        Returns:
+            Dictionary in run summary format suitable for JSON serialization.
+        """
+        # Determine exit code based on final status
+        exit_code = 0 if self.final_status == CompletionState.VERIFIED else 1
+
+        # Build artifacts dictionary
+        artifacts = {
+            "patch": f"{output_dir}/patch.diff",
+            "verification_report": f"{output_dir}/verification_report.json",
+            "acceptance_coverage": f"{output_dir}/acceptance_coverage.md",
+            "execution_trace": f"{output_dir}/execution_trace.jsonl",
+        }
+
+        return {
+            "run_id": self.run_id,
+            "task_id": task_id,
+            "phase": "execute",
+            "base_commit": base_commit,
+            "model": model,
+            "max_rounds": self.max_rounds,
+            "max_repairs": self.max_repairs,
+            "retry_count": self.retry_count,
+            "final_status": self.final_status.value,
+            "exit_code": exit_code,
+            "duration_seconds": self.duration_seconds,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_cost": self.total_cost,
+            "artifacts": artifacts,
+        }

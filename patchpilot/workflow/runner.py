@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from fnmatch import fnmatch
@@ -354,6 +355,7 @@ class WorkflowRunner:
         verifier: Callable[[], VerificationReport] | None,
         workspace: Workspace,
         sandbox: DockerSandbox | None = None,
+        max_repairs: int = MAX_REPAIR_ATTEMPTS,
     ) -> None:
         """Initialize the WorkflowRunner with required components.
 
@@ -363,11 +365,13 @@ class WorkflowRunner:
                       If None, WorkflowRunner uses the built-in Verifier.
             workspace: Workspace instance for path resolution and security
             sandbox: Optional DockerSandbox instance (created if None)
+            max_repairs: Maximum number of repair attempts (default: MAX_REPAIR_ATTEMPTS)
         """
         self.agent_loop = agent_loop
         self.verifier = verifier
         self.workspace = workspace
         self.sandbox = sandbox
+        self.max_repairs = max_repairs
         self._temp_dir: tempfile.TemporaryDirectory | None = None
         self._sandbox_verifier: Verifier | None = None
 
@@ -516,6 +520,7 @@ class WorkflowRunner:
         """
         # Generate a stable run_id for this workflow execution
         run_id = str(uuid.uuid4())
+        execution_start_time = time.time()
 
         if normalized_issue is None:
             try:
@@ -736,20 +741,20 @@ class WorkflowRunner:
                     break
 
                 # Check repair attempt limit
-                if retry_count >= MAX_REPAIR_ATTEMPTS:
+                if retry_count >= self.max_repairs:
                     logger.warning(
                         "Maximum repair attempts (%d) reached. Stopping repair loop.",
-                        MAX_REPAIR_ATTEMPTS,
+                        self.max_repairs,
                     )
                     ExecuteLogger.log_repair_stopped("Maximum repair attempts reached")
                     break
 
                 retry_count += 1
-                ExecuteLogger.log_repair_attempt(retry_count, MAX_REPAIR_ATTEMPTS)
+                ExecuteLogger.log_repair_attempt(retry_count, self.max_repairs)
                 logger.info(
                     "Starting repair attempt %d/%d",
                     retry_count,
-                    MAX_REPAIR_ATTEMPTS,
+                    self.max_repairs,
                 )
 
                 # Build repair prompt with failure feedback
@@ -849,6 +854,7 @@ class WorkflowRunner:
             )
 
             # Step 18: Create and return WorkflowResult
+            duration_seconds = time.time() - execution_start_time
             result = WorkflowResult(
                 run_id=run_id,
                 final_status=final_status,
@@ -856,6 +862,9 @@ class WorkflowRunner:
                 acceptance_evidence=evidence,
                 verification_report=report.to_dict(),
                 patch=report.patch or "",
+                duration_seconds=duration_seconds,
+                retry_count=report.retry_count,
+                max_repairs=self.max_repairs,
             )
 
             # Log final result section

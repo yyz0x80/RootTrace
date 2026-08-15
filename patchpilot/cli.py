@@ -52,6 +52,35 @@ def _configure_logging() -> None:
     )
 
 
+def _create_provider(model_override: str | None = None) -> LLMProvider:
+    """Create LLMProvider with optional model override.
+
+    Args:
+        model_override: Optional model identifier to override environment variable
+
+    Returns:
+        Configured LLMProvider instance
+
+    Raises:
+        ValueError: If provider initialization fails
+    """
+    import os
+
+    if model_override:
+        original_model = os.environ.get("PATCHPILOT_MODEL")
+        os.environ["PATCHPILOT_MODEL"] = model_override
+        try:
+            return LLMProvider()
+        finally:
+            # Restore original model if it existed
+            if original_model is not None:
+                os.environ["PATCHPILOT_MODEL"] = original_model
+            elif "PATCHPILOT_MODEL" in os.environ:
+                del os.environ["PATCHPILOT_MODEL"]
+    else:
+        return LLMProvider()
+
+
 def main() -> None:
     """Main entry point for the PatchPilot CLI."""
     _configure_logging()
@@ -81,6 +110,12 @@ def main() -> None:
         type=str,
         default=None,
         help="Model identifier (overrides PATCHPILOT_MODEL environment variable)"
+    )
+    prepare_parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory for artifacts from this run",
     )
     
     # run subcommand
@@ -114,6 +149,12 @@ def main() -> None:
         type=int,
         default=3,
         help="Maximum number of repair attempts (default: 3)"
+    )
+    run_parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory for artifacts from this run",
     )
     
     # execute subcommand
@@ -154,6 +195,18 @@ def main() -> None:
         default=3,
         help="Maximum number of repair attempts (default: 3)"
     )
+    execute_parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory for artifacts from this run",
+    )
+    execute_parser.add_argument(
+        "--task-id",
+        type=str,
+        required=True,
+        help="Stable evaluation task identifier",
+    )
     
     args = parser.parse_args()
     
@@ -188,7 +241,7 @@ def handle_prepare(args) -> None:
 
         # Create provider for normalization and planning
         try:
-            provider = LLMProvider()
+            provider = _create_provider(args.model)
         except ValueError as e:
             print(f"Provider initialization failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -281,29 +334,34 @@ def handle_prepare(args) -> None:
 
         # Step 8: Output artifacts
         artifact_paths = []
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
+        normalized_issue_path = output_dir / "normalized_issue.json"
         save_json(
-            "artifacts/normalized_issue.json",
+            str(normalized_issue_path),
             normalized_issue.model_dump_json(indent=2),
         )
-        artifact_paths.append("artifacts/normalized_issue.json")
+        artifact_paths.append(str(normalized_issue_path))
 
+        repository_context_path = output_dir / "repository_context.json"
         save_json(
-            "artifacts/repository_context.json",
+            str(repository_context_path),
             repository_context.model_dump_json(indent=2),
         )
-        artifact_paths.append("artifacts/repository_context.json")
+        artifact_paths.append(str(repository_context_path))
 
+        plan_path = output_dir / "plan.json"
         save_json(
-            "artifacts/plan.json",
+            str(plan_path),
             plan.model_dump_json(indent=2),
         )
-        artifact_paths.append("artifacts/plan.json")
+        artifact_paths.append(str(plan_path))
 
         ExecuteLogger.log_artifacts(artifact_paths)
 
-        print("\nReview the artifacts in artifacts/ directory.")
-        print("To execute this plan, run: patchpilot execute --repo <repo> --issue artifacts/normalized_issue.json --plan artifacts/plan.json")
+        print(f"\nReview the artifacts in {output_dir}/ directory.")
+        print(f"To execute this plan, run: patchpilot execute --repo <repo> --issue {output_dir}/normalized_issue.json --plan {output_dir}/plan.json --output-dir {output_dir} --task-id <task-id>")
 
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -319,12 +377,16 @@ def handle_run(args) -> None:
     This function implements the full run workflow that executes the agent loop.
     """
     try:
+        # Setup output directory
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
         # Load raw issue
         raw_issue = load_issue(args.issue)
         
         # Create provider for normalization
         try:
-            provider = LLMProvider()
+            provider = _create_provider(args.model)
         except ValueError as e:
             print(f"Provider initialization failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -337,7 +399,7 @@ def handle_run(args) -> None:
         
         # Save normalized issue to artifacts
         save_json(
-            "artifacts/normalized_issue.json",
+            str(output_dir / "normalized_issue.json"),
             normalized_issue.model_dump_json(indent=2),
         )
         
@@ -376,7 +438,7 @@ def handle_run(args) -> None:
         
         # Save plan to artifacts
         save_json(
-            "artifacts/plan.json",
+            str(output_dir / "plan.json"),
             plan.model_dump_json(indent=2),
         )
         
@@ -638,6 +700,10 @@ def handle_execute(args) -> None:
 
         # Step 3: Setup workspace
         repo_path = Path(args.repo)
+        
+        # Setup output directory
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Validate repository
         try:
@@ -659,7 +725,7 @@ def handle_execute(args) -> None:
 
         # Step 4: Create provider
         try:
-            provider = LLMProvider()
+            provider = _create_provider(args.model)
         except ValueError as e:
             print(f"Provider initialization failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -683,10 +749,11 @@ def handle_execute(args) -> None:
             agent_loop=agent_loop,
             verifier=None,
             workspace=workspace,
+            max_repairs=args.max_repairs,
         )
 
         # Step 9: Execute workflow
-        trace_path = Path("artifacts/execution_trace.jsonl")
+        trace_path = output_dir / "execution_trace.jsonl"
         result = runner.execute(
             issue=normalized_issue.model_dump_json(indent=2),
             plan=plan.model_dump_json(indent=2),
@@ -696,20 +763,19 @@ def handle_execute(args) -> None:
         )
 
         # Step 10: Save verification report
+        verification_report_path = output_dir / "verification_report.json"
         save_json(
-            "artifacts/verification_report.json",
+            str(verification_report_path),
             json.dumps(result.verification_report, indent=2),
         )
 
         # Step 11: Save patch
         if result.patch:
-            patch_path = Path("artifacts/patch.diff")
-            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path = output_dir / "patch.diff"
             patch_path.write_text(result.patch, encoding="utf-8")
 
         # Step 12: Save acceptance coverage report
-        coverage_path = Path("artifacts/acceptance_coverage.md")
-        coverage_path.parent.mkdir(parents=True, exist_ok=True)
+        coverage_path = output_dir / "acceptance_coverage.md"
         coverage_path.write_text(
             render_acceptance_coverage(
                 result.acceptance_evidence,
@@ -718,19 +784,35 @@ def handle_execute(args) -> None:
             encoding="utf-8",
         )
 
-        # Step 13: Print results
+        # Step 13: Save run summary
+        run_summary = result.to_run_summary(
+            task_id=args.task_id,
+            base_commit=plan.base_commit,
+            model=provider._model if hasattr(provider, '_model') else "",
+            output_dir=str(output_dir),
+        )
+        save_json(
+            str(output_dir / "run_summary.json"),
+            json.dumps(run_summary, indent=2),
+        )
+
+        # Step 14: Print results
         print("\nEXECUTION_COMPLETE\n")
-        
+
         # Count acceptance criteria by status
         pass_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "PASS")
         fail_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "FAIL")
         unverified_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "UNVERIFIED")
-        
+
         print(f"Final status: {result.final_status.value}")
         print("Acceptance criteria:")
         print(f"  PASS: {pass_count}")
         print(f"  FAIL: {fail_count}")
         print(f"  UNVERIFIED: {unverified_count}")
+
+        # Exit with non-zero code for non-verified status
+        if result.final_status.value != "VERIFIED":
+            sys.exit(1)
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
