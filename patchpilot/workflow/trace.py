@@ -73,6 +73,7 @@ class TraceEvent(BaseModel):
         tool_duration: Duration of tool execution in seconds.
         permission_result: Result of permission check for tool execution.
         modified_files: List of files modified by this event.
+        round_number: Agent round associated with a tool event.
         verification_result: Detailed verification command results.
         retry_count: Number of retry attempts for this operation.
         final_status: Final status of the operation (e.g., "SUCCESS", "FAILURE").
@@ -93,6 +94,7 @@ class TraceEvent(BaseModel):
     tool_duration: float | None = None
     permission_result: str | None = None
     modified_files: list[str] = Field(default_factory=list)
+    round_number: int | None = None
     verification_result: dict[str, Any] | None = None
     retry_count: int = 0
     final_status: str | None = None
@@ -150,3 +152,13 @@ class TraceWriter:
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(event.model_dump_json())
             stream.write("\n")
+
+    def start_run(self) -> None:
+        """Initialize an empty trace file for a new workflow run.
+
+        A workflow artifact represents one run. Truncating it at the start
+        prevents events from previous runs from being mixed with the current
+        run while preserving append behavior for individual event writes.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("", encoding="utf-8")

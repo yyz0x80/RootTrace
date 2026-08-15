@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from patchpilot.agent_loop import AgentLoop, ExecuteLogCallback
 from patchpilot.issue.schema import NormalizedIssue
@@ -52,6 +52,7 @@ from patchpilot.workspace import Workspace
 
 if TYPE_CHECKING:
     from patchpilot.evidence.schema import AcceptanceEvidence
+    from patchpilot.models import ToolResult
     from patchpilot.verification.verifier import Verifier
 
 logger = logging.getLogger(__name__)
@@ -204,15 +205,35 @@ BASELINE_BLOCKING_FAILURE_TYPES = {
 
 
 class WorkflowExecuteLogCallback(ExecuteLogCallback):
-    """Execute log callback for workflow runner using ExecuteLogger.
+    """Record structured logs and tool trace events for agent execution.
 
     Bridges the AgentLoop's callback interface with the structured
-    ExecuteLogger to produce clean section-based logging output.
+    ExecuteLogger and the persistent workflow trace.
     """
 
-    def __init__(self) -> None:
-        """Initialize the callback with a section flag."""
+    _MUTATING_TOOLS: ClassVar[set[str]] = {
+        "edit_file",
+        "edit_file_by_line",
+        "apply_patch",
+    }
+
+    def __init__(self, trace_writer: TraceWriter, run_id: str) -> None:
+        """Initialize logging and trace state for one workflow run."""
         self._coding_section_logged = False
+        self._trace_writer = trace_writer
+        self._run_id = run_id
+        self._workflow_stage = "CODING"
+        self._retry_count = 0
+
+    def set_trace_context(
+        self,
+        *,
+        workflow_stage: str,
+        retry_count: int,
+    ) -> None:
+        """Update the stage metadata used by subsequent tool events."""
+        self._workflow_stage = workflow_stage
+        self._retry_count = retry_count
 
     def on_round_start(self, round_number: int) -> None:
         """Called at the start of each agent round.
@@ -234,6 +255,35 @@ class WorkflowExecuteLogCallback(ExecuteLogCallback):
             args: Tool arguments
         """
         ExecuteLogger.log_coding_round(round_number, tool_name, args)
+
+    def on_tool_result(
+        self,
+        round_number: int,
+        tool_name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+        duration_seconds: float,
+    ) -> None:
+        """Record one completed tool execution in the workflow trace."""
+        modified_files = []
+        path = args.get("path")
+        if result.ok and tool_name in self._MUTATING_TOOLS and isinstance(path, str):
+            modified_files.append(path)
+
+        self._trace_writer.write(
+            TraceEvent(
+                run_id=self._run_id,
+                event_type="tool_call",
+                workflow_stage=self._workflow_stage,
+                tool_name=tool_name,
+                tool_arguments=args,
+                tool_duration=duration_seconds,
+                modified_files=modified_files,
+                round_number=round_number,
+                retry_count=self._retry_count,
+                final_status="SUCCESS" if result.ok else "FAILURE",
+            )
+        )
 
     def on_round_complete(self, round_number: int) -> None:
         """Called when the agent completes a round with a final answer.
@@ -385,6 +435,33 @@ class WorkflowRunner:
 
         return self._sandbox_verifier
 
+    def _run_traced_verification(
+        self,
+        *,
+        trace_writer: TraceWriter,
+        workflow_stage: str,
+        run_id: str,
+        change_plan: ChangePlan | None,
+        retry_count: int,
+    ) -> VerificationReport:
+        """Run verification and append its complete report to the trace."""
+        report = self._run_verification(
+            run_id=run_id,
+            change_plan=change_plan,
+            retry_count=retry_count,
+        )
+        trace_writer.write(
+            TraceEvent(
+                run_id=run_id,
+                event_type="verification",
+                workflow_stage=workflow_stage,
+                verification_result=report.to_dict(),
+                retry_count=report.retry_count,
+                final_status="SUCCESS" if report.passed else "FAILURE",
+            )
+        )
+        return report
+
     def execute(
         self,
         issue: str,
@@ -470,11 +547,16 @@ class WorkflowRunner:
         # Step 4: Update workspace to use temporary path
         self.workspace = Workspace(workspace_path)
 
+        # Initialize one persistent trace writer for the complete workflow.
+        output_trace_path = trace_path or workspace_path.parent / "trace.jsonl"
+        trace_writer = TraceWriter(output_trace_path)
+        trace_writer.start_run()
+
         # Step 5: Update agent loop tools to use temporary workspace
         self.agent_loop.update_workspace(self.workspace)
 
         # Set up execute log callback for structured logging
-        execute_callback = WorkflowExecuteLogCallback()
+        execute_callback = WorkflowExecuteLogCallback(trace_writer, run_id)
         self.agent_loop.execute_log_callback = execute_callback
 
         # Step 6: Start Docker Sandbox
@@ -486,7 +568,9 @@ class WorkflowRunner:
             # Production execution uses the built-in sandbox verifier.
             if self.verifier is None:
                 logger.info("Running sandbox baseline verification")
-                baseline_report = self._run_verification(
+                baseline_report = self._run_traced_verification(
+                    trace_writer=trace_writer,
+                    workflow_stage="BASELINE_VERIFY",
                     run_id=run_id,
                     change_plan=change_plan,
                     retry_count=0,
@@ -531,10 +615,7 @@ class WorkflowRunner:
                         verifier_passed=False,
                         evidence=evidence,
                     )
-                    output_trace_path = (
-                        trace_path or workspace_path.parent / "trace.jsonl"
-                    )
-                    TraceWriter(output_trace_path).write(
+                    trace_writer.write(
                         TraceEvent(
                             run_id=run_id,
                             event_type="workflow_completed",
@@ -613,7 +694,9 @@ class WorkflowRunner:
             logger.info("Running post-change verification")
             retry_count = 0
 
-            report = self._run_verification(
+            report = self._run_traced_verification(
+                trace_writer=trace_writer,
+                workflow_stage="VERIFY",
                 run_id=run_id,
                 change_plan=change_plan,
                 retry_count=retry_count,
@@ -677,6 +760,10 @@ class WorkflowRunner:
                 )
 
                 # Run agent with repair prompt
+                execute_callback.set_trace_context(
+                    workflow_stage="REPAIR",
+                    retry_count=retry_count,
+                )
                 self.agent_loop.run(issue=repair_prompt)
 
                 # Get workspace changes after repair
@@ -707,7 +794,9 @@ class WorkflowRunner:
                     break
 
                 # Re-run verification
-                report = self._run_verification(
+                report = self._run_traced_verification(
+                    trace_writer=trace_writer,
+                    workflow_stage="REPAIR_VERIFY",
                     run_id=run_id,
                     change_plan=change_plan,
                     retry_count=retry_count,
@@ -746,10 +835,8 @@ class WorkflowRunner:
             )
 
             # Step 17: Write final trace event before workspace cleanup
-            # Use a caller-provided path so the trace can outlive workspace cleanup.
-            output_trace_path = trace_path or workspace_path.parent / "trace.jsonl"
-            trace = TraceWriter(output_trace_path)
-            trace.write(
+            # Use the shared writer so this remains the final event in the trace.
+            trace_writer.write(
                 TraceEvent(
                     run_id=run_id,
                     event_type="workflow_completed",

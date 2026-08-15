@@ -274,6 +274,26 @@ class TestTraceWriter:
             assert first_parsed["event_type"] == "first"
             assert second_parsed["event_type"] == "second"
 
+    def test_start_run_clears_events_from_previous_run(self) -> None:
+        """Test that a new workflow run starts with an empty trace artifact."""
+        with TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "trace.jsonl"
+            trace_path.write_text("stale event\n", encoding="utf-8")
+            writer = TraceWriter(trace_path)
+
+            writer.start_run()
+            writer.write(
+                TraceEvent(
+                    run_id="current-run",
+                    event_type="workflow_started",
+                    workflow_stage="WORKSPACE",
+                )
+            )
+
+            lines = trace_path.read_text(encoding="utf-8").splitlines()
+            assert len(lines) == 1
+            assert json.loads(lines[0])["run_id"] == "current-run"
+
     def test_utf8_encoding(self) -> None:
         """Test that writer handles UTF-8 characters correctly."""
         with TemporaryDirectory() as tmpdir:

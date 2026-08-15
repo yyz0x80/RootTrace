@@ -1,5 +1,6 @@
 """Tests for the Workflow Runner orchestration component."""
 
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -1252,9 +1253,18 @@ class TestWorkflowRunnerVerification:
         mock_agent_loop.run.assert_not_called()
         verifier_class.assert_called_once_with(mock_sandbox)
         verifier_class.return_value.verify.assert_called_once()
-        assert '"final_status":"BLOCKED"' in trace_path.read_text(
-            encoding="utf-8"
-        )
+        events = [
+            json.loads(line)
+            for line in trace_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [event["event_type"] for event in events] == [
+            "verification",
+            "workflow_completed",
+        ]
+        assert events[0]["workflow_stage"] == "BASELINE_VERIFY"
+        assert events[0]["final_status"] == "FAILURE"
+        assert events[1]["final_status"] == "BLOCKED"
+        assert {event["run_id"] for event in events} == {result.run_id}
 
     def test_execute_reuses_verifier_for_baseline_and_final_checks(
         self,
@@ -1298,16 +1308,32 @@ class TestWorkflowRunnerVerification:
                 VerificationReport(passed=True),
             ]
 
+            trace_path = tmp_path / "trace.jsonl"
             result = runner.execute(
                 issue="Inspect the repository.",
                 plan="Inspect the repository without making changes.",
-                trace_path=tmp_path / "trace.jsonl",
+                trace_path=trace_path,
             )
 
         assert result.final_status == CompletionState.PARTIALLY_VERIFIED
         mock_agent_loop.run.assert_called_once()
         verifier_class.assert_called_once_with(mock_sandbox)
         assert verifier_class.return_value.verify.call_count == 2
+        events = [
+            json.loads(line)
+            for line in trace_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [event["event_type"] for event in events] == [
+            "verification",
+            "verification",
+            "workflow_completed",
+        ]
+        assert [event["workflow_stage"] for event in events] == [
+            "BASELINE_VERIFY",
+            "VERIFY",
+            "RESULT",
+        ]
+        assert {event["run_id"] for event in events} == {result.run_id}
 
     def test_run_verification_uses_injected_callback(self):
         """Test that _run_verification uses injected verifier callback when provided."""
@@ -1705,10 +1731,13 @@ class TestWorkflowRunnerCompletionStates:
 class TestWorkflowRunnerTraceEvents:
     """Tests for trace event generation during workflow execution."""
 
-    def test_trace_contains_tool_verification_and_final_state_events(self):
+    def test_trace_contains_tool_verification_and_final_state_events(
+        self,
+        tmp_path: Path,
+    ):
         """Test that trace contains tool calls, verification results, and final state events."""
+        from patchpilot.models import ToolResult
         from patchpilot.workflow.result import WorkflowResult
-        from patchpilot.workflow.trace import TraceEvent, TraceWriter
 
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_verifier = Mock()
@@ -1729,21 +1758,34 @@ class TestWorkflowRunnerTraceEvents:
         # Mock internal setup methods and workspace changes
         from patchpilot.tools import WorkspaceChange
         mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
-        persistent_trace_path = Path("artifacts/execution_trace.jsonl")
+        persistent_trace_path = tmp_path / "execution_trace.jsonl"
 
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
              patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
-             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch, \
-             patch('patchpilot.workflow.runner.TraceWriter') as mock_trace_writer_class:
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
             mock_get_changes.return_value = mock_changes
             mock_generate_patch.return_value = "diff content"
 
-            # Create a mock trace writer instance
-            mock_trace_writer = Mock(spec=TraceWriter)
-            mock_trace_writer_class.return_value = mock_trace_writer
+            def run_agent_with_tool_event(*, issue: str) -> str:
+                callback = mock_agent_loop.execute_log_callback
+                callback.on_tool_call(
+                    1,
+                    "edit_file",
+                    {"path": "src/file.py", "new_text": "updated"},
+                )
+                callback.on_tool_result(
+                    1,
+                    "edit_file",
+                    {"path": "src/file.py", "new_text": "updated"},
+                    ToolResult(ok=True, content="File updated"),
+                    0.25,
+                )
+                return issue
+
+            mock_agent_loop.run.side_effect = run_agent_with_tool_event
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -1756,24 +1798,75 @@ class TestWorkflowRunnerTraceEvents:
         assert isinstance(result, WorkflowResult)
         assert result.final_status == CompletionState.PARTIALLY_VERIFIED
 
-        # Verify TraceWriter was instantiated
-        mock_trace_writer_class.assert_called_once_with(persistent_trace_path)
+        events = [
+            json.loads(line)
+            for line in persistent_trace_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["event_type"] for event in events] == [
+            "tool_call",
+            "verification",
+            "workflow_completed",
+        ]
+        assert {event["run_id"] for event in events} == {result.run_id}
 
-        # Verify trace writer was called with a final workflow_completed event
-        assert mock_trace_writer.write.call_count >= 1
+        tool_event = events[0]
+        assert tool_event["workflow_stage"] == "CODING"
+        assert tool_event["tool_name"] == "edit_file"
+        assert tool_event["tool_arguments"]["path"] == "src/file.py"
+        assert tool_event["tool_arguments"]["new_text"] == "<redacted>"
+        assert tool_event["tool_duration"] == 0.25
+        assert tool_event["round_number"] == 1
+        assert tool_event["modified_files"] == ["src/file.py"]
+        assert tool_event["final_status"] == "SUCCESS"
+
+        verification_event = events[1]
+        assert verification_event["workflow_stage"] == "VERIFY"
+        assert verification_event["verification_result"]["passed"] is True
+        assert verification_event["final_status"] == "SUCCESS"
 
         # Get the final call (which should be the workflow_completed event)
-        final_call_args = mock_trace_writer.write.call_args
-        final_event = final_call_args[0][0]  # First positional argument
+        final_event = events[-1]
 
         # Verify the final event contains expected fields
-        assert isinstance(final_event, TraceEvent)
-        assert final_event.event_type == "workflow_completed"
-        assert final_event.workflow_stage == "RESULT"
-        assert final_event.final_status == CompletionState.PARTIALLY_VERIFIED.value
-        assert final_event.modified_files == ["src/file.py"]
-        assert final_event.verification_result is not None
-        assert final_event.verification_result["passed"] is True
+        assert final_event["event_type"] == "workflow_completed"
+        assert final_event["workflow_stage"] == "RESULT"
+        assert (
+            final_event["final_status"]
+            == CompletionState.PARTIALLY_VERIFIED.value
+        )
+        assert final_event["modified_files"] == ["src/file.py"]
+        assert final_event["verification_result"]["passed"] is True
+
+    def test_failed_repair_tool_event_contains_retry_context(self):
+        """Test failed repair tools retain stage and retry metadata."""
+        from patchpilot.models import ToolResult
+        from patchpilot.workflow.runner import WorkflowExecuteLogCallback
+        from patchpilot.workflow.trace import TraceWriter
+
+        trace_writer = Mock(spec=TraceWriter)
+        callback = WorkflowExecuteLogCallback(trace_writer, "run-123")
+        callback.set_trace_context(
+            workflow_stage="REPAIR",
+            retry_count=2,
+        )
+
+        callback.on_tool_result(
+            3,
+            "edit_file",
+            {"path": "src/file.py", "new_text": "updated"},
+            ToolResult(ok=False, content="Permission denied"),
+            0.5,
+        )
+
+        event = trace_writer.write.call_args.args[0]
+        assert event.event_type == "tool_call"
+        assert event.workflow_stage == "REPAIR"
+        assert event.round_number == 3
+        assert event.retry_count == 2
+        assert event.modified_files == []
+        assert event.final_status == "FAILURE"
 
     def test_evidence_completes_before_temp_directory_cleanup(self):
         """Test that evidence generation completes before temporary directory cleanup."""
