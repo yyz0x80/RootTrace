@@ -735,7 +735,7 @@ def handle_execute(args) -> None:
             agent_loop=agent_loop,
             verifier=None,
             workspace=workspace,
-            max_repairs=args.max_repairs,
+            max_repair_attempts=args.max_repairs,
         )
 
         # Step 9: Execute workflow

@@ -1060,13 +1060,13 @@ class TestWorkflowRunnerConfigurableRepairLimit:
 
         mock_verifier.side_effect = failed_reports
 
-        # Create runner with custom max_repairs = 1
+        # Create runner with custom max_repair_attempts = 1
         runner = WorkflowRunner(
             agent_loop=mock_agent_loop,
             verifier=mock_verifier,
             workspace=mock_workspace,
             sandbox=mock_sandbox,
-            max_repairs=1,  # Custom limit
+            max_repair_attempts=1,  # Custom limit
         )
 
         # Mock internal setup methods and scope gate
@@ -1126,7 +1126,7 @@ class TestWorkflowRunnerConfigurableRepairLimit:
 
         mock_verifier.side_effect = failed_reports
 
-        # Create runner without custom max_repairs (should use default)
+        # Create runner without custom max_repair_attempts (should use default)
         runner = WorkflowRunner(
             agent_loop=mock_agent_loop,
             verifier=mock_verifier,

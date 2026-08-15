@@ -355,7 +355,7 @@ class WorkflowRunner:
         verifier: Callable[[], VerificationReport] | None,
         workspace: Workspace,
         sandbox: DockerSandbox | None = None,
-        max_repairs: int = MAX_REPAIR_ATTEMPTS,
+        max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     ) -> None:
         """Initialize the WorkflowRunner with required components.
 
@@ -365,13 +365,16 @@ class WorkflowRunner:
                       If None, WorkflowRunner uses the built-in Verifier.
             workspace: Workspace instance for path resolution and security
             sandbox: Optional DockerSandbox instance (created if None)
-            max_repairs: Maximum number of repair attempts (default: MAX_REPAIR_ATTEMPTS)
+            max_repair_attempts: Maximum number of repair attempts (default: MAX_REPAIR_ATTEMPTS)
         """
+        if max_repair_attempts < 0:
+            raise ValueError("max_repair_attempts must be non-negative")
+
         self.agent_loop = agent_loop
         self.verifier = verifier
         self.workspace = workspace
         self.sandbox = sandbox
-        self.max_repairs = max_repairs
+        self.max_repair_attempts = max_repair_attempts
         self._temp_dir: tempfile.TemporaryDirectory | None = None
         self._sandbox_verifier: Verifier | None = None
 
@@ -741,20 +744,20 @@ class WorkflowRunner:
                     break
 
                 # Check repair attempt limit
-                if retry_count >= self.max_repairs:
+                if retry_count >= self.max_repair_attempts:
                     logger.warning(
                         "Maximum repair attempts (%d) reached. Stopping repair loop.",
-                        self.max_repairs,
+                        self.max_repair_attempts,
                     )
                     ExecuteLogger.log_repair_stopped("Maximum repair attempts reached")
                     break
 
                 retry_count += 1
-                ExecuteLogger.log_repair_attempt(retry_count, self.max_repairs)
+                ExecuteLogger.log_repair_attempt(retry_count, self.max_repair_attempts)
                 logger.info(
                     "Starting repair attempt %d/%d",
                     retry_count,
-                    self.max_repairs,
+                    self.max_repair_attempts,
                 )
 
                 # Build repair prompt with failure feedback
@@ -864,7 +867,7 @@ class WorkflowRunner:
                 patch=report.patch or "",
                 duration_seconds=duration_seconds,
                 retry_count=report.retry_count,
-                max_repairs=self.max_repairs,
+                max_repairs=self.max_repair_attempts,
             )
 
             # Log final result section
