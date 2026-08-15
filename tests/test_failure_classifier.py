@@ -247,6 +247,22 @@ def test_classify_pytest_command():
     assert failure_type == FailureType.TEST_FAILURE
 
 
+def test_classify_python_module_pytest_command():
+    """Test classification of pytest invoked as a Python module."""
+    summary = FailureSummary(
+        command="python -m pytest tests/",
+        exit_code=1,
+        failed_tests=[],
+        error_type="AssertionError",
+        relevant_output="Some pytest error",
+        timed_out=False,
+    )
+
+    failure_type = classify_failure(summary)
+
+    assert failure_type == FailureType.TEST_FAILURE
+
+
 def test_classify_default_code_failure():
     """Test default classification for unknown errors."""
     summary = FailureSummary(

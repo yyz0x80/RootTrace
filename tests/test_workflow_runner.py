@@ -1148,20 +1148,166 @@ class TestWorkflowRunnerVerification:
                 expected_report
             )
 
-            result = runner._run_verification(
+            first_result = runner._run_verification(
                 run_id="run-123",
                 change_plan=plan,
                 retry_count=1,
             )
+            second_result = runner._run_verification(
+                run_id="run-123",
+                change_plan=plan,
+                retry_count=2,
+            )
 
-        assert result is expected_report
+        assert first_result is expected_report
+        assert second_result is expected_report
         verifier_class.assert_called_once_with(mock_sandbox)
-        verifier_class.return_value.verify.assert_called_once_with(
+        assert verifier_class.return_value.verify.call_count == 2
+        verifier_class.return_value.verify.assert_any_call(
             run_id="run-123",
             target_tests=["tests/test_task.py"],
             target_acceptance_criteria=["AC-1"],
             retry_count=1,
         )
+        verifier_class.return_value.verify.assert_any_call(
+            run_id="run-123",
+            target_tests=["tests/test_task.py"],
+            target_acceptance_criteria=["AC-1"],
+            retry_count=2,
+        )
+
+    def test_baseline_environment_failure_blocks_before_agent(
+        self,
+        tmp_path: Path,
+    ):
+        """Test baseline environment failures block without calling the model."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+        workspace_path = tmp_path / "repo"
+        workspace_path.mkdir()
+        trace_path = tmp_path / "trace.jsonl"
+        issue = NormalizedIssue(
+            title="Fix pricing",
+            task_type="bug",
+            problem_statement="Fix pricing calculation.",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    id="AC-1",
+                    description="Pricing tests pass.",
+                )
+            ],
+        )
+        baseline_report = VerificationReport(
+            run_id="baseline-run",
+            passed=False,
+            checks=[
+                CheckReport(
+                    level="LEVEL_2_TARGET_TESTS",
+                    command="python -m pytest tests/test_pricing.py -q",
+                    passed=False,
+                    exit_code=1,
+                    duration_seconds=0.1,
+                    failure_type="ENVIRONMENT_FAILURE",
+                )
+            ],
+            failed_level="LEVEL_2_TARGET_TESTS",
+            failure_type="ENVIRONMENT_FAILURE",
+        )
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=None,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        with (
+            patch.object(
+                runner,
+                "_create_temporary_workspace",
+                return_value=workspace_path,
+            ),
+            patch.object(runner, "_start_sandbox"),
+            patch.object(runner, "_cleanup"),
+            patch(
+                "patchpilot.verification.verifier.Verifier"
+            ) as verifier_class,
+        ):
+            verifier_class.return_value.verify.return_value = baseline_report
+
+            result = runner.execute(
+                issue=issue.model_dump_json(),
+                plan="Implement the approved plan.",
+                normalized_issue=issue,
+                trace_path=trace_path,
+            )
+
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.changed_files == []
+        assert result.patch == ""
+        assert result.acceptance_evidence[0].status == "UNVERIFIED"
+        assert "before model execution" in (
+            result.acceptance_evidence[0].explanation
+        )
+        mock_agent_loop.run.assert_not_called()
+        verifier_class.assert_called_once_with(mock_sandbox)
+        verifier_class.return_value.verify.assert_called_once()
+        assert '"final_status":"BLOCKED"' in trace_path.read_text(
+            encoding="utf-8"
+        )
+
+    def test_execute_reuses_verifier_for_baseline_and_final_checks(
+        self,
+        tmp_path: Path,
+    ):
+        """Test baseline and final checks use one sandbox Verifier instance."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+        workspace_path = tmp_path / "repo"
+        workspace_path.mkdir()
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=None,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        with (
+            patch.object(
+                runner,
+                "_create_temporary_workspace",
+                return_value=workspace_path,
+            ),
+            patch.object(runner, "_start_sandbox"),
+            patch.object(runner, "_cleanup"),
+            patch(
+                "patchpilot.workflow.runner._get_workspace_changes",
+                return_value=[],
+            ),
+            patch(
+                "patchpilot.workflow.runner.generate_patch",
+                return_value="",
+            ),
+            patch(
+                "patchpilot.verification.verifier.Verifier"
+            ) as verifier_class,
+        ):
+            verifier_class.return_value.verify.side_effect = [
+                VerificationReport(passed=True),
+                VerificationReport(passed=True),
+            ]
+
+            result = runner.execute(
+                issue="Inspect the repository.",
+                plan="Inspect the repository without making changes.",
+                trace_path=tmp_path / "trace.jsonl",
+            )
+
+        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        mock_agent_loop.run.assert_called_once()
+        verifier_class.assert_called_once_with(mock_sandbox)
+        assert verifier_class.return_value.verify.call_count == 2
 
     def test_run_verification_uses_injected_callback(self):
         """Test that _run_verification uses injected verifier callback when provided."""

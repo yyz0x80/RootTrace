@@ -85,7 +85,7 @@ class Verifier:
             commands.append(
                 (
                     "LEVEL_2_TARGET_TESTS",
-                    f"pytest {targets} -q -p no:cacheprovider",
+                    f"python -m pytest {targets} -q -p no:cacheprovider",
                 )
             )
 
@@ -93,7 +93,7 @@ class Verifier:
         commands.append(
             (
                 "LEVEL_3_REGRESSION",
-                "pytest -q -p no:cacheprovider",
+                "python -m pytest -q -p no:cacheprovider",
             )
         )
 

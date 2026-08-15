@@ -52,6 +52,7 @@ from patchpilot.workspace import Workspace
 
 if TYPE_CHECKING:
     from patchpilot.evidence.schema import AcceptanceEvidence
+    from patchpilot.verification.verifier import Verifier
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,12 @@ UNRECOVERABLE_FAILURE_TYPES = {
     FailureType.SCOPE_VIOLATION,
 }
 
+BASELINE_BLOCKING_FAILURE_TYPES = {
+    FailureType.ENVIRONMENT_FAILURE.value,
+    FailureType.PERMISSION_FAILURE.value,
+    FailureType.TIMEOUT.value,
+}
+
 
 class WorkflowExecuteLogCallback(ExecuteLogCallback):
     """Execute log callback for workflow runner using ExecuteLogger.
@@ -312,6 +319,7 @@ class WorkflowRunner:
         self.workspace = workspace
         self.sandbox = sandbox
         self._temp_dir: tempfile.TemporaryDirectory | None = None
+        self._sandbox_verifier: Verifier | None = None
 
     @property
     def temp_dir(self) -> Path | None:
@@ -352,10 +360,7 @@ class WorkflowRunner:
 
         selection = select_target_tests(change_plan)
 
-        # Import here to avoid circular dependency
-        from patchpilot.verification.verifier import Verifier
-
-        verifier = Verifier(self.sandbox)
+        verifier = self._get_sandbox_verifier()
         return verifier.verify(
             run_id=run_id,
             target_tests=selection.tests,
@@ -364,6 +369,21 @@ class WorkflowRunner:
             ),
             retry_count=retry_count,
         )
+
+    def _get_sandbox_verifier(self) -> Verifier:
+        """Return the Verifier shared by all sandbox verification phases."""
+        if self.sandbox is None:
+            raise WorkflowRunnerSetupError(
+                "Cannot create a verifier before the sandbox is started"
+            )
+
+        if self._sandbox_verifier is None:
+            # Import here to avoid a circular dependency during module loading.
+            from patchpilot.verification.verifier import Verifier
+
+            self._sandbox_verifier = Verifier(self.sandbox)
+
+        return self._sandbox_verifier
 
     def execute(
         self,
@@ -377,26 +397,27 @@ class WorkflowRunner:
 
         This method implements the core workflow logic following the proper execution order:
         1. Preflight validation (handled in CLI before this method)
-        2. Baseline validation (handled in CLI before this method)
+        2. Approved-plan validation (handled in CLI before this method)
         3. Create temporary workspace copy
         4. Update workspace to use temporary path
         5. Update agent loop tools to use temporary workspace
         6. Start Docker Sandbox
-        7. Run Coding Agent for initial modification
-        8. Check actual changes via _get_workspace_changes
-        9. Validate agent made changes if required
-        10. Runtime scope validation against approved plan
-        11. Run Verifier
-        12. Repair loop if verification failed:
+        7. Run baseline verification before model execution
+        8. Run Coding Agent for initial modification
+        9. Check actual changes via _get_workspace_changes
+        10. Validate agent made changes if required
+        11. Runtime scope validation against approved plan
+        12. Run final verification
+        13. Repair loop if verification failed:
             - Run Repair Agent
             - Get workspace changes via _get_workspace_changes
             - Scope gate validation
             - Run verifier
-        13. Generate patch with all changes
-        14. Generate acceptance evidence before workspace cleanup
-        15. Determine final completion state
-        16. Write final trace event before workspace cleanup
-        17. Create and return WorkflowResult
+        14. Generate patch with all changes
+        15. Generate acceptance evidence before workspace cleanup
+        16. Determine final completion state
+        17. Write final trace event before workspace cleanup
+        18. Create and return WorkflowResult
 
         Args:
             issue: The original issue description
@@ -460,15 +481,105 @@ class WorkflowRunner:
         self._start_sandbox(workspace_path)
 
         try:
-            # Step 7: Coding Agent initial modification
+            # Step 7: Verify the sandbox baseline before model execution.
+            # The injected callback is retained as a legacy test/custom seam.
+            # Production execution uses the built-in sandbox verifier.
+            if self.verifier is None:
+                logger.info("Running sandbox baseline verification")
+                baseline_report = self._run_verification(
+                    run_id=run_id,
+                    change_plan=change_plan,
+                    retry_count=0,
+                )
+                baseline_results = {
+                    check.command or check.level: check.passed
+                    for check in baseline_report.checks
+                }
+                ExecuteLogger.log_verification(
+                    baseline_results,
+                    section_title="BASELINE VERIFY",
+                )
+
+                if baseline_report.failure_type in BASELINE_BLOCKING_FAILURE_TYPES:
+                    logger.warning(
+                        "Baseline verification blocked execution: %s. "
+                        "The coding agent was not called.",
+                        baseline_report.failure_type,
+                    )
+                    from patchpilot.evidence.schema import (
+                        AcceptanceEvidence,
+                        EvidenceStatus,
+                    )
+
+                    reason = (
+                        "Baseline verification was blocked before model execution: "
+                        f"{baseline_report.failure_type}."
+                    )
+                    evidence = [
+                        AcceptanceEvidence(
+                            criterion_id=criterion.id,
+                            description=criterion.description,
+                            status=EvidenceStatus.UNVERIFIED,
+                            explanation=reason,
+                        )
+                        for criterion in normalized_issue.acceptance_criteria
+                    ]
+                    final_status = determine_completion_state(
+                        has_ambiguity=False,
+                        blocked=True,
+                        execution_failed=False,
+                        verifier_passed=False,
+                        evidence=evidence,
+                    )
+                    output_trace_path = (
+                        trace_path or workspace_path.parent / "trace.jsonl"
+                    )
+                    TraceWriter(output_trace_path).write(
+                        TraceEvent(
+                            run_id=run_id,
+                            event_type="workflow_completed",
+                            workflow_stage="BASELINE_VERIFY",
+                            verification_result=baseline_report.to_dict(),
+                            final_status=final_status.value,
+                        )
+                    )
+                    artifacts = {
+                        "verification_report.json": (
+                            "artifacts/verification_report.json"
+                        )
+                    }
+                    if trace_path is not None:
+                        artifacts["execution_trace.jsonl"] = str(trace_path)
+                    ExecuteLogger.log_result(
+                        passed=False,
+                        artifacts=artifacts,
+                        final_status=final_status.value,
+                    )
+                    return WorkflowResult(
+                        run_id=run_id,
+                        final_status=final_status,
+                        changed_files=[],
+                        acceptance_evidence=evidence,
+                        verification_report=baseline_report.to_dict(),
+                        patch="",
+                    )
+
+                if not baseline_report.passed:
+                    logger.info(
+                        "Baseline verification found a repairable failure: %s. "
+                        "Continuing with the coding agent.",
+                        baseline_report.failure_type,
+                    )
+
+            # Step 8: Coding Agent initial modification
             logger.info("Running coding agent for initial implementation")
             initial_prompt = f"Implement the following plan:\n\n{plan}"
             self.agent_loop.run(issue=initial_prompt)
 
-            # Step 8: Check actual changes via _get_workspace_changes
+            # Step 9: Check actual changes via _get_workspace_changes
             actual_changes = _get_workspace_changes(workspace_path)
 
-            # Step 9: Validate agent made changes if required
+            # Step 10: Validate agent made changes if required
             if not actual_changes:
                 # Only enforce this check for tasks that require code changes
                 if change_plan is not None and change_plan.planned_changes:
@@ -484,7 +595,7 @@ class WorkflowRunner:
             deleted = [c.path for c in actual_changes if c.action == "delete"]
             ExecuteLogger.log_changes(modified, created, deleted)
 
-            # Step 10: Runtime scope validation against approved plan
+            # Step 11: Runtime scope validation against approved plan
             if change_plan is not None:
                 logger.info("Running runtime scope validation")
                 try:
@@ -498,8 +609,8 @@ class WorkflowRunner:
                         f"Runtime scope validation failed: {e}"
                     ) from e
 
-            # Step 11: Initial verification
-            logger.info("Running initial verification")
+            # Step 12: Final verification after the initial implementation
+            logger.info("Running post-change verification")
             retry_count = 0
 
             report = self._run_verification(
@@ -516,7 +627,7 @@ class WorkflowRunner:
                 verification_results[check_name] = check.passed
             ExecuteLogger.log_verification(verification_results)
 
-            # Step 12: Repair loop if verification failed
+            # Step 13: Repair loop if verification failed
             previous_failure = None
 
             while not report.passed:
@@ -602,13 +713,13 @@ class WorkflowRunner:
                     retry_count=retry_count,
                 )
 
-            # Step 13: Generate patch with all changes
+            # Step 14: Generate patch with all changes
             logger.info("Generating patch with all changes")
             final_changes = _get_workspace_changes(workspace_path)
             report.patch = generate_patch(workspace_path, final_changes)
             logger.info("Patch generated successfully")
 
-            # Step 14: Generate acceptance evidence before workspace cleanup
+            # Step 15: Generate acceptance evidence before workspace cleanup
             # This must happen before the temporary workspace is destroyed
             if change_plan is not None:
                 evidence = _map_acceptance_evidence(
@@ -620,7 +731,7 @@ class WorkflowRunner:
             else:
                 evidence = []
 
-            # Step 15: Determine final completion state
+            # Step 16: Determine final completion state
             final_status = determine_completion_state(
                 has_ambiguity=bool(normalized_issue.ambiguous_points),
                 blocked=report.failure_type in {
@@ -634,7 +745,7 @@ class WorkflowRunner:
                 evidence=evidence,
             )
 
-            # Step 16: Write final trace event before workspace cleanup
+            # Step 17: Write final trace event before workspace cleanup
             # Use a caller-provided path so the trace can outlive workspace cleanup.
             output_trace_path = trace_path or workspace_path.parent / "trace.jsonl"
             trace = TraceWriter(output_trace_path)
@@ -650,7 +761,7 @@ class WorkflowRunner:
                 )
             )
 
-            # Step 17: Create and return WorkflowResult
+            # Step 18: Create and return WorkflowResult
             result = WorkflowResult(
                 run_id=run_id,
                 final_status=final_status,
@@ -668,9 +779,13 @@ class WorkflowRunner:
             if trace_path is not None:
                 artifacts["execution_trace.jsonl"] = str(trace_path)
 
-            ExecuteLogger.log_result(passed=report.passed, artifacts=artifacts)
+            ExecuteLogger.log_result(
+                passed=report.passed,
+                artifacts=artifacts,
+                final_status=final_status.value,
+            )
 
-            # Step 18: Return final workflow result
+            # Return the final workflow result.
             return result
 
         finally:

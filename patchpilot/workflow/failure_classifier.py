@@ -16,6 +16,7 @@ Classification categories include:
 
 from __future__ import annotations
 
+import shlex
 from enum import Enum
 
 from patchpilot.verification.error_parser import FailureSummary
@@ -32,6 +33,22 @@ class FailureType(str, Enum):
     MODEL_FAILURE = "MODEL_FAILURE"
     REQUIREMENT_AMBIGUITY = "REQUIREMENT_AMBIGUITY"
     SCOPE_VIOLATION = "SCOPE_VIOLATION"
+
+
+def _is_pytest_command(command: str) -> bool:
+    """Return whether a command invokes pytest through an approved form."""
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+
+    return bool(
+        arguments
+        and (
+            arguments[0] == "pytest"
+            or arguments[:3] == ["python", "-m", "pytest"]
+        )
+    )
 
 
 def classify_failure(summary: FailureSummary) -> FailureType:
@@ -88,7 +105,7 @@ def classify_failure(summary: FailureSummary) -> FailureType:
         return FailureType.CODE_FAILURE
 
     # Pytest commands without explicit test failures are test-related
-    if summary.command.strip().startswith("pytest"):
+    if _is_pytest_command(summary.command):
         return FailureType.TEST_FAILURE
 
     # Default to code failure for unclassified errors

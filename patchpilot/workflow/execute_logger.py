@@ -198,13 +198,17 @@ class ExecuteLogger:
                     logger.info("Violation: %s", violation)
 
     @staticmethod
-    def log_verification(results: dict[str, bool]) -> None:
+    def log_verification(
+        results: dict[str, bool],
+        section_title: str = "VERIFY",
+    ) -> None:
         """Log verification results.
 
         Args:
             results: Dictionary mapping check names to pass/fail status
+            section_title: Section title used to identify the verification phase
         """
-        ExecuteLogger.log_section("VERIFY")
+        ExecuteLogger.log_section(section_title)
         for check_name, passed in results.items():
             status = "PASS" if passed else "FAIL"
             logger.info("%s: %s", check_name, status)
@@ -213,15 +217,17 @@ class ExecuteLogger:
     def log_result(
         passed: bool,
         artifacts: dict[str, str],
+        final_status: str | None = None,
     ) -> None:
         """Log final result and artifacts.
 
         Args:
             passed: Whether the overall verification passed
             artifacts: Dictionary mapping artifact names to file paths
+            final_status: Optional explicit workflow completion state
         """
         ExecuteLogger.log_section("RESULT")
-        logger.info("VERIFIED" if passed else "FAILED")
+        logger.info(final_status or ("VERIFIED" if passed else "FAILED"))
         logger.info("Generated:")
         for artifact_name, artifact_path in artifacts.items():
             logger.info("%s: %s", artifact_name, artifact_path)

@@ -28,7 +28,7 @@ def test_verify_all_checks_pass() -> None:
             duration_seconds=1.0,
         ),
         CommandResult(
-            command="pytest -q -p no:cacheprovider",
+            command="python -m pytest -q -p no:cacheprovider",
             exit_code=0,
             stdout="",
             stderr="",
@@ -61,14 +61,14 @@ def test_verify_with_target_tests() -> None:
             duration_seconds=1.0,
         ),
         CommandResult(
-            command="pytest tests/test_specific.py -q -p no:cacheprovider",
+            command="python -m pytest tests/test_specific.py -q -p no:cacheprovider",
             exit_code=0,
             stdout="",
             stderr="",
             duration_seconds=1.5,
         ),
         CommandResult(
-            command="pytest -q -p no:cacheprovider",
+            command="python -m pytest -q -p no:cacheprovider",
             exit_code=0,
             stdout="",
             stderr="",
@@ -135,7 +135,7 @@ def test_verify_target_test_fails_fail_fast() -> None:
             duration_seconds=1.0,
         ),
         CommandResult(
-            command="pytest tests/test_failing.py -q -p no:cacheprovider",
+            command="python -m pytest tests/test_failing.py -q -p no:cacheprovider",
             exit_code=1,
             stdout="FAILED tests/test_failing.py::test_example",
             stderr="AssertionError",
@@ -192,7 +192,7 @@ def test_verify_command_arguments() -> None:
             duration_seconds=1.0,
         ),
         CommandResult(
-            command="pytest -q -p no:cacheprovider",
+            command="python -m pytest -q -p no:cacheprovider",
             exit_code=0,
             stdout="",
             stderr="",
