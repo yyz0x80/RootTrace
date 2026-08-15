@@ -32,13 +32,16 @@ class LLMProvider:
     - Error handling and retries for rate limits
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         """Initialize the provider with environment configuration.
 
         Reads:
         - ZHIPU_API_KEY: API authentication key
         - PATCHPILOT_BASE_URL: API base URL
-        - PATCHPILOT_MODEL: Model identifier
+        - PATCHPILOT_MODEL: Model identifier (can be overridden by model parameter)
+
+        Args:
+            model: Optional model override. If not provided, reads from PATCHPILOT_MODEL.
         """
         api_key = os.getenv("ZHIPU_API_KEY")
         if not api_key:
@@ -48,12 +51,23 @@ class LLMProvider:
         if not base_url:
             raise ValueError("PATCHPILOT_BASE_URL environment variable is not set")
 
-        model = os.getenv("PATCHPILOT_MODEL")
-        if not model:
-            raise ValueError("PATCHPILOT_MODEL environment variable is not set")
+        configured_model = model or os.getenv("PATCHPILOT_MODEL")
+        if not configured_model:
+            raise ValueError(
+                "Model is required through --model or PATCHPILOT_MODEL"
+            )
 
         self._client = OpenAI(api_key=api_key, base_url=base_url)
-        self._model = model
+        self._model = configured_model
+
+    @property
+    def model(self) -> str:
+        """Get the configured model identifier.
+
+        Returns:
+            The model name being used for API calls.
+        """
+        return self._model
 
     def complete(
         self,

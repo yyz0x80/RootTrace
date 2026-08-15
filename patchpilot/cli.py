@@ -64,21 +64,7 @@ def _create_provider(model_override: str | None = None) -> LLMProvider:
     Raises:
         ValueError: If provider initialization fails
     """
-    import os
-
-    if model_override:
-        original_model = os.environ.get("PATCHPILOT_MODEL")
-        os.environ["PATCHPILOT_MODEL"] = model_override
-        try:
-            return LLMProvider()
-        finally:
-            # Restore original model if it existed
-            if original_model is not None:
-                os.environ["PATCHPILOT_MODEL"] = original_model
-            elif "PATCHPILOT_MODEL" in os.environ:
-                del os.environ["PATCHPILOT_MODEL"]
-    else:
-        return LLMProvider()
+    return LLMProvider(model=model_override)
 
 
 def main() -> None:
