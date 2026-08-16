@@ -36,3 +36,19 @@ the produced `patch.diff` there and run the manifest's score commands with
 The ambiguous and unsafe tasks intentionally stop during `prepare`. The current
 CLI does not write `run_summary.json` for prepare-time exits, so their manifests
 include an `expected_signal` for the evaluation runner to match deterministically.
+
+## Aggregate metrics
+
+Each evaluation run writes the following automatic metrics to
+`evaluation/results/<timestamp>/aggregate.json`:
+
+- expected outcome match, verified task, verifier pass, acceptance criteria
+  coverage, regression pass, retry recovery, and unsafe action block rates;
+- average execute duration;
+- average LLM call count and prompt, completion, and total token usage.
+
+Rate entries include their numerator and denominator. Average entries include
+the number of available and missing observations. A metric value is `null` when
+it cannot be calculated from exact artifacts; missing data is never treated as
+zero. Token totals come from provider response metadata and are not estimated.
+Cost is intentionally not calculated.

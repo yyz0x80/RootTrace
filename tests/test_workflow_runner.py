@@ -843,6 +843,7 @@ class TestWorkflowRunnerScopeGate:
         assert result.final_status == CompletionState.BLOCKED
         assert result.verification_report["passed"] is False
         assert result.verification_report["failure_type"] == "SCOPE_VIOLATION"
+        assert result.retry_count == 1
         # Should attempt initial + 1 repair (then stop due to scope violation)
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1  # Only initial verification, scope gate blocks re-verification

@@ -15,6 +15,7 @@ from evaluation.runner import (
     RunResult,
     ScoreResult,
     TaskConfig,
+    aggregate_scores,
     execute_task,
     select_task_configs,
     verify_base_commit,
@@ -38,6 +39,100 @@ def write_task(task_dir: Path, task_id: str) -> None:
     (task_dir / "task.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
+    )
+
+
+def make_task_config(
+    task_id: str,
+    category: str,
+    expected_status: str,
+) -> TaskConfig:
+    """Create a task configuration for aggregation tests."""
+    return TaskConfig(
+        task_id=task_id,
+        category=category,
+        repository="fixtures/repo",
+        base_commit="abc123",
+        issue=f"tasks/{task_id}/issue.md",
+        expected_final_status=expected_status,
+        allowed_changes=[],
+        target_tests=[],
+        score_commands=[],
+        expected_phase=(
+            "prepare" if category == "unsafe_request" else "execute"
+        ),
+    )
+
+
+def write_json(path: Path, data: object) -> None:
+    """Write one JSON fixture with parent directories."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def write_metric_task(
+    runs_dir: Path,
+    config: TaskConfig,
+    *,
+    actual_status: str,
+    phase: str,
+    report: dict[str, object] | None,
+    run_summary: dict[str, object] | None,
+    criteria: list[str],
+    evidence: dict[str, str],
+    prepare_usage: tuple[int, int | None, int | None],
+) -> None:
+    """Write deterministic task artifacts consumed by metric aggregation."""
+    task_dir = runs_dir / config.task_id
+    write_json(
+        task_dir / "score.json",
+        {
+            "task_id": config.task_id,
+            "category": config.category,
+            "expected_status": config.expected_final_status,
+            "actual_status": actual_status,
+            "phase_reached": phase,
+            "score": 1.0 if actual_status == config.expected_final_status else 0.0,
+            "hidden_tests_passed": True,
+            "signal_matched": phase == "prepare",
+            "details": {},
+        },
+    )
+    prepare_calls, prepare_prompt, prepare_completion = prepare_usage
+    write_json(
+        task_dir / "prepare" / "prepare_summary.json",
+        {
+            "phase": "prepare",
+            "model": "test-model",
+            "llm_call_count": prepare_calls,
+            "prompt_tokens": prepare_prompt,
+            "completion_tokens": prepare_completion,
+        },
+    )
+    if phase != "execute":
+        return
+
+    write_json(
+        task_dir / "prepare" / "normalized_issue.json",
+        {
+            "acceptance_criteria": [
+                {"id": criterion_id, "description": criterion_id}
+                for criterion_id in criteria
+            ]
+        },
+    )
+    if report is not None:
+        write_json(task_dir / "execute" / "verification_report.json", report)
+    if run_summary is not None:
+        write_json(task_dir / "execute" / "run_summary.json", run_summary)
+    write_json(
+        task_dir / "execute" / "acceptance_evidence.json",
+        {
+            "acceptance_evidence": [
+                {"criterion_id": criterion_id, "status": status}
+                for criterion_id, status in evidence.items()
+            ]
+        },
     )
 
 
@@ -267,6 +362,161 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
     assert result.actual_status == "VERIFIED"
     assert result.hidden_tests_passed is True
     assert result.score == 1.0
+
+
+def test_aggregate_scores_calculates_deterministic_metrics(
+    tmp_path: Path,
+) -> None:
+    evaluation_root = tmp_path / "evaluation"
+    timestamp = "metrics-run"
+    runs_dir = evaluation_root / "runs" / timestamp
+    fix = make_task_config("fix", "single_file_bug", "VERIFIED")
+    retry = make_task_config("retry", "repair_loop", "VERIFIED")
+    unsafe = make_task_config("unsafe", "unsafe_request", "BLOCKED")
+    environment = make_task_config(
+        "environment",
+        "environment_failure",
+        "BLOCKED",
+    )
+
+    passing_report = {
+        "passed": True,
+        "checks": [
+            {"level": "LEVEL_3_REGRESSION", "passed": True},
+        ],
+    }
+    write_metric_task(
+        runs_dir,
+        fix,
+        actual_status="VERIFIED",
+        phase="execute",
+        report=passing_report,
+        run_summary={
+            "duration_seconds": 10.0,
+            "retry_count": 0,
+            "llm_call_count": 3,
+            "prompt_tokens": 20,
+            "completion_tokens": 10,
+        },
+        criteria=["AC-1", "AC-2"],
+        evidence={"AC-1": "PASS"},
+        prepare_usage=(2, 10, 5),
+    )
+    write_metric_task(
+        runs_dir,
+        retry,
+        actual_status="VERIFIED",
+        phase="execute",
+        report=passing_report,
+        run_summary={
+            "duration_seconds": 20.0,
+            "retry_count": 1,
+            "llm_call_count": 4,
+            "prompt_tokens": 30,
+            "completion_tokens": 15,
+        },
+        criteria=["AC-1"],
+        evidence={"AC-1": "PASS"},
+        prepare_usage=(2, 10, 5),
+    )
+    write_metric_task(
+        runs_dir,
+        unsafe,
+        actual_status="BLOCKED",
+        phase="prepare",
+        report=None,
+        run_summary=None,
+        criteria=[],
+        evidence={},
+        prepare_usage=(1, 5, 2),
+    )
+    write_metric_task(
+        runs_dir,
+        environment,
+        actual_status="BLOCKED",
+        phase="execute",
+        report={"passed": False, "checks": []},
+        run_summary={
+            "duration_seconds": 5.0,
+            "retry_count": 0,
+            "llm_call_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        },
+        criteria=["AC-1"],
+        evidence={"AC-1": "FAIL"},
+        prepare_usage=(2, 8, 4),
+    )
+
+    aggregate = aggregate_scores(
+        evaluation_root,
+        timestamp,
+        task_configs=[fix, retry, unsafe, environment],
+    )
+    metrics = aggregate["metrics"]
+
+    assert metrics["expected_outcome_match_rate"]["value"] == 1.0
+    assert metrics["verified_task_rate"]["value"] == 1.0
+    assert metrics["verifier_pass_rate"] == {
+        "value": 2 / 3,
+        "numerator": 2,
+        "denominator": 3,
+        "missing_count": 0,
+    }
+    assert metrics["acceptance_criteria_coverage"]["value"] == 0.5
+    assert metrics["acceptance_criteria_coverage"][
+        "missing_evidence_count"
+    ] == 1
+    assert metrics["regression_pass_rate"]["value"] == 1.0
+    assert metrics["retry_recovery_rate"]["value"] == 1.0
+    assert metrics["unsafe_action_block_rate"]["value"] == 1.0
+    assert metrics["average_execute_duration_seconds"]["value"] == pytest.approx(
+        35 / 3
+    )
+    assert metrics["average_llm_call_count"]["value"] == 3.5
+    assert metrics["average_prompt_tokens"]["value"] == pytest.approx(83 / 4)
+    assert metrics["average_completion_tokens"]["value"] == pytest.approx(41 / 4)
+    assert metrics["average_total_tokens"]["value"] == pytest.approx(124 / 4)
+
+
+def test_empty_metric_denominator_is_not_reported_as_zero(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "evaluation" / "runs" / "empty-run"
+    runs_dir.mkdir(parents=True)
+
+    aggregate = aggregate_scores(tmp_path / "evaluation", "empty-run")
+
+    for metric in aggregate["metrics"].values():
+        assert metric["value"] is None
+
+
+def test_missing_token_usage_is_not_treated_as_zero(tmp_path: Path) -> None:
+    evaluation_root = tmp_path / "evaluation"
+    timestamp = "missing-usage-run"
+    config = make_task_config("unsafe", "unsafe_request", "BLOCKED")
+    write_metric_task(
+        evaluation_root / "runs" / timestamp,
+        config,
+        actual_status="BLOCKED",
+        phase="prepare",
+        report=None,
+        run_summary=None,
+        criteria=[],
+        evidence={},
+        prepare_usage=(1, None, None),
+    )
+
+    aggregate = aggregate_scores(
+        evaluation_root,
+        timestamp,
+        task_configs=[config],
+    )
+
+    assert aggregate["metrics"]["average_llm_call_count"]["value"] == 1.0
+    assert aggregate["metrics"]["average_total_tokens"] == {
+        "value": None,
+        "count": 0,
+        "missing_count": 1,
+    }
 
 
 def test_execute_task_materializes_expected_git_commit(

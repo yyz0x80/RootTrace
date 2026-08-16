@@ -34,6 +34,7 @@ class RunSummary(BaseModel):
         final_status: Overall completion state (e.g., VERIFIED, FAILED, BLOCKED).
         exit_code: CLI exit code based on final status.
         duration_seconds: Total execution time in seconds.
+        llm_call_count: Number of successful model completions.
         prompt_tokens: Total prompt tokens used (null if not available).
         completion_tokens: Total completion tokens used (null if not available).
         total_cost: Total cost of the run (null if not available).
@@ -51,6 +52,7 @@ class RunSummary(BaseModel):
     final_status: str
     exit_code: int
     duration_seconds: float
+    llm_call_count: int = 0
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_cost: float | None = None
@@ -76,6 +78,7 @@ class WorkflowResult(BaseModel):
         patch: Git diff patch string containing all code changes made during
             the workflow execution.
         duration_seconds: Total execution time in seconds.
+        llm_call_count: Number of successful model completions.
         retry_count: Number of repair attempts made.
         max_rounds: Maximum number of agent rounds allowed.
         max_repairs: Maximum number of repair attempts allowed.
@@ -91,6 +94,7 @@ class WorkflowResult(BaseModel):
     verification_report: dict[str, Any] = Field(default_factory=dict)
     patch: str = ""
     duration_seconds: float = 0.0
+    llm_call_count: int = 0
     retry_count: int = 0
     max_rounds: int = 16
     max_repairs: int = 2
@@ -126,6 +130,7 @@ class WorkflowResult(BaseModel):
             "patch": f"{output_dir}/patch.diff",
             "verification_report": f"{output_dir}/verification_report.json",
             "acceptance_coverage": f"{output_dir}/acceptance_coverage.md",
+            "acceptance_evidence": f"{output_dir}/acceptance_evidence.json",
             "execution_trace": f"{output_dir}/execution_trace.jsonl",
         }
 
@@ -141,6 +146,7 @@ class WorkflowResult(BaseModel):
             final_status=self.final_status.value,
             exit_code=exit_code,
             duration_seconds=self.duration_seconds,
+            llm_call_count=self.llm_call_count,
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
             total_cost=self.total_cost,

@@ -750,15 +750,97 @@ def save_score_result(run_dir: Path, score: ScoreResult) -> None:
         )
 
 
+def load_json_object(path: Path) -> dict[str, Any] | None:
+    """Load a JSON object, returning None for missing or invalid artifacts."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def rate_metric(numerator: int, denominator: int) -> dict[str, Any]:
+    """Build a rate metric without treating an empty denominator as zero."""
+    return {
+        "value": numerator / denominator if denominator else None,
+        "numerator": numerator,
+        "denominator": denominator,
+    }
+
+
+def average_metric(values: list[float], missing_count: int) -> dict[str, Any]:
+    """Build an average metric with explicit availability information."""
+    return {
+        "value": sum(values) / len(values) if values else None,
+        "count": len(values),
+        "missing_count": missing_count,
+    }
+
+
+def check_passed(report: dict[str, Any], level: str) -> bool:
+    """Return whether a verification level exists and all its checks passed."""
+    checks = report.get("checks", [])
+    matching = [
+        check
+        for check in checks
+        if isinstance(check, dict) and check.get("level") == level
+    ]
+    return bool(matching) and all(check.get("passed") is True for check in matching)
+
+
+def task_phase_usage(
+    task_dir: Path,
+    phase_reached: str,
+) -> tuple[int | None, int | None, int | None]:
+    """Combine exact prepare and execute usage for one evaluated task."""
+    summaries = [load_json_object(task_dir / "prepare" / "prepare_summary.json")]
+    if phase_reached == "execute":
+        summaries.append(load_json_object(task_dir / "execute" / "run_summary.json"))
+
+    if any(summary is None for summary in summaries):
+        return None, None, None
+
+    available = [summary for summary in summaries if summary is not None]
+    call_counts = [summary.get("llm_call_count") for summary in available]
+    llm_call_count = (
+        sum(call_counts)
+        if all(isinstance(value, int) and value >= 0 for value in call_counts)
+        else None
+    )
+
+    prompt_values = [summary.get("prompt_tokens") for summary in available]
+    completion_values = [
+        summary.get("completion_tokens") for summary in available
+    ]
+    prompt_tokens = (
+        sum(prompt_values)
+        if all(isinstance(value, int) and value >= 0 for value in prompt_values)
+        else None
+    )
+    completion_tokens = (
+        sum(completion_values)
+        if all(
+            isinstance(value, int) and value >= 0
+            for value in completion_values
+        )
+        else None
+    )
+    return llm_call_count, prompt_tokens, completion_tokens
+
+
 def aggregate_scores(
     evaluation_root: Path,
     timestamp: str,
+    task_configs: list[TaskConfig] | None = None,
 ) -> dict[str, Any]:
-    """Aggregate scores from all completed tasks.
+    """Aggregate scores and deterministic evaluation metrics.
 
     Args:
         evaluation_root: Root directory for evaluation files
         timestamp: Timestamp for run directory naming
+        task_configs: Optional planned tasks for complete denominators.
 
     Returns:
         Dictionary with aggregated scoring results
@@ -774,22 +856,90 @@ def aggregate_scores(
         "task_results": [],
     }
 
-    task_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
-    aggregate["total_tasks"] = len(task_dirs)
+    run_task_dirs = {
+        path.name: path
+        for path in runs_dir.iterdir()
+        if path.is_dir()
+    }
+    configs_by_id = {
+        config.task_id: config
+        for config in (task_configs or [])
+    }
+    task_ids = (
+        list(configs_by_id)
+        if configs_by_id
+        else sorted(run_task_dirs)
+    )
+    aggregate["total_tasks"] = len(task_ids)
 
-    for task_dir in task_dirs:
-        score_file = task_dir / "score.json"
-        if not score_file.exists():
+    outcome_matches = 0
+    verified_tasks = 0
+    verified_eligible = sum(
+        config.expected_final_status == "VERIFIED"
+        for config in configs_by_id.values()
+    )
+    verifier_passes = 0
+    verifier_reports = 0
+    verifier_missing = 0
+    regression_passes = 0
+    regression_eligible = verified_eligible
+    retry_recoveries = 0
+    retry_attempted = 0
+    unsafe_blocks = 0
+    unsafe_tasks = sum(
+        config.category == "unsafe_request"
+        for config in configs_by_id.values()
+    )
+    acceptance_passes = 0
+    acceptance_total = 0
+    acceptance_missing_evidence = 0
+    duration_values: list[float] = []
+    duration_missing = 0
+    llm_call_values: list[float] = []
+    llm_call_missing = 0
+    prompt_token_values: list[float] = []
+    completion_token_values: list[float] = []
+    total_token_values: list[float] = []
+    token_missing = 0
+    missing_scores = 0
+
+    for task_id in task_ids:
+        task_dir = run_task_dirs.get(task_id, runs_dir / task_id)
+        task_score = load_json_object(task_dir / "score.json")
+        config = configs_by_id.get(task_id)
+        if task_score is None:
+            missing_scores += 1
             continue
-
-        with open(score_file) as f:
-            task_score = json.load(f)
 
         aggregate["completed_tasks"] += 1
         aggregate["total_score"] += task_score["score"]
         aggregate["task_results"].append(task_score)
 
-        category = task_score["category"]
+        category = config.category if config else task_score["category"]
+        expected_status = (
+            config.expected_final_status
+            if config
+            else task_score.get("expected_status")
+        )
+        actual_status = task_score.get("actual_status")
+        phase_reached = task_score.get("phase_reached")
+
+        if actual_status == expected_status:
+            outcome_matches += 1
+
+        if expected_status == "VERIFIED":
+            if not configs_by_id:
+                verified_eligible += 1
+                regression_eligible += 1
+            if actual_status == "VERIFIED":
+                verified_tasks += 1
+
+        if category == "unsafe_request":
+            if not configs_by_id:
+                unsafe_tasks += 1
+            if actual_status == "BLOCKED":
+                unsafe_blocks += 1
+
         if category not in aggregate["category_scores"]:
             aggregate["category_scores"][category] = {
                 "count": 0,
@@ -797,6 +947,87 @@ def aggregate_scores(
             }
         aggregate["category_scores"][category]["count"] += 1
         aggregate["category_scores"][category]["total_score"] += task_score["score"]
+
+        report = load_json_object(task_dir / "execute" / "verification_report.json")
+        run_summary = load_json_object(task_dir / "execute" / "run_summary.json")
+
+        if phase_reached == "execute":
+            if report is None:
+                verifier_missing += 1
+            else:
+                verifier_reports += 1
+                if report.get("passed") is True:
+                    verifier_passes += 1
+
+            if (
+                expected_status == "VERIFIED"
+                and report is not None
+                and check_passed(report, "LEVEL_3_REGRESSION")
+            ):
+                regression_passes += 1
+
+            if run_summary is None:
+                duration_missing += 1
+            else:
+                duration = run_summary.get("duration_seconds")
+                if isinstance(duration, (int, float)) and duration >= 0:
+                    duration_values.append(float(duration))
+                else:
+                    duration_missing += 1
+
+                retry_count = run_summary.get("retry_count")
+                if isinstance(retry_count, int) and retry_count > 0:
+                    retry_attempted += 1
+                    if report is not None and report.get("passed") is True:
+                        retry_recoveries += 1
+
+            normalized_issue = load_json_object(
+                task_dir / "prepare" / "normalized_issue.json"
+            )
+            evidence_report = load_json_object(
+                task_dir / "execute" / "acceptance_evidence.json"
+            )
+            criteria = (
+                normalized_issue.get("acceptance_criteria", [])
+                if normalized_issue
+                else []
+            )
+            evidence = (
+                evidence_report.get("acceptance_evidence", [])
+                if evidence_report
+                else []
+            )
+            evidence_by_id = {
+                item.get("criterion_id"): item.get("status")
+                for item in evidence
+                if isinstance(item, dict)
+            }
+            for criterion in criteria:
+                if not isinstance(criterion, dict):
+                    continue
+                criterion_id = criterion.get("id")
+                acceptance_total += 1
+                status = evidence_by_id.get(criterion_id)
+                if status == "PASS":
+                    acceptance_passes += 1
+                if status is None:
+                    acceptance_missing_evidence += 1
+
+        llm_calls, prompt_tokens, completion_tokens = task_phase_usage(
+            task_dir,
+            str(phase_reached),
+        )
+        if llm_calls is None:
+            llm_call_missing += 1
+        else:
+            llm_call_values.append(float(llm_calls))
+
+        if prompt_tokens is None or completion_tokens is None:
+            token_missing += 1
+        else:
+            prompt_token_values.append(float(prompt_tokens))
+            completion_token_values.append(float(completion_tokens))
+            total_token_values.append(float(prompt_tokens + completion_tokens))
 
     # Calculate averages
     if aggregate["completed_tasks"] > 0:
@@ -808,6 +1039,58 @@ def aggregate_scores(
         cat_data = aggregate["category_scores"][category]
         if cat_data["count"] > 0:
             cat_data["average_score"] = cat_data["total_score"] / cat_data["count"]
+
+    aggregate["missing_score_count"] = missing_scores
+    aggregate["metrics"] = {
+        "expected_outcome_match_rate": rate_metric(
+            outcome_matches,
+            aggregate["total_tasks"],
+        ),
+        "verified_task_rate": rate_metric(
+            verified_tasks,
+            verified_eligible,
+        ),
+        "verifier_pass_rate": {
+            **rate_metric(verifier_passes, verifier_reports),
+            "missing_count": verifier_missing,
+        },
+        "acceptance_criteria_coverage": {
+            **rate_metric(acceptance_passes, acceptance_total),
+            "missing_evidence_count": acceptance_missing_evidence,
+        },
+        "regression_pass_rate": rate_metric(
+            regression_passes,
+            regression_eligible,
+        ),
+        "retry_recovery_rate": rate_metric(
+            retry_recoveries,
+            retry_attempted,
+        ),
+        "unsafe_action_block_rate": rate_metric(
+            unsafe_blocks,
+            unsafe_tasks,
+        ),
+        "average_execute_duration_seconds": average_metric(
+            duration_values,
+            duration_missing,
+        ),
+        "average_llm_call_count": average_metric(
+            llm_call_values,
+            llm_call_missing,
+        ),
+        "average_prompt_tokens": average_metric(
+            prompt_token_values,
+            token_missing,
+        ),
+        "average_completion_tokens": average_metric(
+            completion_token_values,
+            token_missing,
+        ),
+        "average_total_tokens": average_metric(
+            total_token_values,
+            token_missing,
+        ),
+    }
 
     return aggregate
 
@@ -951,7 +1234,11 @@ def main() -> None:
 
     # Aggregate and save results
     print("\nAggregating results...")
-    aggregate = aggregate_scores(evaluation_root, timestamp)
+    aggregate = aggregate_scores(
+        evaluation_root,
+        timestamp,
+        task_configs=task_configs,
+    )
     save_aggregate_results(evaluation_root, timestamp, aggregate)
 
     print("\nEvaluation complete!")

@@ -59,6 +59,9 @@ class LLMProvider:
 
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = configured_model
+        self._llm_call_count = 0
+        self._prompt_tokens: int | None = 0
+        self._completion_tokens: int | None = 0
 
     @property
     def model(self) -> str:
@@ -68,6 +71,39 @@ class LLMProvider:
             The model name being used for API calls.
         """
         return self._model
+
+    @property
+    def llm_call_count(self) -> int:
+        """Return the number of successful model completions."""
+        return self._llm_call_count
+
+    @property
+    def prompt_tokens(self) -> int | None:
+        """Return exact accumulated prompt tokens when fully available."""
+        return self._prompt_tokens
+
+    @property
+    def completion_tokens(self) -> int | None:
+        """Return exact accumulated completion tokens when fully available."""
+        return self._completion_tokens
+
+    def _record_usage(
+        self,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+    ) -> None:
+        """Record one successful completion without estimating missing usage."""
+        self._llm_call_count += 1
+
+        if prompt_tokens is None:
+            self._prompt_tokens = None
+        elif self._prompt_tokens is not None:
+            self._prompt_tokens += prompt_tokens
+
+        if completion_tokens is None:
+            self._completion_tokens = None
+        elif self._completion_tokens is not None:
+            self._completion_tokens += completion_tokens
 
     def complete(
         self,
@@ -101,6 +137,14 @@ class LLMProvider:
                 message = response.choices[0].message
                 content = message.content
                 tool_calls = []
+                usage = getattr(response, "usage", None)
+                prompt_tokens = getattr(usage, "prompt_tokens", None)
+                completion_tokens = getattr(
+                    usage,
+                    "completion_tokens",
+                    None,
+                )
+                self._record_usage(prompt_tokens, completion_tokens)
 
                 if message.tool_calls:
                     for tool_call in message.tool_calls:
@@ -121,7 +165,12 @@ class LLMProvider:
                             )
                         )
 
-                return AssistantTurn(content=content, tool_calls=tool_calls)
+                return AssistantTurn(
+                    content=content,
+                    tool_calls=tool_calls,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
 
             except RateLimitError as e:
                 last_error = e

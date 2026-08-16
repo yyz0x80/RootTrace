@@ -753,6 +753,7 @@ class WorkflowRunner:
                     break
 
                 retry_count += 1
+                report.retry_count = retry_count
                 ExecuteLogger.log_repair_attempt(retry_count, self.max_repair_attempts)
                 logger.info(
                     "Starting repair attempt %d/%d",
