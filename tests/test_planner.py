@@ -257,9 +257,9 @@ def test_create_plan_with_repository_mismatch():
 def test_create_plan_with_create_action():
     """Test that create action is accepted for new files."""
     issue = NormalizedIssue(
-        title="Add tests",
-        task_type="test",
-        problem_statement="Need tests",
+        title="Add feature",
+        task_type="feature",
+        problem_statement="Need new feature",
     )
 
     response = """
@@ -269,9 +269,9 @@ def test_create_plan_with_create_action():
   "relevant_files": ["src/main.py"],
   "planned_changes": [
     {
-      "path": "tests/test_main.py",
+      "path": "src/new_feature.py",
       "action": "create",
-      "description": "Add unit tests",
+      "description": "Add new feature",
       "acceptance_criteria": []
     }
   ],
@@ -286,7 +286,7 @@ def test_create_plan_with_create_action():
     plan = create_plan_with_path(issue, "/fake/path", mock_generate)
 
     assert len(plan.planned_changes) == 1
-    assert plan.planned_changes[0].path == "tests/test_main.py"
+    assert plan.planned_changes[0].path == "src/new_feature.py"
     assert plan.planned_changes[0].action == "create"
 
 
@@ -779,9 +779,9 @@ def test_create_plan_does_not_retry_scope_violation():
     )
     repository_context = RepositoryContext(
         base_commit="abc123",
-        tracked_files=[".github/workflows/ci.yml"],
+        tracked_files=[".github/workflows/ci.yml", "tests/test_ci.py"],
         python_files=[],
-        test_files=[],
+        test_files=["tests/test_ci.py"],
         config_files=[".github/workflows/ci.yml"],
         keyword_matches=[],
     )
@@ -792,9 +792,13 @@ def test_create_plan_does_not_retry_scope_violation():
     "path": ".github/workflows/ci.yml",
     "action": "modify",
     "description": "Disable CI",
-    "acceptance_criteria": []
+    "acceptance_criteria": ["AC-1"]
   }],
-  "planned_tests": [],
+  "planned_tests": [{
+    "command": "pytest tests/test_ci.py -q",
+    "purpose": "Verify CI",
+    "acceptance_criteria": ["AC-1"]
+  }],
   "out_of_scope": [],
   "risk_level": "low"
 }"""
@@ -802,7 +806,10 @@ def test_create_plan_does_not_retry_scope_violation():
 
     plan = create_plan(issue, repository_context, generate)
 
+    # The plan should have proper AC mapping to avoid post-processing errors
     assert plan.planned_changes[0].path == ".github/workflows/ci.yml"
+    assert plan.planned_changes[0].action == "modify"
+    assert "AC-1" in plan.planned_changes[0].acceptance_criteria
     generate.assert_called_once()
 
 

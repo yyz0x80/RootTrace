@@ -8,7 +8,10 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
+from pathlib import PurePosixPath
+
 from patchpilot.issue.schema import NormalizedIssue
+from patchpilot.planning.post_processor import post_process_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_acceptance_coverage
@@ -29,6 +32,30 @@ IGNORED_DIRS = {
 }
 
 MAX_PLAN_REPAIR_RESPONSE_CHARS = 5_000
+
+
+def _is_test_file(path: str) -> bool:
+    """Determine if a path refers to a test file.
+
+    Args:
+        path: File path to check.
+
+    Returns:
+        True if the path is a test file, False otherwise.
+    """
+    normalized = str(PurePosixPath(path))
+    parts = normalized.split("/")
+
+    # Check if file is in a tests/ directory
+    if "tests" in parts:
+        return True
+
+    # Check if filename starts with test_
+    filename = parts[-1] if parts else ""
+    if filename.startswith("test_") and filename.endswith(".py"):
+        return True
+
+    return False
 
 
 class PlanGenerationError(ValueError):
@@ -210,11 +237,13 @@ def _generate_plan_with_repair(
     prompt: str,
     generate: Callable[[str], str],
     base_commit: str,
+    repository_context: RepositoryContext,
 ) -> ChangePlan:
     """Generate a plan and retry once with precise validation feedback."""
     response = generate(prompt)
     try:
         plan = _parse_plan_response(response, base_commit)
+        plan = post_process_plan(plan, issue, repository_context)
         _validate_generated_plan_coverage(plan, issue)
         return plan
     except ValueError as error:
@@ -228,6 +257,13 @@ def _generate_plan_with_repair(
             repaired_plan = _parse_plan_response(
                 repaired_response,
                 base_commit,
+            )
+            # Skip AC validation on repair to allow scope gate to check violations first
+            repaired_plan = post_process_plan(
+                repaired_plan,
+                issue,
+                repository_context,
+                skip_ac_validation=True,
             )
             _validate_generated_plan_coverage(repaired_plan, issue)
             return repaired_plan
@@ -274,6 +310,7 @@ def create_plan(
         prompt=prompt,
         generate=generate,
         base_commit=repository_context.base_commit,
+        repository_context=repository_context,
     )
 
 
@@ -298,8 +335,26 @@ def create_plan_with_path(
         Structured change plan with files, changes, tests, and risk assessment.
     """
     repository_files = get_repository_files(repo_path)
+
+    # Create a minimal RepositoryContext for post-processing
+    repository_context = RepositoryContext(
+        base_commit=base_commit,
+        tracked_files=repository_files,
+        python_files=[f for f in repository_files if f.endswith(".py")],
+        test_files=[f for f in repository_files if _is_test_file(f)],
+        config_files=[],
+        keyword_matches=[],
+    )
+
     repository_context_json = json.dumps(
-        {"tracked_files": repository_files}, indent=2
+        {
+            "tracked_files": repository_context.tracked_files,
+            "python_files": repository_context.python_files,
+            "test_files": repository_context.test_files,
+            "config_files": repository_context.config_files,
+            "keyword_matches": repository_context.keyword_matches,
+        },
+        indent=2,
     )
 
     prompt = PLANNER_PROMPT.format(
@@ -312,4 +367,5 @@ def create_plan_with_path(
         prompt=prompt,
         generate=generate,
         base_commit=base_commit,
+        repository_context=repository_context,
     )
