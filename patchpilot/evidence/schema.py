@@ -20,8 +20,8 @@ class CompletionState(str, Enum):
     1. NEEDS_CLARIFICATION - Issue has unresolved ambiguities
     2. BLOCKED - Environment, permission, or scope issues prevent execution
     3. FAILED - Any AC is FAIL or unrecoverable code failure occurred
-    4. VERIFIED - All AC are PASS and Verifier passed
-    5. PARTIALLY_VERIFIED - Verifier passed but some AC are UNVERIFIED
+    4. VERIFIED - Deterministic verification passed
+    5. PARTIALLY_VERIFIED - Deterministic verification did not fully pass
     """
 
     VERIFIED = "VERIFIED"

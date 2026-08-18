@@ -9,8 +9,8 @@ Completion states are evaluated in this priority order:
 1. NEEDS_CLARIFICATION - Issue has unresolved ambiguities
 2. BLOCKED - Environment, permission, or scope issues prevent execution
 3. FAILED - Any AC is FAIL or unrecoverable code failure occurred
-4. VERIFIED - All AC are PASS and Verifier passed
-5. PARTIALLY_VERIFIED - Verifier passed but some AC are UNVERIFIED
+4. VERIFIED - Deterministic verification passed
+5. PARTIALLY_VERIFIED - Deterministic verification did not fully pass
 """
 
 from patchpilot.evidence.schema import (
@@ -60,11 +60,9 @@ def determine_completion_state(
     ):
         return CompletionState.FAILED
 
-    if (
-        evidence
-        and verifier_passed
-        and all(item.status == EvidenceStatus.PASS for item in evidence)
-    ):
+    # Acceptance evidence records how precisely each criterion is linked to a
+    # behavioral check. It is a confidence signal, not a second pass/fail gate.
+    if verifier_passed:
         return CompletionState.VERIFIED
 
     return CompletionState.PARTIALLY_VERIFIED

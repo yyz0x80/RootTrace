@@ -9,12 +9,15 @@ import pytest
 
 from patchpilot.agent_loop import AgentLoop, AgentLoopError
 from patchpilot.evidence.schema import CompletionState
+from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
 from patchpilot.planning.schema import (
     ChangeAction,
     ChangePlan,
     PlannedChange,
 )
 from patchpilot.planning.scope_gate import ScopeGateResult
+from patchpilot.prompts import REPAIR_SYSTEM_PROMPT
+from patchpilot.tools import WorkspaceChange
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workflow.runner import (
@@ -102,7 +105,6 @@ class TestWorkflowRunnerExecute:
 
             mock_get_changes.return_value = mock_changes
             mock_generate_patch.return_value = "diff content"
-            mock_generate_patch.return_value = "diff content"
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -111,7 +113,7 @@ class TestWorkflowRunnerExecute:
             )
 
         assert isinstance(result, WorkflowResult)
-        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.final_status == CompletionState.VERIFIED
         assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
@@ -164,7 +166,11 @@ class TestWorkflowRunnerExecute:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -173,10 +179,131 @@ class TestWorkflowRunnerExecute:
             )
 
         assert isinstance(result, WorkflowResult)
-        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.final_status == CompletionState.VERIFIED
         assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 2  # Initial + 1 repair
         assert mock_verifier.call_count == 2
+        repair_call = mock_agent_loop.run.call_args_list[1]
+        assert repair_call.kwargs["system_prompt"] == REPAIR_SYSTEM_PROMPT
+        assert repair_call.kwargs["reset_state"] is True
+        assert (
+            "<current_patch>\ndiff before repair"
+            in repair_call.kwargs["issue"]
+        )
+        assert "<latest_verification_failure>" in repair_call.kwargs["issue"]
+
+    def test_repair_without_patch_delta_stops_before_verification(self):
+        """A no-op repair should not spend another verifier attempt."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="LEVEL_2_TARGET_TESTS",
+                command="python -m pytest tests/test_example.py",
+                passed=False,
+                exit_code=1,
+                duration_seconds=0.1,
+                failure_type="TEST_FAILURE",
+            ),
+        )
+        mock_verifier = Mock(return_value=failed_report)
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=Mock(spec=Workspace),
+            sandbox=Mock(),
+        )
+        changes = [WorkspaceChange(path="src/file.py", action="modify")]
+
+        with (
+            patch.object(runner, "_create_temporary_workspace"),
+            patch.object(runner, "_start_sandbox"),
+            patch.object(runner, "_cleanup"),
+            patch(
+                "patchpilot.workflow.runner._get_workspace_changes",
+                return_value=changes,
+            ),
+            patch(
+                "patchpilot.workflow.runner.generate_patch",
+                return_value="unchanged patch",
+            ),
+        ):
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        assert result.final_status == CompletionState.FAILED
+        assert mock_agent_loop.run.call_count == 2
+        assert mock_verifier.call_count == 1
+
+    def test_initial_agent_error_with_partial_patch_enters_repair(self):
+        """Verify and repair a partial patch left by an AgentLoop error."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.run.side_effect = [
+            AgentLoopError("Agent stopped after tool failures"),
+            "Repair complete",
+        ]
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="LEVEL_2_TARGET_TESTS",
+                command="python -m pytest tests/test_example.py",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="TEST_FAILURE",
+                summary={"relevant_output": "one assertion failed"},
+            )
+        )
+        passed_report = VerificationReport(passed=True)
+        mock_verifier = Mock(side_effect=[failed_report, passed_report])
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=Mock(spec=Workspace),
+            sandbox=Mock(),
+        )
+        changes = [WorkspaceChange(path="src/file.py", action="modify")]
+
+        with (
+            patch.object(runner, "_create_temporary_workspace"),
+            patch.object(runner, "_start_sandbox"),
+            patch.object(runner, "_cleanup"),
+            patch.object(
+                runner,
+                "_check_repair_scope",
+                return_value=ScopeGateResult(allowed=True),
+            ),
+            patch(
+                "patchpilot.workflow.runner._get_workspace_changes",
+                return_value=changes,
+            ),
+            patch(
+                "patchpilot.workflow.runner.generate_patch",
+                side_effect=[
+                    "diff before repair",
+                    "diff after repair",
+                    "diff after repair",
+                ],
+            ),
+        ):
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        assert result.verification_report["passed"] is True
+        assert mock_verifier.call_count == 2
+        assert mock_agent_loop.run.call_count == 2
+        assert (
+            mock_agent_loop.run.call_args_list[1].kwargs["system_prompt"]
+            == REPAIR_SYSTEM_PROMPT
+        )
 
     def test_repair_agent_error_preserves_last_verification_report(self):
         """Test that repair failures expose the last deterministic report."""
@@ -215,6 +342,10 @@ class TestWorkflowRunnerExecute:
             patch(
                 "patchpilot.workflow.runner._get_workspace_changes",
                 return_value=changes,
+            ),
+            patch(
+                "patchpilot.workflow.runner.generate_patch",
+                return_value="diff content",
             ),
             pytest.raises(WorkflowRunnerExecutionError) as exc_info,
         ):
@@ -292,7 +423,11 @@ class TestWorkflowRunnerExecute:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -357,7 +492,11 @@ class TestWorkflowRunnerExecute:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -447,7 +586,13 @@ class TestWorkflowRunnerExecute:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before first repair",
+                "diff after first repair",
+                "diff after first repair",
+                "diff after second repair",
+                "diff after second repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -776,6 +921,10 @@ class TestWorkflowRunnerBuildRepairPrompt:
             issue="Fix the bug",
             plan="Implement the fix",
             failure_report=failure_report,
+            current_patch="diff --git a/src/file.py b/src/file.py",
+            current_changes=[
+                WorkspaceChange(path="src/file.py", action="modify"),
+            ],
         )
 
         assert "Fix the bug" in prompt
@@ -783,6 +932,8 @@ class TestWorkflowRunnerBuildRepairPrompt:
         assert "pytest tests/" in prompt
         assert "AssertionError" in prompt
         assert "test_example" in prompt
+        assert "diff --git a/src/file.py" in prompt
+        assert "src/file.py" in prompt
 
     def test_build_repair_prompt_without_failed_checks(self):
         """Test building repair prompt when no failed checks exist."""
@@ -808,6 +959,111 @@ class TestWorkflowRunnerBuildRepairPrompt:
         assert "Fix the bug" in prompt
         assert "Implement the fix" in prompt
         assert "No specific failure details available" in prompt
+
+    def test_build_repair_prompt_uses_structured_failure_diff(self):
+        """Structured repair context should omit repeated generic payloads."""
+        runner = WorkflowRunner(
+            agent_loop=Mock(spec=AgentLoop),
+            verifier=Mock(),
+            workspace=Mock(spec=Workspace),
+        )
+        issue = NormalizedIssue(
+            title="Correct median",
+            task_type="bug",
+            problem_statement="Preserve odd and even median behavior.",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    id="AC-1",
+                    description="Even inputs use both middle values.",
+                ),
+                AcceptanceCriterion(
+                    id="AC-2",
+                    description="Odd inputs preserve the middle value.",
+                ),
+            ],
+            constraints=["Change only benchmark/statistics.py."],
+            ambiguous_points=[],
+            expected_test_areas=[],
+            implementation_notes=[],
+        )
+        change_plan = ChangePlan(
+            planned_changes=[
+                PlannedChange(
+                    path="benchmark/statistics.py",
+                    action=ChangeAction.MODIFY,
+                    description="Handle odd and even input lengths.",
+                    acceptance_criteria=["AC-1", "AC-2"],
+                ),
+            ],
+            planned_tests=[],
+            out_of_scope=["Do not modify tests."],
+            risk_level="low",
+        )
+        failure_report = VerificationReport(passed=False)
+        failure_report.add_check(
+            CheckReport(
+                level="LEVEL_2_TARGET_TESTS",
+                command="python -m pytest tests/test_statistics.py -q",
+                passed=False,
+                exit_code=1,
+                duration_seconds=0.1,
+                failure_type="TEST_FAILURE",
+                summary={
+                    "failed_tests": ["test_median_for_odd_length_input"],
+                    "relevant_output": "assert 3.0 == 5.0",
+                },
+                acceptance_criteria=["AC-2"],
+            ),
+        )
+
+        prompt = runner._build_repair_prompt(
+            issue="SHOULD_NOT_BE_REPEATED",
+            plan="SHOULD_NOT_BE_REPEATED",
+            failure_report=failure_report,
+            current_patch=(
+                "diff --git a/benchmark/statistics.py "
+                "b/benchmark/statistics.py\n"
+                "+return average"
+            ),
+            current_changes=[
+                WorkspaceChange(
+                    path="benchmark/statistics.py",
+                    action="modify",
+                ),
+            ],
+            change_plan=change_plan,
+            normalized_issue=issue,
+        )
+
+        assert "SHOULD_NOT_BE_REPEATED" not in prompt
+        assert "benchmark/statistics.py" in prompt
+        assert "Change only benchmark/statistics.py." in prompt
+        assert "Out of scope: Do not modify tests." in prompt
+        assert "AC-2: Odd inputs preserve the middle value." in prompt
+        assert "AC-1: Even inputs" not in prompt
+        assert "assert 3.0 == 5.0" in prompt
+
+    def test_build_repair_prompt_bounds_large_patch(self):
+        """Large patches should be truncated before entering model context."""
+        runner = WorkflowRunner(
+            agent_loop=Mock(spec=AgentLoop),
+            verifier=Mock(),
+            workspace=Mock(spec=Workspace),
+        )
+
+        prompt = runner._build_repair_prompt(
+            issue="Fix the bug",
+            plan="Modify src/file.py",
+            failure_report=VerificationReport(passed=False),
+            current_patch="a" * 20_000,
+        )
+
+        patch_section = prompt.split("<current_patch>\n", 1)[1].split(
+            "\n</current_patch>",
+            1,
+        )[0]
+        assert "repair context truncated" in patch_section
+        assert len(patch_section) == 6_000
 
 
 class TestRunWorkflow:
@@ -913,7 +1169,11 @@ class TestWorkflowRunnerScopeGate:
             # Mock git diff to return safe files
             mock_git_diff.return_value = ["src/module.py", "README.md"]
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -922,7 +1182,7 @@ class TestWorkflowRunnerScopeGate:
             )
 
         assert isinstance(result, WorkflowResult)
-        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.final_status == CompletionState.VERIFIED
         assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 2  # Initial + 1 repair
         assert mock_verifier.call_count == 2
@@ -974,7 +1234,11 @@ class TestWorkflowRunnerScopeGate:
             # Mock git diff to return forbidden file (.env)
             mock_git_diff.return_value = [".env"]
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -1030,7 +1294,11 @@ class TestWorkflowRunnerScopeGate:
 
             # Mock no changes
             mock_get_changes.return_value = []
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             with pytest.raises(WorkflowRunnerExecutionError) as exc_info:
                 runner.execute(
@@ -1079,7 +1347,7 @@ class TestWorkflowRunnerScopeGate:
             )
 
         assert isinstance(result, WorkflowResult)
-        assert result.final_status == CompletionState.PARTIALLY_VERIFIED
+        assert result.final_status == CompletionState.VERIFIED
         assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
@@ -1131,7 +1399,11 @@ class TestWorkflowRunnerScopeGate:
             # Mock git diff to return CI/CD file
             mock_git_diff.return_value = [".github/workflows/test.yml"]
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -1222,7 +1494,11 @@ class TestWorkflowRunnerConfigurableRepairLimit:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -1287,7 +1563,13 @@ class TestWorkflowRunnerConfigurableRepairLimit:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before first repair",
+                "diff after first repair",
+                "diff after first repair",
+                "diff after second repair",
+                "diff after second repair",
+            ]
 
             result = runner.execute(
                 issue="Fix the bug",

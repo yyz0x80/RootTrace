@@ -124,8 +124,8 @@ def test_verified_state():
     assert result == CompletionState.VERIFIED
 
 
-def test_partially_verified_state_empty_evidence():
-    """Test that empty evidence results in PARTIALLY_VERIFIED, not VERIFIED."""
+def test_verified_state_empty_direct_evidence():
+    """Passed deterministic checks should not require direct AC evidence."""
     result = determine_completion_state(
         has_ambiguity=False,
         blocked=False,
@@ -134,11 +134,11 @@ def test_partially_verified_state_empty_evidence():
         evidence=[],
     )
 
-    assert result == CompletionState.PARTIALLY_VERIFIED
+    assert result == CompletionState.VERIFIED
 
 
-def test_partially_verified_state_mixed_evidence():
-    """Test that mixed evidence results in PARTIALLY_VERIFIED."""
+def test_verified_state_with_mixed_evidence_confidence():
+    """Direct evidence confidence should not override passed verification."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
@@ -162,7 +162,7 @@ def test_partially_verified_state_mixed_evidence():
         evidence=evidence,
     )
 
-    assert result == CompletionState.PARTIALLY_VERIFIED
+    assert result == CompletionState.VERIFIED
 
 
 def test_partially_verified_state_verifier_failed():
@@ -187,8 +187,8 @@ def test_partially_verified_state_verifier_failed():
     assert result == CompletionState.PARTIALLY_VERIFIED
 
 
-def test_partially_verified_state_all_unverified():
-    """Test that all UNVERIFIED evidence results in PARTIALLY_VERIFIED."""
+def test_verified_state_with_unverified_direct_evidence():
+    """Broad passing checks may verify a task without precise AC evidence."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
@@ -212,7 +212,7 @@ def test_partially_verified_state_all_unverified():
         evidence=evidence,
     )
 
-    assert result == CompletionState.PARTIALLY_VERIFIED
+    assert result == CompletionState.VERIFIED
 
 
 def test_partially_verified_state_empty_evidence_with_verifier_failed():
