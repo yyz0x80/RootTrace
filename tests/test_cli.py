@@ -59,13 +59,21 @@ def test_failed_run_summary_records_agent_failure(tmp_path: Path) -> None:
         final_status="FAILED",
         failure_type="AGENT_ROUND_LIMIT",
         error_message="Agent exceeded the round limit",
+        verification_report={"passed": False, "retry_count": 1},
     )
 
     summary = json.loads((tmp_path / "run_summary.json").read_text())
     assert summary["final_status"] == "FAILED"
     assert summary["failure_type"] == "AGENT_ROUND_LIMIT"
     assert summary["error_message"] == "Agent exceeded the round limit"
-    assert summary["artifacts"] == {}
+    assert summary["retry_count"] == 1
+    assert summary["artifacts"] == {
+        "verification_report": str(tmp_path / "verification_report.json")
+    }
+    report = json.loads(
+        (tmp_path / "verification_report.json").read_text()
+    )
+    assert report == {"passed": False, "retry_count": 1}
 
 
 @patch("patchpilot.cli.load_issue")

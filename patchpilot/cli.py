@@ -42,7 +42,11 @@ from patchpilot.workflow import (
 )
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.result import PrepareSummary, RunSummary
-from patchpilot.workflow.runner import WorkflowRunner, WorkflowRunnerError
+from patchpilot.workflow.runner import (
+    WorkflowRunner,
+    WorkflowRunnerError,
+    WorkflowRunnerExecutionError,
+)
 from patchpilot.workspace import Workspace
 
 
@@ -162,10 +166,27 @@ def _save_failed_run_summary(
     final_status: str,
     failure_type: str,
     error_message: str,
+    verification_report: dict[str, object] | None = None,
 ) -> None:
     """Persist a terminal execute result when the workflow raises an error."""
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if verification_report is not None:
+        save_json(
+            str(output_dir / "verification_report.json"),
+            json.dumps(verification_report, indent=2),
+        )
+    reported_retry_count = (
+        verification_report.get("retry_count", 0)
+        if verification_report is not None
+        else 0
+    )
+    retry_count = (
+        reported_retry_count
+        if isinstance(reported_retry_count, int)
+        and reported_retry_count >= 0
+        else 0
+    )
     usage = _provider_usage(provider) if provider is not None else ProviderUsageSnapshot(
         model=args.model or "",
         llm_call_count=0,
@@ -180,7 +201,7 @@ def _save_failed_run_summary(
         model=usage.model,
         max_rounds=args.max_rounds,
         max_repairs=args.max_repairs,
-        retry_count=0,
+        retry_count=retry_count,
         final_status=final_status,
         exit_code=1,
         duration_seconds=time.monotonic() - started,
@@ -1121,6 +1142,19 @@ def handle_execute(args) -> None:
             error_message=str(e),
         )
         print(f"Agent error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except WorkflowRunnerExecutionError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type=e.failure_type,
+            error_message=str(e),
+            verification_report=e.verification_report,
+        )
+        print(f"Workflow execution error: {e}", file=sys.stderr)
         sys.exit(1)
     except WorkflowRunnerError as e:
         _save_failed_run_summary(

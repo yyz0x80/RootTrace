@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from patchpilot.agent_loop import AgentLoop
+from patchpilot.agent_loop import AgentLoop, AgentLoopError
 from patchpilot.evidence.schema import CompletionState
 from patchpilot.planning.schema import (
     ChangeAction,
@@ -177,6 +177,57 @@ class TestWorkflowRunnerExecute:
         assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 2  # Initial + 1 repair
         assert mock_verifier.call_count == 2
+
+    def test_repair_agent_error_preserves_last_verification_report(self):
+        """Test that repair failures expose the last deterministic report."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.run.side_effect = [
+            "Initial implementation complete",
+            AgentLoopError("Repair agent stopped"),
+        ]
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                level="LEVEL_2_TARGET_TESTS",
+                command="python -m pytest tests/test_example.py",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="TEST_FAILURE",
+            )
+        )
+        mock_verifier = Mock(return_value=failed_report)
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=Mock(spec=Workspace),
+            sandbox=Mock(),
+        )
+
+        from patchpilot.tools import WorkspaceChange
+
+        changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        with (
+            patch.object(runner, "_create_temporary_workspace"),
+            patch.object(runner, "_start_sandbox"),
+            patch.object(runner, "_cleanup"),
+            patch(
+                "patchpilot.workflow.runner._get_workspace_changes",
+                return_value=changes,
+            ),
+            pytest.raises(WorkflowRunnerExecutionError) as exc_info,
+        ):
+            runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        error = exc_info.value
+        assert error.failure_type == "AGENT_ERROR"
+        assert error.verification_report == failed_report.to_dict()
+        assert error.verification_report["retry_count"] == 1
 
     def test_execute_unrecoverable_failure_stops_after_detection(self):
         """Test that unrecoverable failures stop the repair loop after detection."""

@@ -30,7 +30,12 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from patchpilot.agent_loop import AgentLoop, AgentLoopError, ExecuteLogCallback
+from patchpilot.agent_loop import (
+    AgentLoop,
+    AgentLoopError,
+    AgentLoopLimitError,
+    ExecuteLogCallback,
+)
 from patchpilot.evidence.schema import CompletionState
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan, PlannedChange
@@ -326,6 +331,18 @@ class WorkflowRunnerSetupError(WorkflowRunnerError):
 class WorkflowRunnerExecutionError(WorkflowRunnerError):
     """Raised when workflow execution fails (e.g., agent errors, verification failures)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        verification_report: dict[str, Any] | None = None,
+        failure_type: str = "WORKFLOW_ERROR",
+    ) -> None:
+        """Initialize an execution error with optional partial artifacts."""
+        super().__init__(message)
+        self.verification_report = verification_report
+        self.failure_type = failure_type
+
 
 class WorkflowRunner:
     """Orchestrate the complete PatchPilot workflow from issue to verified patch.
@@ -571,6 +588,7 @@ class WorkflowRunner:
         # Step 6: Start Docker Sandbox
         self._start_sandbox(workspace_path)
 
+        report: VerificationReport | None = None
         try:
             # Step 7: Verify the sandbox baseline before model execution.
             # The injected callback is retained as a legacy test/custom seam.
@@ -889,6 +907,18 @@ class WorkflowRunner:
             # Return the final workflow result.
             return result
 
+        except AgentLoopError as error:
+            if report is None:
+                raise
+            raise WorkflowRunnerExecutionError(
+                str(error),
+                verification_report=report.to_dict(),
+                failure_type=(
+                    "AGENT_ROUND_LIMIT"
+                    if isinstance(error, AgentLoopLimitError)
+                    else "AGENT_ERROR"
+                ),
+            ) from error
         finally:
             # Cleanup: Stop sandbox and remove temporary directory
             self._cleanup()
