@@ -49,7 +49,7 @@ TOOL USAGE GUIDELINES:
   Never send empty old_text or new_text merely to satisfy the tool schema.
 - Do not copy displayed line-number prefixes into old_text.
 - Multiline Python replacements inherit the surrounding block indentation.
-- Use apply_patch only for planned file creation or when a focused replacement
+- Use write_file only for planned file creation or when a focused replacement
   cannot express the change. It writes the complete file content.
 - Prefer one coherent edit over several overlapping edit attempts.
 - Read the file again after an edit when the returned diff is not sufficient to

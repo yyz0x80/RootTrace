@@ -420,7 +420,7 @@ def audit_tool_permission(
         path = tool_arguments.get("path", "")
         return auditor.check_read_permission(path)
 
-    if tool_name in ("edit_file", "edit_file_by_line", "insert_text", "apply_patch"):
+    if tool_name in ("edit_file", "edit_file_by_line", "insert_text", "write_file"):
         path = tool_arguments.get("path", "")
         return auditor.check_write_permission(path)
 

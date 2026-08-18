@@ -10,7 +10,7 @@ Available tools:
 - search_code: Search for code patterns using ripgrep
 - read_file: Read file content with optional line ranges
 - edit_file: Edit files using exact text replacement
-- apply_patch: Write complete file content when exact replacement is unsuitable
+- write_file: Write complete file content when exact replacement is unsuitable
 - run_command: Execute allowed commands in the workspace
 
 The model-facing ACI intentionally exposes only two editing tools. Specialized
@@ -432,8 +432,8 @@ class InsertTextInput(ToolInput):
 
 
 @dataclass
-class ApplyPatchInput(ToolInput):
-    """Input for apply_patch tool"""
+class WriteFileInput(ToolInput):
+    """Input for write_file tool"""
     description: ClassVar[str] = (
         "Write the complete content of one file and return a unified diff. Use "
         "this for planned file creation or when a change cannot be expressed as "
@@ -647,9 +647,9 @@ class ToolRegistry:
             handler=self.edit_file,
         )
         self.register_tool(
-            name="apply_patch",
-            input_class=ApplyPatchInput,
-            handler=self.apply_patch,
+            name="write_file",
+            input_class=WriteFileInput,
+            handler=self.write_file,
         )
         self.register_tool(
             name="run_command",
@@ -929,7 +929,7 @@ class ToolRegistry:
                     "EDIT_REJECTED: old_text is empty or whitespace-only; it "
                     "must contain existing file text. "
                     "Re-read the file with raw=True and choose a unique anchor. "
-                    "Use apply_patch only when the plan creates a file or a "
+                    "Use write_file only when the plan creates a file or a "
                     "small replacement cannot express the change."
                 ),
             )
@@ -1515,9 +1515,9 @@ class ToolRegistry:
         except OSError as e:
             return ToolResult(ok=False, content=f"Insert failed: {e}")
 
-    def apply_patch(self, arguments: dict[str, Any]) -> ToolResult:
+    def write_file(self, arguments: dict[str, Any]) -> ToolResult:
         """
-        Apply a patch to a file. Creates the file if it doesn't exist.
+        Write complete file content. Creates the file if it doesn't exist.
 
         Args:
             arguments: Dict with 'path', 'content', and optional 'preview' (default False)
@@ -1527,7 +1527,7 @@ class ToolRegistry:
             If preview=True, shows change without applying.
         """
         try:
-            input_data = ApplyPatchInput(**arguments)
+            input_data = WriteFileInput(**arguments)
         except (TypeError, ValueError) as e:
             return ToolResult(ok=False, content=f"Invalid input: {e}")
 

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FAILURE_SUMMARY_CHARS = 500
 DEFAULT_EMPTY_RESPONSE_RETRIES = 2
-EDIT_TOOL_NAMES = frozenset({"edit_file", "apply_patch"})
+EDIT_TOOL_NAMES = frozenset({"edit_file", "write_file"})
 SENSITIVE_VALUE_PATTERN = re.compile(
     r"(?i)\b([a-z0-9_]*(?:api[_-]?key|token|password|secret))\b"
     r"(\s*[:=]\s*)([^\s,;]+)"

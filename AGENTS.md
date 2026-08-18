@@ -144,7 +144,7 @@ Initial tools:
 * `search_code`
 * `read_file`
 * `edit_file`
-* `apply_patch`
+* `write_file`
 * `run_command`
 
 ### Workspace Policy

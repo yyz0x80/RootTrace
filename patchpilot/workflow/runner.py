@@ -246,7 +246,7 @@ class WorkflowExecuteLogCallback(ExecuteLogCallback):
     _MUTATING_TOOLS: ClassVar[set[str]] = {
         "edit_file",
         "edit_file_by_line",
-        "apply_patch",
+        "write_file",
     }
 
     def __init__(self, trace_writer: TraceWriter, run_id: str) -> None:

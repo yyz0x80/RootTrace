@@ -8,7 +8,6 @@ import pytest
 
 from patchpilot.models import ToolFailureType, ToolResult
 from patchpilot.tools import (
-    ApplyPatchInput,
     EditFileInput,
     InsertTextInput,
     ReadFileInput,
@@ -17,6 +16,7 @@ from patchpilot.tools import (
     ToolDefinition,
     ToolRegistry,
     WorkspaceChange,
+    WriteFileInput,
     _get_workspace_changes,
     generate_json_schema,
     generate_patch,
@@ -547,7 +547,7 @@ class TestEditFile:
         assert not result.ok
         assert "old_text is empty" in result.content
         assert "raw=True" in result.content
-        assert "apply_patch" in result.content
+        assert "write_file" in result.content
 
     def test_edit_file_whitespace_only_old_text_error(self, tool_registry, temp_workspace):
         """Test error message when old_text contains only whitespace"""
@@ -561,7 +561,7 @@ class TestEditFile:
         })
         assert not result.ok
         assert "old_text is empty" in result.content
-        assert "apply_patch" in result.content
+        assert "write_file" in result.content
 
     def test_edit_file_line_prefix_error_with_example(self, tool_registry, temp_workspace):
         """Test error message with specific example when line prefixes are detected"""
@@ -1175,12 +1175,12 @@ class TestInsertText:
         assert "Modifying CI/CD workflows is not allowed" in result.content
 
 
-class TestApplyPatch:
-    """Tests for apply_patch tool"""
+class TestWriteFile:
+    """Tests for write_file tool"""
 
-    def test_apply_patch_create_file(self, tool_registry, temp_workspace):
-        """Test creating a new file with apply_patch"""
-        result = tool_registry.apply_patch({
+    def test_write_file_create_file(self, tool_registry, temp_workspace):
+        """Test creating a new file with write_file"""
+        result = tool_registry.write_file({
             "path": "new_file.py",
             "content": "def new_function():\n    pass\n"
         })
@@ -1192,12 +1192,12 @@ class TestApplyPatch:
         assert new_file.exists()
         assert new_file.read_text() == "def new_function():\n    pass\n"
 
-    def test_apply_patch_modify_existing_file(self, tool_registry, temp_workspace):
-        """Test modifying an existing file with apply_patch"""
+    def test_write_file_modify_existing_file(self, tool_registry, temp_workspace):
+        """Test modifying an existing file with write_file"""
         test_file = temp_workspace.root / "test.py"
         test_file.write_text("old_value = 1\n")
 
-        result = tool_registry.apply_patch({
+        result = tool_registry.write_file({
             "path": "test.py",
             "content": "new_value = 2\n"
         })
@@ -1208,21 +1208,21 @@ class TestApplyPatch:
         updated_content = test_file.read_text()
         assert updated_content == "new_value = 2\n"
 
-    def test_apply_patch_with_diff(self, tool_registry, temp_workspace):
-        """Test that apply_patch returns proper diff for modifications"""
+    def test_write_file_with_diff(self, tool_registry, temp_workspace):
+        """Test that write_file returns proper diff for modifications"""
         test_file = temp_workspace.root / "test.py"
         test_file.write_text("line1\nline2\nline3\n")
 
-        result = tool_registry.apply_patch({
+        result = tool_registry.write_file({
             "path": "test.py",
             "content": "line1\nline2_modified\nline3\n"
         })
         assert result.ok
         assert "---" in result.content or "+++" in result.content
 
-    def test_apply_patch_create_in_subdirectory(self, tool_registry, temp_workspace):
+    def test_write_file_create_in_subdirectory(self, tool_registry, temp_workspace):
         """Test creating a file in a subdirectory"""
-        result = tool_registry.apply_patch({
+        result = tool_registry.write_file({
             "path": "subdir/new_file.py",
             "content": "def func():\n    pass\n"
         })
@@ -1234,75 +1234,75 @@ class TestApplyPatch:
         assert new_file.exists()
         assert new_file.parent.exists()
 
-    def test_apply_patch_env_rejected(self, tool_registry, temp_workspace):
-        """Test that applying patch to .env is rejected"""
-        result = tool_registry.apply_patch({
+    def test_write_file_env_rejected(self, tool_registry, temp_workspace):
+        """Test that writing to .env is rejected"""
+        result = tool_registry.write_file({
             "path": ".env",
             "content": "KEY=value\n"
         })
         assert not result.ok
         assert "rejected" in result.content
 
-    def test_apply_patch_git_rejected(self, tool_registry, temp_workspace):
-        """Test that applying patch to .git directory is rejected"""
-        result = tool_registry.apply_patch({
+    def test_write_file_git_rejected(self, tool_registry, temp_workspace):
+        """Test that writing to .git directory is rejected"""
+        result = tool_registry.write_file({
             "path": ".git/config",
             "content": "[core]\n"
         })
         assert not result.ok
         assert "rejected" in result.content
 
-    def test_apply_patch_tests_rejected(self, tool_registry, temp_workspace):
-        """Test that applying patch to test files is rejected"""
+    def test_write_file_tests_rejected(self, tool_registry, temp_workspace):
+        """Test that writing to test files is rejected"""
         tests_dir = temp_workspace.root / "tests"
         tests_dir.mkdir()
 
-        result = tool_registry.apply_patch({
+        result = tool_registry.write_file({
             "path": "tests/test_example.py",
             "content": "def test_new():\n    pass\n"
         })
         assert not result.ok
         assert "Modifying test files is not allowed" in result.content
 
-    def test_apply_patch_test_prefix_rejected(self, tool_registry, temp_workspace):
-        """Test that applying patch to test_*.py files is rejected"""
-        result = tool_registry.apply_patch({
+    def test_write_file_test_prefix_rejected(self, tool_registry, temp_workspace):
+        """Test that writing to test_*.py files is rejected"""
+        result = tool_registry.write_file({
             "path": "test_main.py",
             "content": "def test_new():\n    pass\n"
         })
         assert not result.ok
         assert "Modifying test files is not allowed" in result.content
 
-    def test_apply_patch_github_workflows_rejected(self, tool_registry, temp_workspace):
-        """Test that applying patch to .github/workflows is rejected"""
-        result = tool_registry.apply_patch({
+    def test_write_file_github_workflows_rejected(self, tool_registry, temp_workspace):
+        """Test that writing to .github/workflows is rejected"""
+        result = tool_registry.write_file({
             "path": ".github/workflows/ci.yml",
             "content": "name: CI\n"
         })
         assert not result.ok
         assert "Modifying CI/CD workflows is not allowed" in result.content
 
-    def test_apply_patch_outside_workspace(self, tool_registry):
-        """Test that applying patch outside workspace is rejected"""
-        result = tool_registry.apply_patch({
+    def test_write_file_outside_workspace(self, tool_registry):
+        """Test that writing outside workspace is rejected"""
+        result = tool_registry.write_file({
             "path": "/etc/passwd",
             "content": "malicious content"
         })
         assert not result.ok
         assert "Path error" in result.content
 
-    def test_apply_patch_invalid_input(self, tool_registry):
-        """Test apply_patch with invalid input"""
-        result = tool_registry.apply_patch({"path": 123, "content": "test"})
+    def test_write_file_invalid_input(self, tool_registry):
+        """Test write_file with invalid input"""
+        result = tool_registry.write_file({"path": 123, "content": "test"})
         assert not result.ok
         assert "Invalid input" in result.content
 
-    def test_apply_patch_empty_content(self, tool_registry, temp_workspace):
-        """Test applying patch with empty content (file clearing scenario)"""
+    def test_write_file_empty_content(self, tool_registry, temp_workspace):
+        """Test writing with empty content (file clearing scenario)"""
         test_file = temp_workspace.root / "test.py"
         test_file.write_text("original content\n")
 
-        result = tool_registry.apply_patch({
+        result = tool_registry.write_file({
             "path": "test.py",
             "content": "# Empty file with comment\n"
         })
@@ -1312,13 +1312,13 @@ class TestApplyPatch:
         updated_content = test_file.read_text()
         assert updated_content == "# Empty file with comment\n"
 
-    def test_apply_patch_preview_mode(self, tool_registry, temp_workspace):
-        """Test apply_patch in preview mode (no changes applied)"""
+    def test_write_file_preview_mode(self, tool_registry, temp_workspace):
+        """Test write_file in preview mode (no changes applied)"""
         test_file = temp_workspace.root / "test.py"
         original_content = "original content\n"
         test_file.write_text(original_content)
 
-        result = tool_registry.apply_patch({
+        result = tool_registry.write_file({
             "path": "test.py",
             "content": "new content\n",
             "preview": True
@@ -1652,9 +1652,9 @@ class TestToolSchema:
         assert "exactly" in schema["properties"]["old_text"]["description"]
         assert "Replacement text" in schema["properties"]["new_text"]["description"]
 
-    def test_generate_json_schema_apply_patch(self):
-        """Test JSON schema generation for ApplyPatchInput"""
-        schema = generate_json_schema(ApplyPatchInput)
+    def test_generate_json_schema_write_file(self):
+        """Test JSON schema generation for WriteFileInput"""
+        schema = generate_json_schema(WriteFileInput)
         assert schema["type"] == "object"
         assert "properties" in schema
         assert "path" in schema["properties"]
@@ -1684,7 +1684,7 @@ class TestToolSchema:
             "search_code",
             "read_file",
             "edit_file",
-            "apply_patch",
+            "write_file",
             "run_command",
         }
         assert "insert_text" not in tool_names
