@@ -211,6 +211,9 @@ def test_main_without_ambiguous_points_proceeds(
     mock_validate_repository.assert_called_once()
     # Verify repair loop was called
     mock_run_repair_loop.assert_called_once()
+    repair_call = mock_run_repair_loop.call_args
+    assert repair_call.kwargs["max_attempts"] == 4
+    assert "repair_prompt_builder" not in repair_call.kwargs
 
 
 @patch("patchpilot.cli.load_issue")

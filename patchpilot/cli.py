@@ -26,7 +26,6 @@ from patchpilot.planning.planner import PlanGenerationError, create_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_plan
-from patchpilot.prompts import REPAIR_PROMPT
 from patchpilot.provider import LLMProvider, ToolCallParseError
 from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
@@ -809,30 +808,14 @@ def handle_run(args) -> None:
             
             return report
         
-        # Define repair prompt builder
-        def build_repair_prompt(original_issue: str, failure_report: VerificationReport) -> str:
-            """Build a repair prompt based on the failure report."""
-            failed_checks = failure_report.get_failed_checks()
-            if not failed_checks:
-                return original_issue
-            
-            latest_failure = failed_checks[-1]
-            failure_summary = latest_failure.summary or {}
-            
-            return REPAIR_PROMPT.format(
-                issue=original_issue,
-                plan=plan.model_dump_json(indent=2),
-                failure=failure_summary.get("relevant_output", "Unknown failure"),
-            )
-        
         # Run the repair loop with the plan
         try:
             result, verification_report = run_repair_loop(
                 agent_loop=agent_loop,
                 issue=plan.model_dump_json(indent=2),
-                max_attempts=args.max_repairs,
+                # RepairLoop counts the initial implementation as an attempt.
+                max_attempts=args.max_repairs + 1,
                 verifier=run_verification,
-                repair_prompt_builder=build_repair_prompt,
             )
             
             # Print result

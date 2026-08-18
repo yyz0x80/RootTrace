@@ -30,6 +30,7 @@ from patchpilot.workflow.repair_loop import (
     RepairLoopError,
     RepairLoopLimitError,
     RepairLoopStalledError,
+    build_failure_repair_prompt,
     run_repair_loop,
 )
 from patchpilot.workflow.result import WorkflowResult
@@ -65,6 +66,7 @@ __all__ = [
     "WorkflowRunnerExecutionError",
     "WorkflowRunnerSetupError",
     "audit_tool_permission",
+    "build_failure_repair_prompt",
     "classify_failure",
     "determine_completion_state",
     "run_repair_loop",
