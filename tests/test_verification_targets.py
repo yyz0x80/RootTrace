@@ -57,6 +57,25 @@ def test_select_python_module_pytest_command() -> None:
     assert selection.direct_acceptance_criteria == []
 
 
+def test_file_level_test_with_single_ac_is_direct() -> None:
+    """File-level test mapped to a single AC should be considered direct evidence."""
+    plan = make_plan(
+        [
+            PlannedTest(
+                command="python -m pytest tests/test_task.py -q",
+                purpose="Verify task behavior",
+                acceptance_criteria=["AC-1"],
+            )
+        ]
+    )
+
+    selection = select_target_tests(plan)
+
+    assert selection.tests == ["tests/test_task.py"]
+    assert selection.acceptance_criteria == ["AC-1"]
+    assert selection.direct_acceptance_criteria == ["AC-1"]
+
+
 def test_ignore_ruff_planned_check() -> None:
     plan = make_plan(
         [

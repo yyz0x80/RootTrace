@@ -98,11 +98,7 @@ def select_target_tests(
             for criterion_id in planned_test.acceptance_criteria:
                 _append_unique(criterion_ids, criterion_id)
 
-        if (
-            len(planned_targets) == 1
-            and "::" in planned_targets[0]
-            and len(planned_test.acceptance_criteria) == 1
-        ):
+        if len(planned_test.acceptance_criteria) == 1:
             _append_unique(
                 direct_criterion_ids,
                 planned_test.acceptance_criteria[0],
