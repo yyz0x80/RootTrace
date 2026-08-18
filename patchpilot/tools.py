@@ -22,10 +22,11 @@ output size limits, and workspace policy enforcement.
 """
 
 import difflib
+import logging
 import shlex
 import subprocess
 import unicodedata
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, dataclass, field, fields
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
@@ -33,6 +34,8 @@ from typing import Any, ClassVar, Protocol, Union, get_type_hints
 from patchpilot.models import ToolFailureType, ToolResult
 from patchpilot.validation import run_intermediate_validation
 from patchpilot.workspace import Workspace
+
+logger = logging.getLogger(__name__)
 
 # Standard ignore patterns for temporary and compiled files
 # These patterns are applied regardless of the target repository's .gitignore
@@ -317,11 +320,37 @@ class EditFileInput(ToolInput):
         "diff. Read the file with raw=True first. old_text must be non-empty and "
         "must not include displayed line-number prefixes."
     )
-    path: str
-    old_text: str
-    new_text: str
-    context_lines: int = 0
-    preview: bool = False
+    path: str = field(
+        metadata={
+            "description": (
+                "Workspace-relative path of the existing source file to edit."
+            )
+        }
+    )
+    old_text: str = field(
+        metadata={
+            "description": (
+                "Non-empty, unique text copied exactly from read_file(raw=True). "
+                "It must already exist in the file."
+            )
+        }
+    )
+    new_text: str = field(
+        metadata={
+            "description": (
+                "Replacement text for old_text. Include every line needed for "
+                "the focused source-code change."
+            )
+        }
+    )
+    context_lines: int = field(
+        default=0,
+        metadata={"model_exposed": False},
+    )
+    preview: bool = field(
+        default=False,
+        metadata={"model_exposed": False},
+    )
 
     def __post_init__(self):
         if not isinstance(self.path, str):
@@ -411,9 +440,25 @@ class ApplyPatchInput(ToolInput):
         "a small unique replacement. Prefer edit_file for existing files. The "
         "write is validated and reverted if invalid."
     )
-    path: str
-    content: str
-    preview: bool = False
+    path: str = field(
+        metadata={
+            "description": (
+                "Workspace-relative path of the planned file to create or rewrite."
+            )
+        }
+    )
+    content: str = field(
+        metadata={
+            "description": (
+                "Complete UTF-8 file content. This replaces the entire file, "
+                "so include all content that must remain."
+            )
+        }
+    )
+    preview: bool = field(
+        default=False,
+        metadata={"model_exposed": False},
+    )
 
     def __post_init__(self):
         if not isinstance(self.path, str):
@@ -454,17 +499,23 @@ def generate_json_schema(input_class: type[ToolInput]) -> dict[str, Any]:
     properties = {}
     required = []
 
-    for field in fields(input_class):
-        field_name = field.name
-        field_type = type_hints.get(field_name, field.type)
+    for model_field in fields(input_class):
+        field_name = model_field.name
+        field_type = type_hints.get(field_name, model_field.type)
 
         # Skip ClassVar fields (like description)
         if field_name == "description":
+            continue
+        if model_field.metadata.get("model_exposed") is False:
             continue
 
         # Map Python types to JSON Schema types
         json_type, is_nullable = _python_type_to_json_type(field_type)
         property_schema = {"type": json_type}
+
+        field_description = model_field.metadata.get("description")
+        if field_description:
+            property_schema["description"] = field_description
 
         # Mark as nullable if it's an Optional type
         if is_nullable:
@@ -473,10 +524,12 @@ def generate_json_schema(input_class: type[ToolInput]) -> dict[str, Any]:
         properties[field_name] = property_schema
 
         # Add default value if present
-        if field.default is not MISSING:
-            properties[field_name]["default"] = field.default
-        elif field.default_factory is not MISSING:
-            properties[field_name]["default"] = field.default_factory()
+        if model_field.default is not MISSING:
+            properties[field_name]["default"] = model_field.default
+        elif model_field.default_factory is not MISSING:
+            properties[field_name]["default"] = (
+                model_field.default_factory()
+            )
         # Add to required if no default and not nullable
         elif not is_nullable:
             required.append(field_name)
@@ -931,7 +984,7 @@ class ToolRegistry:
                 return ToolResult(
                     ok=False,
                     content=f"Matched text appears {count} times in file (matched using {match_method}). "
-                           f"Please provide more specific context or use context_lines parameter."
+                           "Re-read the relevant block with raw=True and use a larger unique old_text value."
                 )
 
             replacement_text = input_data.new_text
@@ -1039,10 +1092,11 @@ class ToolRegistry:
         new_text: str,
         is_python: bool,
     ) -> tuple[str, bool]:
-        """Indent unindented continuation lines to match a Python code block.
+        """Convert relative continuation indentation to file indentation.
 
-        Only continuation lines without explicit indentation are adjusted. A
-        model can therefore still provide deliberately nested indentation.
+        The first replacement line inherits the indentation before the match.
+        Every later non-blank line needs the same base indentation in addition
+        to any relative indentation supplied by the model.
         """
         if not is_python or "\n" not in new_text:
             return new_text, False
@@ -1058,7 +1112,7 @@ class ToolRegistry:
         for index in range(1, len(lines)):
             content = lines[index].rstrip("\r\n")
             line_ending = lines[index][len(content):]
-            if content and not content[0].isspace():
+            if content.strip():
                 lines[index] = leading_text + content + line_ending
                 repaired = True
 
@@ -1678,6 +1732,20 @@ class ToolRegistry:
                     timeout_seconds=self.COMMAND_TIMEOUT,
                 )
 
+                if (
+                    execution_args[:3] == ["python", "-m", "pytest"]
+                    and result.exit_code == 2
+                    and not getattr(result, "timed_out", False)
+                ):
+                    logger.info(
+                        "Retrying Pytest once after exit code 2 before "
+                        "returning control to the model"
+                    )
+                    result = self.command_runner.run(
+                        command=shlex.join(execution_args),
+                        timeout_seconds=self.COMMAND_TIMEOUT,
+                    )
+
                 # Combine stdout and stderr
                 output = result.stdout
                 if result.stderr:
@@ -1709,6 +1777,23 @@ class ToolRegistry:
                     timeout=self.COMMAND_TIMEOUT,
                     check=False,
                 )
+
+                if (
+                    execution_args[:3] == ["python", "-m", "pytest"]
+                    and result.returncode == 2
+                ):
+                    logger.info(
+                        "Retrying Pytest once after exit code 2 before "
+                        "returning control to the model"
+                    )
+                    result = subprocess.run(
+                        execution_args,
+                        cwd=self.workspace.root,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.COMMAND_TIMEOUT,
+                        check=False,
+                    )
 
                 # Combine stdout and stderr
                 output = result.stdout

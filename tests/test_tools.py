@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -276,6 +277,43 @@ class TestEditFile:
             "def parse(value: str) -> str:\n"
             "    normalized = value.strip()\n"
             "    return normalized.lower()\n"
+        )
+
+    def test_edit_file_repairs_relative_nested_indentation(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Nested relative indentation should retain the enclosing base."""
+        test_file = temp_workspace.root / "module.py"
+        test_file.write_text(
+            "def median(values: list[int]) -> float:\n"
+            "    ordered = sorted(values)\n"
+            "    return float(ordered[0])\n",
+        )
+
+        result = tool_registry.edit_file(
+            {
+                "path": "module.py",
+                "old_text": "return float(ordered[0])",
+                "new_text": (
+                    "if len(ordered) % 2 == 0:\n"
+                    "    return (ordered[0] + ordered[1]) / 2\n"
+                    "else:\n"
+                    "    return float(ordered[0])"
+                ),
+            },
+        )
+
+        assert result.ok
+        assert "automatic block-indentation repair" in result.content
+        assert test_file.read_text() == (
+            "def median(values: list[int]) -> float:\n"
+            "    ordered = sorted(values)\n"
+            "    if len(ordered) % 2 == 0:\n"
+            "        return (ordered[0] + ordered[1]) / 2\n"
+            "    else:\n"
+            "        return float(ordered[0])\n"
         )
 
     def test_edit_file_preserves_valid_multiline_dedent(
@@ -1345,6 +1383,59 @@ class TestRunCommand:
             "python -m pytest tests/test_example.py -q"
         ]
 
+    def test_run_command_retries_pytest_exit_two_once(
+        self,
+        temp_workspace,
+    ):
+        """A transient Pytest collection error should get one harness retry."""
+        results = iter(
+            [
+                SimpleNamespace(
+                    exit_code=2,
+                    stdout="collection error",
+                    stderr="",
+                    timed_out=False,
+                ),
+                SimpleNamespace(
+                    exit_code=0,
+                    stdout="1 passed",
+                    stderr="",
+                    timed_out=False,
+                ),
+            ]
+        )
+        runner = SimpleNamespace(run=Mock(side_effect=results))
+        registry = ToolRegistry(temp_workspace, command_runner=runner)
+
+        result = registry.run_command({"command": "pytest -q"})
+
+        assert result.ok
+        assert result.content == "1 passed"
+        assert runner.run.call_count == 2
+
+    def test_run_command_does_not_retry_pytest_assertion_failure(
+        self,
+        temp_workspace,
+    ):
+        """A normal test failure should return directly to the model."""
+        results = iter(
+            [
+                SimpleNamespace(
+                    exit_code=1,
+                    stdout="1 failed",
+                    stderr="",
+                    timed_out=False,
+                ),
+            ]
+        )
+        runner = SimpleNamespace(run=Mock(side_effect=results))
+        registry = ToolRegistry(temp_workspace, command_runner=runner)
+
+        result = registry.run_command({"command": "pytest -q"})
+
+        assert not result.ok
+        assert runner.run.call_count == 1
+
     @pytest.mark.parametrize(
         "command",
         ["pytest tests/test_example.py", "python -m pytest -q"],
@@ -1556,6 +1647,10 @@ class TestToolSchema:
         assert "new_text" in schema["properties"]
         assert all(schema["properties"][k]["type"] == "string" for k in ["path", "old_text", "new_text"])
         assert all(k in schema["required"] for k in ["path", "old_text", "new_text"])
+        assert "context_lines" not in schema["properties"]
+        assert "preview" not in schema["properties"]
+        assert "exactly" in schema["properties"]["old_text"]["description"]
+        assert "Replacement text" in schema["properties"]["new_text"]["description"]
 
     def test_generate_json_schema_apply_patch(self):
         """Test JSON schema generation for ApplyPatchInput"""
@@ -1566,6 +1661,8 @@ class TestToolSchema:
         assert "content" in schema["properties"]
         assert all(schema["properties"][k]["type"] == "string" for k in ["path", "content"])
         assert all(k in schema["required"] for k in ["path", "content"])
+        assert "preview" not in schema["properties"]
+        assert "Complete UTF-8" in schema["properties"]["content"]["description"]
 
     def test_generate_json_schema_run_command(self):
         """Test JSON schema generation for RunCommandInput"""
