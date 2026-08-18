@@ -359,7 +359,11 @@ class EditFileByLineInput(ToolInput):
 @dataclass
 class RunCommandInput(ToolInput):
     """Input for run_command tool"""
-    description: ClassVar[str] = "Run allowed commands in the workspace. Only allows: pytest, python -m pytest, ruff check, git diff, git status."
+    description: ClassVar[str] = (
+        "Run allowed commands in the workspace. Use 'python -m pytest' for "
+        "tests. Bare 'pytest' input is normalized to the same invocation. "
+        "Also allows: ruff check, git diff, git status."
+    )
     command: str
 
     def __post_init__(self):
@@ -1455,6 +1459,13 @@ class ToolRegistry:
             return True
         return args[:2] == ["ruff", "check"]
 
+    @staticmethod
+    def _canonicalize_command(args: list[str]) -> list[str]:
+        """Normalize supported commands to their deterministic invocation."""
+        if args and args[0] == "pytest":
+            return ["python", "-m", "pytest", *args[1:]]
+        return args
+
     @classmethod
     def _command_failure_type(
         cls,
@@ -1533,11 +1544,13 @@ class ToolRegistry:
                 content="Only 'ruff check' is allowed for ruff command"
             )
 
+        execution_args = self._canonicalize_command(args)
+
         # Run command with DockerSandbox if available, otherwise subprocess
         if self.command_runner is not None:
             try:
                 result = self.command_runner.run(
-                    command=input_data.command,
+                    command=shlex.join(execution_args),
                     timeout_seconds=self.COMMAND_TIMEOUT,
                 )
 
@@ -1551,7 +1564,7 @@ class ToolRegistry:
                         ok=False,
                         content=f"exit_code={result.exit_code}\n{output}",
                         failure_type=self._command_failure_type(
-                            args,
+                            execution_args,
                             result.exit_code,
                             timed_out=getattr(result, "timed_out", False),
                         ),
@@ -1565,7 +1578,7 @@ class ToolRegistry:
             # Fallback to subprocess
             try:
                 result = subprocess.run(
-                    args,
+                    execution_args,
                     cwd=self.workspace.root,
                     capture_output=True,
                     text=True,
@@ -1583,7 +1596,7 @@ class ToolRegistry:
                         ok=False,
                         content=f"exit_code={result.returncode}\n{output}",
                         failure_type=self._command_failure_type(
-                            args,
+                            execution_args,
                             result.returncode,
                         ),
                     )

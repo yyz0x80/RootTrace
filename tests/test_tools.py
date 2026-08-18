@@ -1230,6 +1230,33 @@ class TestRunCommand:
         result = tool_registry.run_command({"command": "python -m pytest"})
         assert result.ok or "test_pass" in result.content
 
+    def test_run_command_normalizes_bare_pytest(self, temp_workspace):
+        """Test that bare Pytest uses the canonical module invocation."""
+        commands: list[str] = []
+
+        def run(**kwargs):
+            commands.append(kwargs["command"])
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="1 passed",
+                stderr="",
+                timed_out=False,
+            )
+
+        registry = ToolRegistry(
+            temp_workspace,
+            command_runner=SimpleNamespace(run=run),
+        )
+
+        result = registry.run_command(
+            {"command": "pytest tests/test_example.py -q"}
+        )
+
+        assert result.ok
+        assert commands == [
+            "python -m pytest tests/test_example.py -q"
+        ]
+
     @pytest.mark.parametrize(
         "command",
         ["pytest tests/test_example.py", "python -m pytest -q"],
