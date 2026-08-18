@@ -1,0 +1,13 @@
+{
+  "phase": "prepare",
+  "outcome_code": "PLAN_INVALID",
+  "final_status": "BLOCKED",
+  "exit_code": 1,
+  "reasons": [
+    "Plan references a non-existing file for modify: benchmark/booleans.py"
+  ],
+  "model": "glm-4-flash-250414",
+  "llm_call_count": 2,
+  "prompt_tokens": 1511,
+  "completion_tokens": 685
+}

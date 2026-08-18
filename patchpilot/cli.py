@@ -26,7 +26,11 @@ from patchpilot.planning.planner import PlanGenerationError, create_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_plan
-from patchpilot.provider import LLMProvider, ToolCallParseError
+from patchpilot.provider import (
+    LLMProvider,
+    ToolCallParseError,
+    create_provider_from_config,
+)
 from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
 from patchpilot.sandbox.docker_runner import CommandResult
@@ -62,19 +66,23 @@ def _configure_logging() -> None:
     )
 
 
-def _create_provider(model_override: str | None = None) -> LLMProvider:
-    """Create LLMProvider with optional model override.
+def _create_provider(
+    model_override: str | None = None,
+    config_path: str | None = None,
+) -> LLMProvider:
+    """Create provider instance with optional model override.
 
     Args:
-        model_override: Optional model identifier to override environment variable
+        model_override: Optional model name from config file or direct model identifier
+        config_path: Optional path to model configuration file
 
     Returns:
-        Configured LLMProvider instance
+        Configured provider instance
 
     Raises:
         ValueError: If provider initialization fails
     """
-    return LLMProvider(model=model_override)
+    return create_provider_from_config(model_name=model_override, config_path=config_path)
 
 
 @dataclass(frozen=True)
@@ -87,7 +95,7 @@ class ProviderUsageSnapshot:
     completion_tokens: int | None
 
 
-def _provider_usage(provider: object) -> ProviderUsageSnapshot:
+def _provider_usage(provider: LLMProvider) -> ProviderUsageSnapshot:
     """Return exact provider usage while tolerating legacy test doubles."""
     model = getattr(provider, "model", "")
     if not isinstance(model, str):
@@ -245,7 +253,13 @@ def main() -> None:
         "--model",
         type=str,
         default=None,
-        help="Model identifier (overrides PATCHPILOT_MODEL environment variable)"
+        help="Model name from config file or direct model identifier"
+    )
+    prepare_parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to model configuration file (default: ~/.patchpilot/models.json or .patchpilot/models.json)"
     )
     prepare_parser.add_argument(
         "--output-dir",
@@ -272,7 +286,13 @@ def main() -> None:
         "--model",
         type=str,
         default=None,
-        help="Model identifier (overrides PATCHPILOT_MODEL environment variable)"
+        help="Model name from config file or direct model identifier"
+    )
+    run_parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to model configuration file (default: ~/.patchpilot/models.json or .patchpilot/models.json)"
     )
     run_parser.add_argument(
         "--max-rounds",
@@ -317,7 +337,13 @@ def main() -> None:
         "--model",
         type=str,
         default=None,
-        help="Model identifier (overrides PATCHPILOT_MODEL environment variable)"
+        help="Model name from config file or direct model identifier"
+    )
+    execute_parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to model configuration file (default: ~/.patchpilot/models.json or .patchpilot/models.json)"
     )
     execute_parser.add_argument(
         "--max-rounds",
@@ -351,6 +377,7 @@ def main() -> None:
     baseline_parser.add_argument("--repo", required=True)
     baseline_parser.add_argument("--issue", required=True)
     baseline_parser.add_argument("--model", default=None)
+    baseline_parser.add_argument("--config", default=None)
     baseline_parser.add_argument("--max-rounds", type=int, default=16)
     baseline_parser.add_argument("--max-repairs", type=int, default=0)
     baseline_parser.add_argument("--output-dir", required=True)
@@ -396,7 +423,7 @@ def handle_prepare(args) -> None:
 
         # Create provider for normalization and planning
         try:
-            provider = _create_provider(args.model)
+            provider = _create_provider(args.model, args.config)
         except ValueError as e:
             outcome_code = "PROVIDER_CONFIGURATION_ERROR"
             final_status = "BLOCKED"
@@ -594,7 +621,7 @@ def handle_run(args) -> None:
         
         # Create provider for normalization
         try:
-            provider = _create_provider(args.model)
+            provider = _create_provider(args.model, args.config)
         except ValueError as e:
             print(f"Provider initialization failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -961,7 +988,7 @@ def handle_execute(args) -> None:
 
         # Step 4: Create provider
         try:
-            provider = _create_provider(args.model)
+            provider = _create_provider(args.model, args.config)
         except ValueError as e:
             _save_failed_run_summary(
                 args=args,
@@ -1197,7 +1224,7 @@ def handle_baseline(args) -> None:
         repo_path = Path(args.repo)
         preflight_result = validate_repository(repo_path)
         base_commit = preflight_result.head_sha
-        provider = _create_provider(args.model)
+        provider = _create_provider(args.model, args.config)
 
         workspace = Workspace(root=repo_path)
         tools = ToolRegistry(workspace=workspace)

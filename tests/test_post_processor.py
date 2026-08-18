@@ -16,7 +16,12 @@ from patchpilot.planning.post_processor import (
     _validate_pytest_targets,
     post_process_plan,
 )
-from patchpilot.planning.schema import ChangeAction, ChangePlan, PlannedChange, PlannedTest
+from patchpilot.planning.schema import (
+    ChangeAction,
+    ChangePlan,
+    PlannedChange,
+    PlannedTest,
+)
 from patchpilot.repository.schema import RepositoryContext
 
 
@@ -438,15 +443,6 @@ def test_complete_ac_mapping_typo_correction() -> None:
         ambiguous_points=[],
         expected_test_areas=[],
         implementation_notes=[],
-    )
-
-    repository_context = RepositoryContext(
-        base_commit="abc123",
-        tracked_files=["src/main.py", "tests/test_main.py"],
-        python_files=["src/main.py", "tests/test_main.py"],
-        test_files=["tests/test_main.py"],
-        config_files=[],
-        keyword_matches=[],
     )
 
     # Should correct the typo

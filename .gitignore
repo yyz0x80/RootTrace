@@ -6,3 +6,4 @@ __pycache__/
 /patchpilot/docs
 *.egg-info/
 /evaluation/runs/
+/.patchpilot

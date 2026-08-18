@@ -48,6 +48,7 @@ def test_failed_run_summary_records_agent_failure(tmp_path: Path) -> None:
         output_dir=str(tmp_path),
         task_id="task-1",
         model="test-model",
+        config=None,
         max_rounds=8,
         max_repairs=0,
     )
@@ -78,7 +79,7 @@ def test_failed_run_summary_records_agent_failure(tmp_path: Path) -> None:
 
 @patch("patchpilot.cli.load_issue")
 @patch("patchpilot.cli.normalize_issue")
-@patch("patchpilot.cli.LLMProvider")
+@patch("patchpilot.cli._create_provider")
 @patch("patchpilot.cli.Workspace")
 @patch("patchpilot.cli.ToolRegistry")
 @patch("patchpilot.cli.AgentLoop")
@@ -129,7 +130,7 @@ def test_main_with_ambiguous_points_stops(
 
 @patch("patchpilot.cli.load_issue")
 @patch("patchpilot.cli.normalize_issue")
-@patch("patchpilot.cli.LLMProvider")
+@patch("patchpilot.cli._create_provider")
 @patch("patchpilot.cli.Workspace")
 @patch("patchpilot.cli.ToolRegistry")
 @patch("patchpilot.cli.AgentLoop")
@@ -218,7 +219,7 @@ def test_main_without_ambiguous_points_proceeds(
 
 @patch("patchpilot.cli.load_issue")
 @patch("patchpilot.cli.normalize_issue")
-@patch("patchpilot.cli.LLMProvider")
+@patch("patchpilot.cli._create_provider")
 @patch("patchpilot.cli.Workspace")
 @patch("patchpilot.cli.ToolRegistry")
 @patch("patchpilot.cli.AgentLoop")
@@ -285,6 +286,7 @@ def test_execute_with_baseline_mismatch_fails(mock_validate_repository):
         issue="issue.json",
         plan="plan.json",
         model=None,
+        config=None,
         max_rounds=12,
         max_repairs=3,
         output_dir="artifacts",
@@ -372,6 +374,7 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
         issue="issue.json",
         plan="plan.json",
         model=None,
+        config=None,
         max_rounds=12,
         max_repairs=3,
         output_dir="artifacts",
@@ -468,7 +471,7 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
 
             with (
                 patch("patchpilot.cli.Workspace"),
-                patch("patchpilot.cli.LLMProvider"),
+                patch("patchpilot.cli._create_provider"),
                 patch("patchpilot.cli.ToolRegistry"),
                 patch("patchpilot.cli.AgentLoop"),
                 patch("patchpilot.cli.save_json"),
@@ -500,7 +503,7 @@ def test_execute_with_matching_baseline_succeeds(mock_workflow_runner, mock_vali
 
 @patch("patchpilot.cli.load_issue")
 @patch("patchpilot.cli.normalize_issue")
-@patch("patchpilot.cli.LLMProvider")
+@patch("patchpilot.cli._create_provider")
 @patch("patchpilot.cli.analyze_repository")
 @patch("patchpilot.cli.create_plan")
 @patch("patchpilot.cli.validate_plan")
@@ -531,6 +534,7 @@ def test_prepare_writes_to_configured_output_dir(
         repo="/fake/repo",
         issue="test.md",
         model=None,
+        config=None,
         output_dir="/custom/output",
     )
 
@@ -615,6 +619,7 @@ def test_prepare_classifies_exhausted_plan_retry_as_plan_invalid(
         repo=str(tmp_path),
         issue="issue.md",
         model=None,
+        config=None,
         output_dir=str(tmp_path / "output"),
     )
     provider = Mock(
@@ -694,6 +699,7 @@ def test_execute_writes_to_configured_output_dir(
         issue="issue.json",
         plan="plan.json",
         model=None,
+        config=None,
         max_rounds=12,
         max_repairs=3,
         output_dir="/custom/output",
@@ -792,7 +798,7 @@ def test_execute_writes_to_configured_output_dir(
 
         with (
             patch("patchpilot.cli.Workspace"),
-            patch("patchpilot.cli.LLMProvider"),
+            patch("patchpilot.cli._create_provider"),
             patch("patchpilot.cli.ToolRegistry"),
             patch("patchpilot.cli.AgentLoop"),
             patch("patchpilot.cli.save_json") as mock_save_json,
@@ -835,6 +841,7 @@ def test_execute_saves_run_summary(
         issue="issue.json",
         plan="plan.json",
         model=None,
+        config=None,
         max_rounds=12,
         max_repairs=3,
         output_dir="artifacts",
@@ -915,7 +922,7 @@ def test_execute_saves_run_summary(
 
         with (
             patch("patchpilot.cli.Workspace"),
-            patch("patchpilot.cli.LLMProvider") as mock_provider_class,
+            patch("patchpilot.cli._create_provider") as mock_provider_class,
             patch("patchpilot.cli.ToolRegistry"),
             patch("patchpilot.cli.AgentLoop"),
             patch("patchpilot.cli.save_json") as mock_save_json,
@@ -961,7 +968,7 @@ def test_execute_saves_run_summary(
             assert "verification_report" in summary_data["artifacts"]
 
 
-@patch("patchpilot.cli.LLMProvider")
+@patch("patchpilot.cli._create_provider")
 def test_cli_model_overrides_environment_model(
     mock_provider_class,
 ):
@@ -973,7 +980,7 @@ def test_cli_model_overrides_environment_model(
     mock_provider_class.return_value = mock_provider_instance
 
     # Create provider without model override (should use environment)
-    provider = _create_provider(None)
+    provider = _create_provider(None, None)
 
     # Verify provider was created successfully
     assert provider is not None

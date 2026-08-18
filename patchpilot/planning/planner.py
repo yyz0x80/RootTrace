@@ -6,9 +6,7 @@ repository files and generating structured change plans based on normalized issu
 
 import json
 from collections.abc import Callable
-from pathlib import Path
-
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.post_processor import post_process_plan
@@ -52,10 +50,7 @@ def _is_test_file(path: str) -> bool:
 
     # Check if filename starts with test_
     filename = parts[-1] if parts else ""
-    if filename.startswith("test_") and filename.endswith(".py"):
-        return True
-
-    return False
+    return filename.startswith("test_") and filename.endswith(".py")
 
 
 class PlanGenerationError(ValueError):

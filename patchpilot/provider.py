@@ -6,6 +6,7 @@ including request conversion, response parsing, error handling, and retries.
 
 import json
 import os
+from pathlib import Path
 from time import sleep
 
 from dotenv import load_dotenv
@@ -32,22 +33,29 @@ class LLMProvider:
     - Error handling and retries for rate limits
     """
 
-    def __init__(self, model: str | None = None) -> None:
-        """Initialize the provider with environment configuration.
-
-        Reads:
-        - ZHIPU_API_KEY: API authentication key
-        - PATCHPILOT_BASE_URL: API base URL
-        - PATCHPILOT_MODEL: Model identifier (can be overridden by model parameter)
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """Initialize the provider with explicit or environment configuration.
 
         Args:
-            model: Optional model override. If not provided, reads from PATCHPILOT_MODEL.
+            model: Optional model identifier.
+            api_key: Optional API key. If not provided, reads from ZHIPU_API_KEY.
+            base_url: Optional API base URL. If not provided, reads from PATCHPILOT_BASE_URL.
+
+        Raises:
+            ValueError: If API key or base URL cannot be determined.
         """
-        api_key = os.getenv("ZHIPU_API_KEY")
+        if api_key is None:
+            api_key = os.getenv("ZHIPU_API_KEY")
         if not api_key:
             raise ValueError("ZHIPU_API_KEY environment variable is not set")
 
-        base_url = os.getenv("PATCHPILOT_BASE_URL")
+        if base_url is None:
+            base_url = os.getenv("PATCHPILOT_BASE_URL")
         if not base_url:
             raise ValueError("PATCHPILOT_BASE_URL environment variable is not set")
 
@@ -209,8 +217,45 @@ class LLMProvider:
         """
         messages = [{"role": "user", "content": prompt}]
         response = self.complete(messages=messages, tools=[])
-        
+
         if response.content is None:
             raise ValueError("LLM returned None content")
-        
+
         return response.content
+
+
+def create_provider_from_config(
+    model_name: str | None = None,
+    config_path: str | None = None,
+) -> LLMProvider:
+    """Create provider using model configuration file.
+
+    This function attempts to resolve model configuration from a config file,
+    falling back to environment variables if the model is not found.
+
+    Args:
+        model_name: Optional model name from config file.
+                    If not provided, uses environment variables.
+        config_path: Optional path to model configuration file.
+
+    Returns:
+        Configured LLMProvider instance.
+
+    Raises:
+        ValueError: If configuration cannot be resolved.
+    """
+    from patchpilot.model_config import ModelConfigManager
+
+    manager = ModelConfigManager(config_path=Path(config_path) if config_path else None)
+
+    if model_name:
+        config = manager.get_config(model_name)
+        if config:
+            return LLMProvider(
+                model=config.model_id,
+                api_key=config.api_key,
+                base_url=config.base_url,
+            )
+
+    # Fallback to environment variables
+    return LLMProvider(model=model_name)

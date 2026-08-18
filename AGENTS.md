@@ -375,17 +375,83 @@ Configuration may come from:
 * Environment variables
 * CLI arguments
 * Explicit configuration files
+* Model configuration files
 
-Secrets must come from environment variables.
+Secrets must come from environment variables or model configuration files.
+
+### Model Configuration
+
+PatchPilot supports unified model configuration through a model configuration file, allowing users to specify models by name with automatic resolution of base_url, api_key, and provider type.
+
+**Model Configuration File Format:**
+
+The model configuration file is a JSON file with the following structure:
+
+```json
+{
+  "models": [
+    {
+      "name": "gpt4",
+      "provider": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "your-openai-api-key",
+      "model_id": "gpt-4"
+    },
+    {
+      "name": "claude-opus",
+      "provider": "anthropic",
+      "api_key": "your-anthropic-api-key",
+      "model_id": "claude-3-opus-20240229"
+    },
+    {
+      "name": "zhipu-glm4",
+      "provider": "openai",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+      "api_key": "your-zhipu-api-key",
+      "model_id": "glm-4"
+    }
+  ]
+}
+```
+
+**Configuration File Search Order:**
+
+1. Explicit path via `--config` CLI argument
+2. `~/.patchpilot/models.json` (user-level configuration)
+3. `.patchpilot/models.json` (project-level configuration)
+
+**Usage:**
+
+```bash
+# Use model from configuration file
+patchpilot prepare --repo /path/to/repo --issue issue.md --model gpt4
+
+# Use custom config file
+patchpilot prepare --repo /path/to/repo --issue issue.md --model gpt4 --config /path/to/config.json
+
+# Fallback to environment variables if model not found in config
+patchpilot prepare --repo /path/to/repo --issue issue.md --model gpt-4
+```
+
+**Environment Variable Fallback:**
+
+If a model is not found in the configuration file, PatchPilot falls back to environment variables:
+
+* `ZHIPU_API_KEY` or `OPENAI_API_KEY`: API authentication key
+* `PATCHPILOT_BASE_URL` or `OPENAI_BASE_URL`: API base URL
+* `PATCHPILOT_MODEL`: Model identifier
+
+This maintains backward compatibility with existing environment variable configuration.
 
 Never:
 
 * Commit `.env`
+* Commit model configuration files with real API keys
 * Hard-code an API key
 * Print complete API keys
 * Include secrets in traces, exceptions, fixtures, or examples
 
-Use `.env.example` only for variable names and safe placeholder values.
+Use `.env.example` and `.patchpilot/models.json.example` only for variable names and safe placeholder values.
 
 ---
 

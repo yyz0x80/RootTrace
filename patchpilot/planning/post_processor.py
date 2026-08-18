@@ -45,10 +45,7 @@ def _is_test_file(path: str) -> bool:
 
     # Check if filename starts with test_
     filename = parts[-1] if parts else ""
-    if filename.startswith("test_") and filename.endswith(".py"):
-        return True
-
-    return False
+    return filename.startswith("test_") and filename.endswith(".py")
 
 
 def _migrate_test_files_to_tests(plan: ChangePlan) -> ChangePlan:

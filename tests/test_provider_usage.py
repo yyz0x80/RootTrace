@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from patchpilot.provider import LLMProvider, ToolCallParseError
 
@@ -21,6 +21,7 @@ def make_provider(responses: list[SimpleNamespace]) -> LLMProvider:
             completions=SimpleNamespace(create=create),
         )
     )
+    # Skip __init__ by directly setting attributes
     return provider
 
 
@@ -103,3 +104,22 @@ def test_provider_records_usage_before_rejecting_invalid_tool_arguments() -> Non
     assert provider.llm_call_count == 1
     assert provider.prompt_tokens == 15
     assert provider.completion_tokens == 5
+
+
+def test_provider_accepts_explicit_credentials() -> None:
+    """Test that provider accepts explicit api_key and base_url parameters."""
+    with patch("patchpilot.provider.OpenAI") as mock_openai:
+        mock_client = Mock()
+        mock_openai.return_value = mock_client
+
+        provider = LLMProvider(
+            model="gpt-4",
+            api_key="explicit-key",
+            base_url="https://explicit.com",
+        )
+
+        mock_openai.assert_called_once_with(
+            api_key="explicit-key",
+            base_url="https://explicit.com"
+        )
+        assert provider.model == "gpt-4"

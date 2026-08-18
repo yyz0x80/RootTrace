@@ -371,7 +371,20 @@ def run_patchpilot_baseline(
     output_dir: Path,
     project_root: Path,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute the raw-issue baseline command."""
+    """Execute the raw-issue baseline command.
+
+    Args:
+        repo: Path to target repository
+        issue: Path to issue file
+        task_id: Task identifier
+        model: Model identifier
+        max_rounds: Maximum agent rounds
+        output_dir: Directory for baseline artifacts
+        project_root: PatchPilot project root directory
+
+    Returns:
+        CompletedProcess result from subprocess execution
+    """
     return subprocess.run(
         [
             "patchpilot",
@@ -560,6 +573,7 @@ def execute_task(
         max_rounds: Maximum agent rounds
         max_repairs: Maximum repair attempts
         timestamp: Timestamp for run directory naming
+        variant: Evaluation variant (patchpilot or baseline)
 
     Returns:
         RunResult with execution details
