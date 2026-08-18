@@ -45,9 +45,13 @@ from patchpilot.planning.scope_gate import (
     check_scope,
     validate_actual_changes,
 )
-from patchpilot.prompts import REPAIR_PROMPT
+from patchpilot.prompts import REPAIR_PROMPT, REPAIR_SYSTEM_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
-from patchpilot.tools import _get_workspace_changes, generate_patch
+from patchpilot.tools import (
+    WorkspaceChange,
+    _get_workspace_changes,
+    generate_patch,
+)
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
 from patchpilot.verification.targets import select_target_tests
 from patchpilot.workflow.completion import determine_completion_state
@@ -63,6 +67,27 @@ if TYPE_CHECKING:
     from patchpilot.verification.verifier import Verifier
 
 logger = logging.getLogger(__name__)
+
+MAX_REPAIR_GOAL_CHARS = 1_200
+MAX_REPAIR_INTENT_CHARS = 2_000
+MAX_REPAIR_CONSTRAINT_CHARS = 1_600
+MAX_REPAIR_PATCH_CHARS = 6_000
+MAX_REPAIR_FAILURE_OUTPUT_CHARS = 2_000
+
+
+def _truncate_repair_text(text: str, limit: int) -> str:
+    """Bound repair context while retaining evidence from both ends."""
+    normalized = text.strip()
+    if not normalized:
+        return "(none)"
+    if len(normalized) <= limit:
+        return normalized
+
+    marker = "\n... repair context truncated ...\n"
+    remaining = limit - len(marker)
+    head_size = (remaining * 2) // 3
+    tail_size = remaining - head_size
+    return normalized[:head_size] + marker + normalized[-tail_size:]
 
 
 def _map_acceptance_evidence(**kwargs: Any) -> list[AcceptanceEvidence]:
@@ -442,6 +467,9 @@ class WorkflowRunner:
             target_acceptance_criteria=(
                 selection.acceptance_criteria
             ),
+            target_direct_acceptance_criteria=(
+                selection.direct_acceptance_criteria
+            ),
             retry_count=retry_count,
         )
 
@@ -682,7 +710,18 @@ class WorkflowRunner:
             # Step 8: Coding Agent initial modification
             logger.info("Running coding agent for initial implementation")
             initial_prompt = f"Implement the following plan:\n\n{plan}"
-            self.agent_loop.run(issue=initial_prompt)
+            try:
+                self.agent_loop.run(issue=initial_prompt)
+            except AgentLoopError as error:
+                partial_changes = _get_workspace_changes(workspace_path)
+                if not partial_changes:
+                    raise
+                logger.warning(
+                    "Initial coding agent stopped after producing a partial "
+                    "patch; continuing with scope validation and deterministic "
+                    "verification: %s",
+                    error,
+                )
 
             # Step 9: Check actual changes via _get_workspace_changes
             actual_changes = _get_workspace_changes(workspace_path)
@@ -780,11 +819,21 @@ class WorkflowRunner:
                     self.max_repair_attempts,
                 )
 
-                # Build repair prompt with failure feedback
+                # Build a bounded failure-diff context instead of restarting
+                # the generic repository-discovery workflow.
+                current_changes = _get_workspace_changes(workspace_path)
+                current_patch = generate_patch(
+                    workspace_path,
+                    current_changes,
+                )
                 repair_prompt = self._build_repair_prompt(
                     issue=issue,
                     plan=plan,
                     failure_report=report,
+                    current_patch=current_patch,
+                    current_changes=current_changes,
+                    change_plan=change_plan,
+                    normalized_issue=normalized_issue,
                 )
 
                 # Run agent with repair prompt
@@ -792,16 +841,44 @@ class WorkflowRunner:
                     workflow_stage="REPAIR",
                     retry_count=retry_count,
                 )
-                self.agent_loop.run(issue=repair_prompt)
+                repair_agent_error: AgentLoopError | None = None
+                try:
+                    self.agent_loop.run(
+                        issue=repair_prompt,
+                        system_prompt=REPAIR_SYSTEM_PROMPT,
+                        reset_state=True,
+                    )
+                except AgentLoopError as error:
+                    repair_agent_error = error
 
                 # Get workspace changes after repair
                 repair_changes = _get_workspace_changes(workspace_path)
-                if not repair_changes:
+                repaired_patch = generate_patch(
+                    workspace_path,
+                    repair_changes,
+                )
+                if repaired_patch == current_patch:
                     logger.warning(
-                        "Repair agent finished without modifying any files. Stopping repair loop."
+                        "Repair agent did not change the patch. Stopping repair loop."
                     )
-                    ExecuteLogger.log_repair_stopped("No changes made during repair")
+                    ExecuteLogger.log_repair_stopped(
+                        "No patch delta during repair"
+                    )
+                    if repair_agent_error is not None:
+                        logger.warning(
+                            "Repair agent also stopped with an error: %s",
+                            repair_agent_error,
+                        )
+                        raise repair_agent_error
                     break
+
+                if repair_agent_error is not None:
+                    logger.warning(
+                        "Repair agent stopped after updating the patch; "
+                        "continuing with scope validation and deterministic "
+                        "verification: %s",
+                        repair_agent_error,
+                    )
 
                 # Scope gate validation after repair
                 scope_result = self._check_repair_scope()
@@ -1155,26 +1232,37 @@ class WorkflowRunner:
         issue: str,
         plan: str,
         failure_report: VerificationReport,
+        current_patch: str = "",
+        current_changes: list[WorkspaceChange] | None = None,
+        change_plan: ChangePlan | None = None,
+        normalized_issue: NormalizedIssue | None = None,
     ) -> str:
-        """Build a repair prompt based on the failure report.
+        """Build a bounded repair prompt from the current failure differential.
 
-        Constructs a prompt that includes the original issue, approved plan,
-        and condensed failure information to guide the agent's repair attempt.
+        The prompt keeps the task goal and all programmatic scope constraints,
+        but replaces repeated issue and plan payloads with the current patch,
+        latest deterministic failure, approved files, and relevant acceptance
+        criteria.
 
         Args:
-            issue: The original issue description
-            plan: The approved change plan
-            failure_report: VerificationReport containing failure details
+            issue: Original issue used as a fallback task goal.
+            plan: Serialized plan used only when no structured plan is present.
+            failure_report: Deterministic verification failure details.
+            current_patch: Current workspace diff before the repair attempt.
+            current_changes: Files changed by the initial implementation.
+            change_plan: Structured approved change plan when available.
+            normalized_issue: Structured issue and acceptance criteria.
 
         Returns:
-            Formatted repair prompt string
+            Compact, structured repair prompt string.
         """
-        # Extract condensed failure information
         failed_checks = failure_report.get_failed_checks()
         if not failed_checks:
             failure_summary = "No specific failure details available"
+            relevant_criterion_ids: list[str] = []
         else:
             latest_failure = failed_checks[-1]
+            relevant_criterion_ids = latest_failure.acceptance_criteria
             failure_summary = (
                 f"Command: {latest_failure.command}\n"
                 f"Failure Type: {latest_failure.failure_type}\n"
@@ -1186,15 +1274,105 @@ class WorkflowRunner:
                     failure_summary += (
                         f"\nFailed Tests: {', '.join(summary_dict['failed_tests'])}"
                     )
+                if summary_dict.get("error_type"):
+                    failure_summary += (
+                        f"\nError Type: {summary_dict['error_type']}"
+                    )
                 if "relevant_output" in summary_dict:
                     failure_summary += (
-                        f"\nRelevant Output:\n{summary_dict['relevant_output'][:1000]}"
+                        "\nRelevant Output:\n"
+                        + _truncate_repair_text(
+                            str(summary_dict["relevant_output"]),
+                            MAX_REPAIR_FAILURE_OUTPUT_CHARS,
+                        )
                     )
 
-        # Use the REPAIR_PROMPT template from prompts.py
+        if normalized_issue is not None:
+            task_goal = (
+                f"{normalized_issue.title}: "
+                f"{normalized_issue.problem_statement}"
+            )
+            criteria = normalized_issue.acceptance_criteria
+            if relevant_criterion_ids:
+                relevant_ids = set(relevant_criterion_ids)
+                criteria = [
+                    criterion
+                    for criterion in criteria
+                    if criterion.id in relevant_ids
+                ]
+            acceptance_criteria = "\n".join(
+                f"- {criterion.id}: {criterion.description}"
+                for criterion in criteria
+            )
+            task_constraints = "\n".join(
+                f"- {constraint}"
+                for constraint in normalized_issue.constraints
+            )
+        else:
+            task_goal = issue
+            acceptance_criteria = "\n".join(
+                f"- {criterion_id}"
+                for criterion_id in relevant_criterion_ids
+            )
+            task_constraints = ""
+
+        if change_plan is not None:
+            change_intent = "\n".join(
+                (
+                    f"- {change.action.value} {change.path}: "
+                    f"{change.description}"
+                )
+                for change in change_plan.planned_changes
+            )
+            allowed_paths = [
+                change.path
+                for change in change_plan.planned_changes
+            ]
+        else:
+            change_intent = plan
+            allowed_paths = [
+                change.path
+                for change in (current_changes or [])
+            ]
+
+        if change_plan is not None and change_plan.out_of_scope:
+            out_of_scope = "\n".join(
+                f"- Out of scope: {item}"
+                for item in change_plan.out_of_scope
+            )
+            task_constraints = "\n".join(
+                part
+                for part in (task_constraints, out_of_scope)
+                if part
+            )
+
+        allowed_files = "\n".join(
+            f"- {path}"
+            for path in dict.fromkeys(allowed_paths)
+        )
+
         return REPAIR_PROMPT.format(
-            issue=issue,
-            plan=plan,
+            task_goal=_truncate_repair_text(
+                task_goal,
+                MAX_REPAIR_GOAL_CHARS,
+            ),
+            change_intent=_truncate_repair_text(
+                change_intent,
+                MAX_REPAIR_INTENT_CHARS,
+            ),
+            allowed_files=allowed_files or "(no writable source file identified)",
+            task_constraints=_truncate_repair_text(
+                task_constraints,
+                MAX_REPAIR_CONSTRAINT_CHARS,
+            ),
+            acceptance_criteria=(
+                acceptance_criteria
+                or "(use the approved change intent and failed verification)"
+            ),
+            current_patch=_truncate_repair_text(
+                current_patch,
+                MAX_REPAIR_PATCH_CHARS,
+            ),
             failure=failure_summary,
         )
 
