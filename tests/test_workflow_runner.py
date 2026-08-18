@@ -35,6 +35,7 @@ class TestWorkflowRunnerInit:
     def test_init_with_valid_parameters(self):
         """Test initialization with valid parameters."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -55,6 +56,7 @@ class TestWorkflowRunnerInit:
     def test_init_without_sandbox(self):
         """Test initialization without sandbox (should be created later)."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
 
@@ -78,6 +80,7 @@ class TestWorkflowRunnerExecute:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -123,6 +126,7 @@ class TestWorkflowRunnerExecute:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -195,6 +199,7 @@ class TestWorkflowRunnerExecute:
     def test_repair_without_patch_delta_stops_before_verification(self):
         """A no-op repair should not spend another verifier attempt."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         failed_report = VerificationReport(passed=False)
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
@@ -242,6 +247,7 @@ class TestWorkflowRunnerExecute:
     def test_initial_agent_error_with_partial_patch_enters_repair(self):
         """Verify and repair a partial patch left by an AgentLoop error."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_agent_loop.run.side_effect = [
             AgentLoopError("Agent stopped after tool failures"),
             "Repair complete",
@@ -308,6 +314,7 @@ class TestWorkflowRunnerExecute:
     def test_repair_agent_error_preserves_last_verification_report(self):
         """Test that repair failures expose the last deterministic report."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_agent_loop.run.side_effect = [
             "Initial implementation complete",
             AgentLoopError("Repair agent stopped"),
@@ -365,6 +372,7 @@ class TestWorkflowRunnerExecute:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -447,6 +455,7 @@ class TestWorkflowRunnerExecute:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -516,6 +525,7 @@ class TestWorkflowRunnerExecute:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -635,6 +645,7 @@ class TestWorkflowRunnerSetup:
 
             # Setup runner with real repository
             mock_agent_loop = Mock(spec=AgentLoop)
+            mock_agent_loop.force_tool_selection = False
             mock_verifier = Mock()
             mock_workspace = Mock(spec=Workspace)
             mock_workspace.root = source_repo
@@ -671,6 +682,7 @@ class TestWorkflowRunnerSetup:
     def test_create_temporary_workspace_missing_source(self):
         """Test that missing source repository raises error when git archive fails."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_workspace.root = Path("/nonexistent/repo")
@@ -699,6 +711,7 @@ class TestWorkflowRunnerSetup:
     def test_start_sandbox_when_provided(self):
         """Test starting sandbox when already provided."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_agent_loop.tools = Mock()
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -723,6 +736,7 @@ class TestWorkflowRunnerSetup:
     def test_start_sandbox_creates_when_none(self):
         """Test that sandbox is created when not provided."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_agent_loop.tools = Mock()
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
@@ -756,6 +770,7 @@ class TestWorkflowRunnerSetup:
     def test_execute_baseline_runs_raw_issue_and_verifies_once(self):
         """Test that the baseline omits planning and repair behavior."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_agent_loop.max_rounds = 8
         mock_agent_loop.tools = Mock()
         mock_verifier = Mock(return_value=VerificationReport(passed=True))
@@ -805,6 +820,7 @@ class TestWorkflowRunnerSetup:
         from patchpilot.agent_loop import AgentLoopLimitError
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_agent_loop.max_rounds = 4
         mock_agent_loop.tools = Mock()
         mock_agent_loop.run.side_effect = AgentLoopLimitError("round limit")
@@ -843,6 +859,7 @@ class TestWorkflowRunnerSetup:
     def test_cleanup_stops_sandbox(self):
         """Test that cleanup stops the sandbox."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -861,6 +878,7 @@ class TestWorkflowRunnerSetup:
     def test_cleanup_removes_temp_dir(self):
         """Test that cleanup removes temporary directory."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -893,6 +911,7 @@ class TestWorkflowRunnerBuildRepairPrompt:
     def test_build_repair_prompt_with_failure(self):
         """Test building repair prompt with failure details."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
 
@@ -941,6 +960,7 @@ class TestWorkflowRunnerBuildRepairPrompt:
     def test_build_repair_prompt_without_failed_checks(self):
         """Test building repair prompt when no failed checks exist."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
 
@@ -1077,6 +1097,7 @@ class TestRunWorkflow:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1129,6 +1150,7 @@ class TestWorkflowRunnerScopeGate:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1195,6 +1217,7 @@ class TestWorkflowRunnerScopeGate:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1261,6 +1284,7 @@ class TestWorkflowRunnerScopeGate:
     def test_execute_no_changes_with_change_plan_raises_error(self):
         """Test that agent with change plan must modify at least one file."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1317,6 +1341,7 @@ class TestWorkflowRunnerScopeGate:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1360,6 +1385,7 @@ class TestWorkflowRunnerScopeGate:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1423,6 +1449,7 @@ class TestWorkflowRunnerScopeGate:
     def test_get_modified_files_calls_git_status(self):
         """Test that _get_modified_files correctly calls git status --porcelain."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_workspace.root = Path("/fake/repo")
@@ -1450,6 +1477,7 @@ class TestWorkflowRunnerConfigurableRepairLimit:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -1520,6 +1548,7 @@ class TestWorkflowRunnerConfigurableRepairLimit:
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import platform
+import re
 import shutil
 import subprocess
 import tarfile
@@ -845,6 +846,11 @@ class WorkflowRunner:
                     retry_count=retry_count,
                 )
                 repair_agent_error: AgentLoopError | None = None
+
+                # Enable forced tool selection for repair rounds
+                original_force_tool_selection = getattr(self.agent_loop, 'force_tool_selection', False)
+                self.agent_loop.force_tool_selection = True
+
                 try:
                     self.agent_loop.run(
                         issue=repair_prompt,
@@ -853,6 +859,9 @@ class WorkflowRunner:
                     )
                 except AgentLoopError as error:
                     repair_agent_error = error
+                finally:
+                    # Restore original force_tool_selection setting
+                    self.agent_loop.force_tool_selection = original_force_tool_selection
 
                 # Get workspace changes after repair
                 repair_changes = _get_workspace_changes(workspace_path)
@@ -1263,6 +1272,9 @@ class WorkflowRunner:
             Compact, structured repair prompt string.
         """
         failed_checks = failure_report.get_failed_checks()
+        failed_file_path = None
+        failed_line_number = None
+
         if not failed_checks:
             failure_summary = "No specific failure details available"
             relevant_criterion_ids: list[str] = []
@@ -1274,6 +1286,8 @@ class WorkflowRunner:
                 f"Failure Type: {latest_failure.failure_type}\n"
                 f"Exit Code: {latest_failure.exit_code}"
             )
+
+            # Extract file and line information from failure for minimal context
             if latest_failure.summary:
                 summary_dict = latest_failure.summary
                 if summary_dict.get("failed_tests"):
@@ -1292,6 +1306,18 @@ class WorkflowRunner:
                             MAX_REPAIR_FAILURE_OUTPUT_CHARS,
                         )
                     )
+
+                # Extract file path and line number from error output
+                relevant_output = str(summary_dict.get("relevant_output", ""))
+                if relevant_output:
+                    # Try to extract file:line pattern from Python tracebacks
+                    file_line_match = re.search(r'File "([^"]+)", line (\d+)', relevant_output)
+                    if file_line_match:
+                        failed_file_path = file_line_match.group(1)
+                        failed_line_number = int(file_line_match.group(2))
+                        failure_summary += (
+                            f"\nFailed Location: {failed_file_path}:{failed_line_number}"
+                        )
 
         if normalized_issue is not None:
             task_goal = (
@@ -1340,6 +1366,17 @@ class WorkflowRunner:
                 change.path
                 for change in (current_changes or [])
             ]
+
+        # Apply minimal context when we have specific failure location
+        if failed_file_path and failed_line_number:
+            # Narrow down to the specific file that failed
+            allowed_paths = [failed_file_path]
+            logger.info(
+                "Applying minimal repair context: focusing on %s:%d",
+                failed_file_path,
+                failed_line_number,
+            )
+            task_constraints += f"\n- Focus repair on {failed_file_path} around line {failed_line_number}"
 
         if change_plan is not None and change_plan.out_of_scope:
             out_of_scope = "\n".join(

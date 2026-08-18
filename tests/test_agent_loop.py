@@ -317,148 +317,31 @@ class TestAgentLoopRun:
         assert result == "Task completed"
         assert mock_provider.complete.call_count == 3
 
-    def test_completion_gate_requires_edit_and_post_edit_pytest(self):
-        """Final content is rejected until the current edit passes Pytest."""
-        mock_provider = Mock()
-        mock_tools = Mock()
-        mock_tools.get_tool_schemas.return_value = [
-            {
-                "type": "function",
-                "function": {"name": "edit_file", "parameters": {}},
-            },
-            {
-                "type": "function",
-                "function": {"name": "run_command", "parameters": {}},
-            },
-        ]
-        mock_tools.execute.side_effect = [
-            ToolResult(ok=True, content="diff --git a/module.py b/module.py"),
-            ToolResult(ok=True, content="1 passed"),
-            ToolResult(ok=True, content="All checks passed"),
-        ]
-        mock_provider.complete.side_effect = [
-            AssistantTurn(content="Done before editing", tool_calls=[]),
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall(
-                        id="edit_1",
-                        name="edit_file",
-                        arguments={"path": "module.py"},
-                    )
-                ],
-            ),
-            AssistantTurn(content="Done before testing", tool_calls=[]),
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall(
-                        id="test_1",
-                        name="run_command",
-                        arguments={"command": "python -m pytest tests/test_module.py"},
-                    )
-                ],
-            ),
-            AssistantTurn(content="Done before linting", tool_calls=[]),
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall(
-                        id="lint_1",
-                        name="run_command",
-                        arguments={"command": "ruff check module.py"},
-                    )
-                ],
-            ),
-            AssistantTurn(content="Done after verification", tool_calls=[]),
-        ]
-        agent_loop = AgentLoop(
-            provider=mock_provider,
-            tools=mock_tools,
-            max_rounds=7,
-        )
+    def test_no_progress_detection_state_logic(self):
+        """Test the state logic for NO_PROGRESS detection directly."""
+        state = AgentState()
 
-        result = agent_loop.run("Fix module.py")
+        # Make an edit
+        state.record_file_edit("test.py")
+        assert state.edit_revision == 1
+        assert state.consecutive_completions == 0
 
-        assert result == "Done after verification"
-        assert agent_loop.state.edit_revision == 1
-        assert agent_loop.state.verified_edit_revision == 1
-        assert agent_loop.state.linted_edit_revision == 1
-        final_messages = mock_provider.complete.call_args.kwargs["messages"]
-        rejection_messages = [
-            message["content"]
-            for message in final_messages
-            if message["role"] == "user"
-            and message["content"].startswith("COMPLETION_REJECTED")
-        ]
-        assert len(rejection_messages) == 3
+        # First completion after edit
+        state.record_completion_attempt()
+        assert state.consecutive_completions == 1
+        assert state.last_completion_edit_revision == 1
+        assert state.detect_no_progress() is False  # Only 1 completion
 
-    def test_failed_pytest_invalidates_completion_evidence(self):
-        """A failed Pytest run must be followed by a passing run."""
-        mock_provider = Mock()
-        mock_tools = Mock()
-        mock_tools.get_tool_schemas.return_value = [
-            {
-                "type": "function",
-                "function": {"name": "edit_file", "parameters": {}},
-            },
-            {
-                "type": "function",
-                "function": {"name": "run_command", "parameters": {}},
-            },
-        ]
-        mock_tools.execute.side_effect = [
-            ToolResult(ok=True, content="diff --git a/module.py b/module.py"),
-            ToolResult(
-                ok=False,
-                content="1 failed",
-                failure_type=ToolFailureType.VERIFICATION_FAILURE,
-            ),
-            ToolResult(ok=True, content="1 passed"),
-            ToolResult(ok=True, content="All checks passed"),
-        ]
-        mock_provider.complete.side_effect = [
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall("edit_1", "edit_file", {"path": "module.py"})
-                ],
-            ),
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall("test_1", "run_command", {"command": "pytest"})
-                ],
-            ),
-            AssistantTurn(content="Done after a failed test", tool_calls=[]),
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall("test_2", "run_command", {"command": "pytest"})
-                ],
-            ),
-            AssistantTurn(
-                content=None,
-                tool_calls=[
-                    ToolCall(
-                        "lint_1",
-                        "run_command",
-                        {"command": "ruff check module.py"},
-                    )
-                ],
-            ),
-            AssistantTurn(content="Done after tests pass", tool_calls=[]),
-        ]
-        agent_loop = AgentLoop(
-            provider=mock_provider,
-            tools=mock_tools,
-            max_rounds=6,
-        )
+        # Second completion without new edit
+        state.record_completion_attempt()
+        assert state.consecutive_completions == 2
+        assert state.detect_no_progress() is True  # 2+ completions without new edit
 
-        result = agent_loop.run("Fix module.py")
-
-        assert result == "Done after tests pass"
-        assert mock_provider.complete.call_count == 6
+        # New edit resets tracking
+        state.record_file_edit("test.py")
+        assert state.consecutive_completions == 0
+        assert state.edit_revision == 2
+        assert state.detect_no_progress() is False
 
 
 class TestExecuteTool:
@@ -699,8 +582,8 @@ class TestAgentState:
         assert state.total_edits == 0
         assert len(state.unique_files_read) == 0
         assert state.edit_revision == 0
-        assert state.verified_edit_revision is None
-        assert state.linted_edit_revision is None
+        assert state.consecutive_completions == 0
+        assert state.last_completion_edit_revision == 0
 
     def test_record_tool_call_success(self):
         """Test recording a successful tool call."""
@@ -769,23 +652,58 @@ class TestAgentState:
         assert state.total_edits == 3
         assert state.edit_revision == 3
 
-    def test_edit_invalidates_previous_pytest_evidence(self):
-        """Every effective edit requires a fresh passing Pytest run."""
+    def test_edit_resets_completion_tracking(self):
+        """Every effective edit resets completion tracking."""
         state = AgentState()
-        state.record_file_edit("module.py")
-        state.record_pytest_result(True)
-        state.record_ruff_result(True)
-
-        assert state.completion_blockers() == []
+        state.record_completion_attempt()
+        state.record_completion_attempt()
+        assert state.consecutive_completions == 2
 
         state.record_file_edit("module.py")
 
-        assert state.verified_edit_revision is None
-        assert state.linted_edit_revision is None
-        assert state.completion_blockers() == [
-            "Pytest has not passed after the most recent source edit",
-            "Ruff has not passed after the most recent source edit",
+        assert state.consecutive_completions == 0
+        assert state.last_completion_edit_revision == 1
+
+    def test_no_progress_detection(self):
+        """Test NO_PROGRESS detection for consecutive completions without edits."""
+        state = AgentState()
+
+        # Make an edit first, then completions without new edits
+        state.record_file_edit("module.py")
+        state.record_completion_attempt()
+        state.record_completion_attempt()
+        assert state.detect_no_progress() is True
+
+        # Progress with 2 completions but edits between them
+        state2 = AgentState()
+        state2.record_file_edit("module.py")
+        state2.record_completion_attempt()
+        state2.record_file_edit("module.py")  # New edit
+        state2.record_completion_attempt()
+        assert state2.detect_no_progress() is False
+
+        # No progress with 3 completions and no edits after initial edit
+        state3 = AgentState()
+        state3.record_file_edit("module.py")
+        for _ in range(3):
+            state3.record_completion_attempt()
+        assert state3.detect_no_progress() is True
+
+    def test_forced_tool_selection_filters_tools(self):
+        """Test that forced tool selection filters to only edit tools."""
+        tool_schemas = [
+            {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "edit_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "write_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "search_code", "parameters": {}}},
+            {"type": "function", "function": {"name": "run_command", "parameters": {}}},
         ]
+
+        filtered = AgentLoop._filter_repair_tools(tool_schemas)
+
+        assert len(filtered) == 3
+        tool_names = {schema["function"]["name"] for schema in filtered}
+        assert tool_names == {"read_file", "edit_file", "write_file"}
 
     def test_record_file_read(self):
         """Test recording file reads."""
@@ -957,8 +875,8 @@ class TestAgentLoopProgressTracking:
         assert agent_loop.run("Fix the implementation") == "Recovered"
         assert agent_loop.state.consecutive_failures == 1
 
-    def test_pytest_failure_does_not_trigger_tool_failure_stop(self):
-        """Test that a failed Pytest run does not consume the tool failure budget."""
+    def test_tool_failure_tracking_works_without_verification_gate(self):
+        """Test that tool failure tracking works without completion gate."""
         mock_provider = Mock()
         mock_tools = Mock()
         mock_tools.get_tool_schemas.return_value = [
@@ -976,11 +894,7 @@ class TestAgentLoopProgressTracking:
             "read_file",
         ]
         mock_tools.execute.side_effect = [
-            ToolResult(
-                ok=False,
-                content="1 test failed",
-                failure_type=ToolFailureType.VERIFICATION_FAILURE,
-            ),
+            ToolResult(ok=False, content="Command failed"),
             ToolResult(ok=False, content="Absolute path rejected"),
             ToolResult(ok=False, content="Absolute path rejected"),
         ]
@@ -991,7 +905,7 @@ class TestAgentLoopProgressTracking:
                     ToolCall(
                         id="call_1",
                         name="run_command",
-                        arguments={"command": "pytest"},
+                        arguments={"command": "test"},
                     )
                 ],
             ),
@@ -1091,7 +1005,6 @@ class TestAgentLoopProgressTracking:
             provider=mock_provider,
             tools=mock_tools,
             enable_progress_tracking=True,
-            enable_completion_gate=False,
         )
 
         agent_loop.run("Test issue")

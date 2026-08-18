@@ -108,6 +108,8 @@ class AgentState:
         edit_revision: Monotonic revision incremented after each effective edit.
         verified_edit_revision: Revision covered by the latest passing Pytest run.
         linted_edit_revision: Revision covered by the latest passing Ruff run.
+        consecutive_completions: Number of consecutive completion attempts without edits.
+        last_completion_edit_revision: Edit revision at the last completion attempt.
     """
 
     files_modified: set[str]
@@ -121,6 +123,8 @@ class AgentState:
     edit_revision: int
     verified_edit_revision: int | None
     linted_edit_revision: int | None
+    consecutive_completions: int
+    last_completion_edit_revision: int
 
     def __init__(self) -> None:
         self.files_modified = set()
@@ -134,6 +138,8 @@ class AgentState:
         self.edit_revision = 0
         self.verified_edit_revision = None
         self.linted_edit_revision = None
+        self.consecutive_completions = 0
+        self.last_completion_edit_revision = 0
 
     def record_tool_call(
         self,
@@ -187,31 +193,7 @@ class AgentState:
         self.files_modified.add(file_path)
         self.total_edits += 1
         self.edit_revision += 1
-        self.verified_edit_revision = None
-        self.linted_edit_revision = None
-
-    def record_pytest_result(self, passed: bool) -> None:
-        """Record whether Pytest verified the current edit revision."""
-        self.verified_edit_revision = self.edit_revision if passed else None
-
-    def record_ruff_result(self, passed: bool) -> None:
-        """Record whether Ruff verified the current edit revision."""
-        self.linted_edit_revision = self.edit_revision if passed else None
-
-    def completion_blockers(self) -> list[str]:
-        """Return unmet requirements for a successful coding completion."""
-        blockers = []
-        if self.edit_revision == 0:
-            blockers.append("no effective source edit has been applied")
-        if self.verified_edit_revision != self.edit_revision:
-            blockers.append(
-                "Pytest has not passed after the most recent source edit"
-            )
-        if self.linted_edit_revision != self.edit_revision:
-            blockers.append(
-                "Ruff has not passed after the most recent source edit"
-            )
-        return blockers
+        self.reset_completion_tracking()
 
     def record_file_read(self, file_path: str) -> None:
         """Record that a file was read.
@@ -220,6 +202,30 @@ class AgentState:
             file_path: Path to the file that was read
         """
         self.unique_files_read.add(file_path)
+
+    def record_completion_attempt(self) -> None:
+        """Record a completion attempt for NO_PROGRESS detection."""
+        self.consecutive_completions += 1
+        # Only update the reference revision on the first completion in a sequence
+        if self.consecutive_completions == 1:
+            self.last_completion_edit_revision = self.edit_revision
+
+    def reset_completion_tracking(self) -> None:
+        """Reset completion tracking after an effective edit."""
+        self.consecutive_completions = 0
+        self.last_completion_edit_revision = self.edit_revision
+
+    def detect_no_progress(self) -> bool:
+        """Detect if consecutive completions occurred without patch delta.
+
+        Returns:
+            True if there were 2+ consecutive completions with no edit changes
+        """
+        return (
+            self.consecutive_completions >= 2
+            and self.last_completion_edit_revision == self.edit_revision
+            and self.edit_revision > 0  # Only detect no progress after at least one edit
+        )
 
     def _generate_failure_signature(self, tool_name: str, error_content: str) -> str:
         """Generate a signature for failure pattern detection.
@@ -312,8 +318,8 @@ class AgentLoop:
         enable_early_stopping: bool = True,
         max_consecutive_failures: int = 3,
         enable_progress_tracking: bool = True,
-        enable_completion_gate: bool = True,
         max_empty_response_retries: int = DEFAULT_EMPTY_RESPONSE_RETRIES,
+        force_tool_selection: bool = False,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -328,7 +334,7 @@ class AgentLoop:
         self.enable_early_stopping = enable_early_stopping
         self.max_consecutive_failures = max_consecutive_failures
         self.enable_progress_tracking = enable_progress_tracking
-        self.enable_completion_gate = enable_completion_gate
+        self.force_tool_selection = force_tool_selection
         self.max_empty_response_retries = max_empty_response_retries
         self.state = AgentState()
 
@@ -388,10 +394,6 @@ class AgentLoop:
         ]
 
         tool_schemas = self.tools.get_tool_schemas()
-        completion_gate_enabled = (
-            self.enable_completion_gate
-            and self._has_edit_tool(tool_schemas)
-        )
 
         for round_number in range(1, self.max_rounds + 1):
             logger.info(
@@ -424,9 +426,16 @@ class AgentLoop:
             # Inject state summary into system prompt for context
             enhanced_messages = self._inject_state_context(messages, round_number)
 
+            # Apply forced tool selection for repair rounds
+            active_tool_schemas = (
+                self._filter_repair_tools(tool_schemas)
+                if self.force_tool_selection
+                else tool_schemas
+            )
+
             assistant_turn = self._complete_with_empty_response_retry(
                 messages=enhanced_messages,
-                tools=tool_schemas,
+                tools=active_tool_schemas,
             )
 
             # Print round number and tool calls for user visibility
@@ -456,22 +465,20 @@ class AgentLoop:
                     raise AgentLoopError(
                         "Model returned neither tool calls nor final content"
                     )
-                if completion_gate_enabled:
-                    blockers = self.state.completion_blockers()
-                    if blockers:
-                        feedback = self._format_completion_rejection(blockers)
-                        logger.info(
-                            "Completion gate rejected round %d: %s",
-                            round_number,
-                            "; ".join(blockers),
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": feedback,
-                            }
-                        )
-                        continue
+
+                # Record completion attempt for NO_PROGRESS detection
+                self.state.record_completion_attempt()
+
+                # Check for NO_PROGRESS: consecutive completions without patch delta
+                if self.state.detect_no_progress():
+                    logger.warning(
+                        "NO_PROGRESS detected: %d consecutive completions without patch delta",
+                        self.state.consecutive_completions,
+                    )
+                    raise AgentLoopError(
+                        f"Agent stopped after {self.state.consecutive_completions} "
+                        f"consecutive completion attempts without making any edits"
+                    )
 
                 logger.info(
                     "Agent completed after %d round(s)",
@@ -524,11 +531,6 @@ class AgentLoop:
                     and "path" in tool_call.arguments
                 ):
                     self.state.record_file_read(tool_call.arguments["path"])
-
-                if self._is_pytest_tool_call(tool_call):
-                    self.state.record_pytest_result(tool_result.ok)
-                elif self._is_ruff_tool_call(tool_call):
-                    self.state.record_ruff_result(tool_result.ok)
 
                 logger.info(
                     "Tool completed: %s, success=%s",
@@ -585,12 +587,21 @@ class AgentLoop:
         )
 
     @staticmethod
-    def _has_edit_tool(tool_schemas: list[dict[str, Any]]) -> bool:
-        """Return whether the current Agent interface can modify source files."""
-        return any(
-            schema.get("function", {}).get("name") in EDIT_TOOL_NAMES
+    def _filter_repair_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter tool schemas to only allow read and edit tools for repair rounds.
+
+        Args:
+            tool_schemas: Full list of available tool schemas
+
+        Returns:
+            Filtered list containing only read_file, edit_file, and write_file tools
+        """
+        repair_allowed_tools = {"read_file", "edit_file", "write_file"}
+        return [
+            schema
             for schema in tool_schemas
-        )
+            if schema.get("function", {}).get("name") in repair_allowed_tools
+        ]
 
     @staticmethod
     def _is_effective_edit(
@@ -644,18 +655,7 @@ class AgentLoop:
             return False
         return args[:2] == ["ruff", "check"]
 
-    @staticmethod
-    def _format_completion_rejection(blockers: list[str]) -> str:
-        """Build actionable feedback for a premature final response."""
-        details = "\n".join(f"- {blocker}" for blocker in blockers)
-        return (
-            "COMPLETION_REJECTED\n"
-            "The coding task is not complete:\n"
-            f"{details}\n"
-            "Continue with the required source edit, Pytest, and Ruff check. "
-            "Return a final answer only after both checks pass for the latest "
-            "edit."
-        )
+
 
     def _inject_state_context(self, messages: list[dict[str, Any]], round_number: int) -> list[dict[str, Any]]:
         """Inject state summary into the system message for agent context.
