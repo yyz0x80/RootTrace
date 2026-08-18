@@ -72,6 +72,18 @@ class TestAgentLoopInit:
                 max_rounds=-5,
             )
 
+    def test_init_rejects_negative_empty_response_retries(self):
+        """The empty-response retry budget must be non-negative."""
+        with pytest.raises(
+            ValueError,
+            match="max_empty_response_retries must be non-negative",
+        ):
+            AgentLoop(
+                provider=Mock(),
+                tools=Mock(),
+                max_empty_response_retries=-1,
+            )
+
 class TestAgentLoopRun:
     """Tests for AgentLoop.run method."""
 
@@ -264,7 +276,7 @@ class TestAgentLoopRun:
             agent_loop.run("Never-ending task")
 
     def test_run_model_returns_no_content_no_tools(self):
-        """Test error when model returns neither content nor tool calls."""
+        """Empty responses should fail only after the retry budget."""
         mock_provider = Mock()
         mock_tools = Mock()
         mock_tools.get_tool_schemas.return_value = []
@@ -281,6 +293,29 @@ class TestAgentLoopRun:
 
         with pytest.raises(AgentLoopError, match="neither tool calls nor final content"):
             agent_loop.run("Test issue")
+
+        assert mock_provider.complete.call_count == 3
+
+    def test_run_retries_empty_response_until_content_arrives(self):
+        """A transient empty response should not consume an Agent round."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_provider.complete.side_effect = [
+            AssistantTurn(content=None, tool_calls=[]),
+            AssistantTurn(content="   ", tool_calls=[]),
+            AssistantTurn(content="Task completed", tool_calls=[]),
+        ]
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            max_rounds=1,
+        )
+
+        result = agent_loop.run("Complete the task")
+
+        assert result == "Task completed"
+        assert mock_provider.complete.call_count == 3
 
     def test_completion_gate_requires_edit_and_post_edit_pytest(self):
         """Final content is rejected until the current edit passes Pytest."""

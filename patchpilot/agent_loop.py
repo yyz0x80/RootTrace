@@ -35,6 +35,7 @@ from patchpilot.workspace import Workspace
 logger = logging.getLogger(__name__)
 
 MAX_FAILURE_SUMMARY_CHARS = 500
+DEFAULT_EMPTY_RESPONSE_RETRIES = 2
 EDIT_TOOL_NAMES = frozenset({"edit_file", "apply_patch"})
 SENSITIVE_VALUE_PATTERN = re.compile(
     r"(?i)\b([a-z0-9_]*(?:api[_-]?key|token|password|secret))\b"
@@ -312,9 +313,12 @@ class AgentLoop:
         max_consecutive_failures: int = 3,
         enable_progress_tracking: bool = True,
         enable_completion_gate: bool = True,
+        max_empty_response_retries: int = DEFAULT_EMPTY_RESPONSE_RETRIES,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
+        if max_empty_response_retries < 0:
+            raise ValueError("max_empty_response_retries must be non-negative")
 
         self.provider = provider
         self.tools = tools
@@ -325,6 +329,7 @@ class AgentLoop:
         self.max_consecutive_failures = max_consecutive_failures
         self.enable_progress_tracking = enable_progress_tracking
         self.enable_completion_gate = enable_completion_gate
+        self.max_empty_response_retries = max_empty_response_retries
         self.state = AgentState()
 
     def update_workspace(self, workspace: Workspace) -> None:
@@ -419,7 +424,7 @@ class AgentLoop:
             # Inject state summary into system prompt for context
             enhanced_messages = self._inject_state_context(messages, round_number)
 
-            assistant_turn = self.provider.complete(
+            assistant_turn = self._complete_with_empty_response_retry(
                 messages=enhanced_messages,
                 tools=tool_schemas,
             )
@@ -549,6 +554,34 @@ class AgentLoop:
         raise AgentLoopLimitError(
             f"Agent exceeded the maximum of "
             f"{self.max_rounds} rounds"
+        )
+
+    def _complete_with_empty_response_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AssistantTurn:
+        """Retry bounded empty model responses without consuming a round."""
+        for retry_number in range(self.max_empty_response_retries + 1):
+            assistant_turn = self.provider.complete(
+                messages=messages,
+                tools=tools,
+            )
+            if assistant_turn.tool_calls or (
+                assistant_turn.content
+                and assistant_turn.content.strip()
+            ):
+                return assistant_turn
+            if retry_number < self.max_empty_response_retries:
+                logger.warning(
+                    "Model returned an empty response; retrying (%d/%d)",
+                    retry_number + 1,
+                    self.max_empty_response_retries,
+                )
+
+        raise AgentLoopError(
+            "Model returned neither tool calls nor final content after "
+            f"{self.max_empty_response_retries} retries"
         )
 
     @staticmethod
