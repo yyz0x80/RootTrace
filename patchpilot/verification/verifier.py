@@ -51,6 +51,7 @@ class Verifier:
         run_id: str,
         target_tests: list[str] | None = None,
         target_acceptance_criteria: list[str] | None = None,
+        target_direct_acceptance_criteria: list[str] | None = None,
         retry_count: int = 0,
     ) -> VerificationReport:
         """Run lint, target tests, and full regression tests.
@@ -62,6 +63,8 @@ class Verifier:
             run_id: Unique identifier for this verification run
             target_tests: Optional list of specific test paths to run first
             target_acceptance_criteria: Optional list of acceptance criteria for target tests
+            target_direct_acceptance_criteria: Criteria directly exercised by
+                precise target test node IDs.
             retry_count: Number of retry attempts for failed checks
 
         Returns:
@@ -116,6 +119,11 @@ class Verifier:
                         acceptance_criteria=target_acceptance_criteria or []
                         if level == "LEVEL_2_TARGET_TESTS"
                         else [],
+                        direct_acceptance_criteria=(
+                            target_direct_acceptance_criteria or []
+                            if level == "LEVEL_2_TARGET_TESTS"
+                            else []
+                        ),
                     )
                 )
                 continue
@@ -136,6 +144,11 @@ class Verifier:
                     acceptance_criteria=target_acceptance_criteria or []
                     if level == "LEVEL_2_TARGET_TESTS"
                     else [],
+                    direct_acceptance_criteria=(
+                        target_direct_acceptance_criteria or []
+                        if level == "LEVEL_2_TARGET_TESTS"
+                        else []
+                    ),
                 )
             )
 

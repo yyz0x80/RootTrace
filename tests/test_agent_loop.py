@@ -114,6 +114,34 @@ class TestAgentLoopRun:
         assert result == "Task completed successfully"
         assert mock_provider.complete.call_count == 1
 
+    def test_run_supports_focused_system_prompt_and_state_reset(self):
+        """A focused run should replace prompt context and stale progress."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_provider.complete.return_value = AssistantTurn(
+            content="Repair completed",
+            tool_calls=[],
+        )
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            system_prompt="Generic system prompt",
+        )
+        agent_loop.state.record_tool_call("search_code", True)
+
+        result = agent_loop.run(
+            "Repair the failed patch",
+            system_prompt="Focused repair prompt",
+            reset_state=True,
+        )
+
+        assert result == "Repair completed"
+        messages = mock_provider.complete.call_args.kwargs["messages"]
+        assert messages[0]["content"].startswith("Focused repair prompt")
+        assert "Generic system prompt" not in messages[0]["content"]
+        assert agent_loop.state.tool_usage_count == {}
+
     def test_run_with_single_tool_call(self):
         """Test execution of a single tool call."""
         mock_provider = Mock()
@@ -691,8 +719,44 @@ class TestAgentLoopProgressTracking:
             enable_progress_tracking=True,
         )
 
-        with pytest.raises(AgentLoopError, match="consecutive tool failures"):
+        with pytest.raises(AgentLoopError, match="repeated tool failures"):
             agent_loop.run("Test issue")
+
+    def test_different_tool_failures_do_not_trigger_early_stop(self):
+        """Different failure fingerprints should retain the recovery budget."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_tools.get_available_tools.return_value = ["run_command", "edit_file"]
+        mock_tools.execute.side_effect = [
+            ToolResult(ok=False, content="pytest collection failed"),
+            ToolResult(ok=False, content="old_text is not unique"),
+            ToolResult(ok=False, content="old_text not found"),
+        ]
+        mock_provider.complete.side_effect = [
+            AssistantTurn(
+                content=None,
+                tool_calls=[ToolCall("call_1", "run_command", {})],
+            ),
+            AssistantTurn(
+                content=None,
+                tool_calls=[ToolCall("call_2", "edit_file", {})],
+            ),
+            AssistantTurn(
+                content=None,
+                tool_calls=[ToolCall("call_3", "edit_file", {})],
+            ),
+            AssistantTurn(content="Recovered", tool_calls=[]),
+        ]
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            max_rounds=4,
+            max_consecutive_failures=3,
+        )
+
+        assert agent_loop.run("Fix the implementation") == "Recovered"
+        assert agent_loop.state.consecutive_failures == 1
 
     def test_pytest_failure_does_not_trigger_tool_failure_stop(self):
         """Test that a failed Pytest run does not consume the tool failure budget."""

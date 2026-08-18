@@ -36,6 +36,7 @@ def test_select_pytest_target_and_acceptance_criteria() -> None:
         "tests/test_task.py::test_priority"
     ]
     assert selection.acceptance_criteria == ["AC-1"]
+    assert selection.direct_acceptance_criteria == ["AC-1"]
 
 
 def test_select_python_module_pytest_command() -> None:
@@ -53,6 +54,7 @@ def test_select_python_module_pytest_command() -> None:
 
     assert selection.tests == ["tests/test_task.py"]
     assert selection.acceptance_criteria == ["AC-1", "AC-2"]
+    assert selection.direct_acceptance_criteria == []
 
 
 def test_ignore_ruff_planned_check() -> None:
@@ -70,6 +72,7 @@ def test_ignore_ruff_planned_check() -> None:
 
     assert selection.tests == []
     assert selection.acceptance_criteria == []
+    assert selection.direct_acceptance_criteria == []
 
 
 def test_reject_path_traversal_target() -> None:

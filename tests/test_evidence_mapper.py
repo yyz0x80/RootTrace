@@ -53,6 +53,7 @@ def test_map_acceptance_evidence_pass_case():
                 exit_code=0,
                 duration_seconds=1.0,
                 acceptance_criteria=["AC-1"],
+                direct_acceptance_criteria=["AC-1"],
             ),
             CheckReport(
                 level="LEVEL_2_TARGET_TESTS",
@@ -61,6 +62,7 @@ def test_map_acceptance_evidence_pass_case():
                 exit_code=0,
                 duration_seconds=1.0,
                 acceptance_criteria=["AC-2"],
+                direct_acceptance_criteria=["AC-2"],
             ),
         ],
     )
@@ -74,6 +76,55 @@ def test_map_acceptance_evidence_pass_case():
     assert evidence[1].criterion_id == "AC-2"
     assert evidence[1].status == EvidenceStatus.PASS
     assert "src/other.py" in evidence[1].changed_files
+
+
+def test_broad_mapped_test_remains_unverified_without_direct_evidence():
+    """A passing file-level suite must not prove every mapped behavior."""
+    issue = NormalizedIssue(
+        title="Median behavior",
+        task_type="bug",
+        problem_statement="Even-length inputs return the wrong median.",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-1",
+                description="Even-length inputs use both middle values.",
+            )
+        ],
+    )
+    plan = ChangePlan(
+        planned_changes=[
+            PlannedChange(
+                path="src/statistics.py",
+                action=ChangeAction.MODIFY,
+                description="Fix median",
+                acceptance_criteria=["AC-1"],
+            )
+        ],
+        risk_level="low",
+    )
+    report = VerificationReport(
+        passed=True,
+        checks=[
+            CheckReport(
+                level="LEVEL_2_TARGET_TESTS",
+                command="pytest tests/test_statistics.py",
+                passed=True,
+                exit_code=0,
+                duration_seconds=1.0,
+                acceptance_criteria=["AC-1"],
+            )
+        ],
+    )
+
+    evidence = map_acceptance_evidence(
+        issue,
+        plan,
+        [WorkspaceChange(path="src/statistics.py", action="modify")],
+        report,
+    )
+
+    assert evidence[0].status == EvidenceStatus.UNVERIFIED
+    assert "direct behavioral evidence" in evidence[0].explanation
 
 
 def test_map_acceptance_evidence_fail_case():

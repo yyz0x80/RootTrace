@@ -41,7 +41,7 @@ def map_acceptance_evidence(
 
     The status determination follows fixed rules:
     - FAIL: Any mapped verification check failed
-    - PASS: Planned files changed AND at least one mapped check passed
+    - PASS: Planned files changed AND a direct behavioral check passed
     - UNVERIFIED: No code change or no passing verification
 
     Args:
@@ -76,11 +76,17 @@ def map_acceptance_evidence(
             for check in report.checks
             if criterion.id in check.acceptance_criteria
         ]
+        direct_checks = [
+            check
+            for check in mapped_checks
+            if criterion.id in check.direct_acceptance_criteria
+        ]
 
         # Step 5.4: Determine status based on fixed rules
         status, explanation = _determine_evidence_status(
             changed_files=changed_files,
             mapped_checks=mapped_checks,
+            direct_checks=direct_checks,
         )
 
         # Extract test names from mapped checks for evidence
@@ -114,17 +120,19 @@ def map_acceptance_evidence(
 def _determine_evidence_status(
     changed_files: list[str],
     mapped_checks: list[CheckReport],
+    direct_checks: list[CheckReport],
 ) -> tuple[EvidenceStatus, str]:
     """Determine evidence status based on changed files and check results.
 
     Implements the fixed rule hierarchy for status determination:
     1. FAIL if any mapped check failed
-    2. PASS if files changed and at least one check passed
+    2. PASS if files changed and at least one direct behavioral check passed
     3. UNVERIFIED otherwise
 
     Args:
         changed_files: List of files that actually changed for this criterion
         mapped_checks: List of verification checks associated with this criterion
+        direct_checks: Mapped checks that directly exercise the criterion.
 
     Returns:
         Tuple of (EvidenceStatus, explanation string)
@@ -136,15 +144,16 @@ def _determine_evidence_status(
             "A mapped deterministic verification check failed.",
         )
 
-    # Rule 2: PASS if files changed and at least one check passed
-    if changed_files and any(check.passed for check in mapped_checks):
+    # Rule 2: broad plan mappings are not sufficient proof of behavior. Only
+    # precise test targets explicitly marked as direct evidence may pass an AC.
+    if changed_files and any(check.passed for check in direct_checks):
         return (
             EvidenceStatus.PASS,
-            "A planned source file changed and its mapped verification passed.",
+            "A planned source file changed and a direct behavioral check passed.",
         )
 
     # Rule 3: UNVERIFIED if no code change or no passing verification
     return (
         EvidenceStatus.UNVERIFIED,
-        "The criterion lacks an actual code change or passing mapped verification.",
+        "The criterion lacks an actual code change or passing direct behavioral evidence.",
     )

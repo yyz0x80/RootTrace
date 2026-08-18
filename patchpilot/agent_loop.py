@@ -95,7 +95,8 @@ class AgentState:
     Attributes:
         files_modified: Set of file paths that have been modified
         tool_usage_count: Counter tracking how many times each tool was used
-        consecutive_failures: Number of consecutive tool failures
+        consecutive_failures: Number of consecutive failures with the same
+            normalized fingerprint.
         last_tool_success: Whether the last tool call succeeded
         total_edits: Total number of edit operations performed
         unique_files_read: Set of file paths that have been read
@@ -152,9 +153,14 @@ class AgentState:
             self.consecutive_failures = 0
             self.recent_failures.clear()
         else:
-            self.consecutive_failures += 1
-            # Record failure signature for pattern detection
             failure_signature = self._generate_failure_signature(tool_name, error_content)
+            if (
+                self.recent_failures
+                and self.recent_failures[-1] == failure_signature
+            ):
+                self.consecutive_failures += 1
+            else:
+                self.consecutive_failures = 1
             self.recent_failures.append(failure_signature)
             # Keep only the last 5 failures to avoid unbounded growth
             if len(self.recent_failures) > 5:
@@ -290,11 +296,21 @@ class AgentLoop:
         """
         self.tools.update_workspace(workspace)
 
-    def run(self, issue: str) -> str:
+    def run(
+        self,
+        issue: str,
+        *,
+        system_prompt: str | None = None,
+        reset_state: bool = False,
+    ) -> str:
         """Run the Agent Loop until the model returns a final answer.
 
         Args:
             issue: The repository task or issue description.
+            system_prompt: Optional prompt override for a focused execution
+                mode such as verification repair.
+            reset_state: Whether to discard progress counters from a previous
+                independent Agent run.
 
         Returns:
             The model's final text response.
@@ -307,10 +323,19 @@ class AgentLoop:
         if not issue.strip():
             raise ValueError("issue must not be empty")
 
+        if reset_state:
+            self.state = AgentState()
+
+        active_system_prompt = (
+            self.system_prompt
+            if system_prompt is None
+            else system_prompt
+        )
+
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": self.system_prompt,
+                "content": active_system_prompt,
             },
             {
                 "role": "user",
@@ -332,15 +357,16 @@ class AgentLoop:
                 progress_summary = self.state.get_progress_summary()
                 print(f"[Progress] {progress_summary}")
 
-            # Check for early stopping due to repeated failures
+            # Stop only when the same normalized failure repeats. Different
+            # tool errors may represent useful recovery attempts.
             if self.enable_early_stopping and self.state.should_stop_early(self.max_consecutive_failures):
                 logger.warning(
-                    "Early stopping triggered after %d consecutive failures",
+                    "Early stopping triggered after %d repeated failures",
                     self.state.consecutive_failures,
                 )
                 raise AgentLoopError(
                     f"Agent stopped early after {self.state.consecutive_failures} "
-                    f"consecutive tool failures"
+                    f"repeated tool failures"
                 )
 
             # Notify callback of round start

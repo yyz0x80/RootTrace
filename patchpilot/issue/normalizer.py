@@ -49,6 +49,14 @@ Required JSON shape:
 }
 """
 
+MAX_STRUCTURED_REPAIR_RESPONSE_CHARS = 4_000
+_DESCRIPTION_LIST_FIELDS = (
+    "constraints",
+    "ambiguous_points",
+    "expected_test_areas",
+    "implementation_notes",
+)
+
 
 _EXECUTION_BOUNDARY_MARKERS = (
     "do not access",
@@ -174,6 +182,64 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
+def _repair_description_lists(data: dict) -> dict:
+    """Normalize safe string-list variants returned by weaker models.
+
+    A model may wrap a string in ``{"description": "..."}`` even when the
+    schema requires a plain string. Only that lossless representation is
+    repaired; unknown objects remain unchanged so schema validation can reject
+    them.
+    """
+    repaired = dict(data)
+    for field_name in _DESCRIPTION_LIST_FIELDS:
+        values = repaired.get(field_name)
+        if not isinstance(values, list):
+            continue
+
+        normalized_values = []
+        for value in values:
+            if isinstance(value, dict):
+                description = value.get("description")
+                if isinstance(description, str) and description.strip():
+                    normalized_values.append(description)
+                    continue
+            normalized_values.append(value)
+        repaired[field_name] = normalized_values
+
+    return repaired
+
+
+def _parse_normalized_issue(response: str) -> NormalizedIssue:
+    """Parse and locally repair one normalized-issue response."""
+    data = _repair_description_lists(_extract_json(response))
+    normalized_issue = NormalizedIssue.model_validate(data)
+    return _separate_execution_constraints(normalized_issue)
+
+
+def _build_normalizer_repair_prompt(
+    original_prompt: str,
+    invalid_response: str,
+    error: ValueError,
+) -> str:
+    """Build one bounded retry prompt for invalid structured output."""
+    bounded_response = invalid_response[-MAX_STRUCTURED_REPAIR_RESPONSE_CHARS:]
+    return f"""
+{original_prompt}
+
+Your previous JSON response did not match the required schema.
+
+Validation error:
+{error}
+
+Previous response:
+{bounded_response}
+
+Return one corrected JSON object only. Preserve the issue meaning. Every item
+in constraints, ambiguous_points, expected_test_areas, and
+implementation_notes must be a JSON string, not an object.
+"""
+
+
 def normalize_issue(
     issue: RawIssue,
     generate: Callable[[str], str],
@@ -205,8 +271,13 @@ Issue body:
 """
 
     response = generate(prompt)
-
-    data = _extract_json(response)
-
-    normalized_issue = NormalizedIssue.model_validate(data)
-    return _separate_execution_constraints(normalized_issue)
+    try:
+        return _parse_normalized_issue(response)
+    except ValueError as error:
+        repair_prompt = _build_normalizer_repair_prompt(
+            original_prompt=prompt,
+            invalid_response=response,
+            error=error,
+        )
+        repaired_response = generate(repair_prompt)
+        return _parse_normalized_issue(repaired_response)

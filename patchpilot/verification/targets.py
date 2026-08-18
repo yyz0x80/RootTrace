@@ -13,6 +13,7 @@ class TargetTestSelection:
 
     tests: list[str]
     acceptance_criteria: list[str]
+    direct_acceptance_criteria: list[str]
 
 
 def _append_unique(items: list[str], value: str) -> None:
@@ -71,10 +72,12 @@ def select_target_tests(
         return TargetTestSelection(
             tests=[],
             acceptance_criteria=[],
+            direct_acceptance_criteria=[],
         )
 
     targets: list[str] = []
     criterion_ids: list[str] = []
+    direct_criterion_ids: list[str] = []
 
     for planned_test in plan.planned_tests:
         pytest_args = _pytest_arguments(planned_test.command)
@@ -95,7 +98,18 @@ def select_target_tests(
             for criterion_id in planned_test.acceptance_criteria:
                 _append_unique(criterion_ids, criterion_id)
 
+        if (
+            len(planned_targets) == 1
+            and "::" in planned_targets[0]
+            and len(planned_test.acceptance_criteria) == 1
+        ):
+            _append_unique(
+                direct_criterion_ids,
+                planned_test.acceptance_criteria[0],
+            )
+
     return TargetTestSelection(
         tests=targets,
         acceptance_criteria=criterion_ids,
+        direct_acceptance_criteria=direct_criterion_ids,
     )

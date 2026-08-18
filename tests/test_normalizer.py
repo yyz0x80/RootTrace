@@ -306,3 +306,67 @@ def test_normalize_issue_separates_execution_constraints():
         "Keep the existing tests read-only.",
         "Do not make any changes outside of the pricing.py file.",
     ]
+
+
+def test_normalize_issue_repairs_description_wrapped_string_lists():
+    """Safely unwrap description objects used in string-list fields."""
+    issue = RawIssue(
+        title="Clarify ordering",
+        body="The ordering rule is not defined.",
+        source="test",
+    )
+    calls = 0
+
+    def mock_generate(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return """{
+  "title": "Clarify ordering",
+  "task_type": "feature",
+  "problem_statement": "The ordering rule is not defined.",
+  "acceptance_criteria": [],
+  "constraints": [],
+  "ambiguous_points": [
+    {"description": "Whether oldest or newest items come first is unclear."}
+  ],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert calls == 1
+    assert result.ambiguous_points == [
+        "Whether oldest or newest items come first is unclear."
+    ]
+
+
+def test_normalize_issue_retries_invalid_structured_output_once():
+    """Retry one malformed response with the validation error."""
+    issue = RawIssue(title="Fix parser", body="Parsing fails.", source="test")
+    responses = iter(
+        [
+            '{"title": "Fix parser", "task_type": "invalid"}',
+            """{
+  "title": "Fix parser",
+  "task_type": "bug",
+  "problem_statement": "Parsing fails.",
+  "acceptance_criteria": [],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}""",
+        ]
+    )
+    prompts: list[str] = []
+
+    def mock_generate(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.task_type == "bug"
+    assert len(prompts) == 2
+    assert "previous JSON response did not match" in prompts[1]
