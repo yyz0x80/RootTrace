@@ -247,6 +247,94 @@ class TestEditFile:
         assert ".patchpilot_temp" not in result.content
         assert test_file.read_text() == original_content
 
+    def test_edit_file_repairs_multiline_block_indentation(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Unindented continuation lines should inherit block indentation."""
+        test_file = temp_workspace.root / "module.py"
+        test_file.write_text(
+            "def parse(value: str) -> str:\n"
+            "    return value.strip()\n",
+        )
+
+        result = tool_registry.edit_file(
+            {
+                "path": "module.py",
+                "old_text": "return value.strip()",
+                "new_text": (
+                    "normalized = value.strip()\n"
+                    "return normalized.lower()"
+                ),
+            },
+        )
+
+        assert result.ok
+        assert "automatic block-indentation repair" in result.content
+        assert test_file.read_text() == (
+            "def parse(value: str) -> str:\n"
+            "    normalized = value.strip()\n"
+            "    return normalized.lower()\n"
+        )
+
+    def test_edit_file_preserves_valid_multiline_dedent(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Automatic recovery must not alter an already valid replacement."""
+        test_file = temp_workspace.root / "module.py"
+        test_file.write_text(
+            "def first() -> int:\n"
+            "    return 1\n",
+        )
+
+        result = tool_registry.edit_file(
+            {
+                "path": "module.py",
+                "old_text": "return 1",
+                "new_text": (
+                    "return 2\n\n\n"
+                    "def second() -> int:\n"
+                    "    return 3"
+                ),
+            },
+        )
+
+        assert result.ok
+        assert "automatic block-indentation repair" not in result.content
+        assert "\ndef second() -> int:\n" in test_file.read_text()
+
+    def test_edit_file_validation_error_returns_recovery_context(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Rejected edits should return current code without changing the file."""
+        test_file = temp_workspace.root / "module.py"
+        original_content = (
+            "def calculate(value: int) -> int:\n"
+            "    result = value + 1\n"
+            "    return result\n"
+        )
+        test_file.write_text(original_content)
+
+        result = tool_registry.edit_file(
+            {
+                "path": "module.py",
+                "old_text": "result = value + 1",
+                "new_text": "result = (",
+            },
+        )
+
+        assert not result.ok
+        assert "EDIT_REJECTED" in result.content
+        assert "the file was restored" in result.content
+        assert "2:     result = value + 1" in result.content
+        assert "Next step:" in result.content
+        assert test_file.read_text() == original_content
+
     def test_edit_file_old_text_not_found(self, tool_registry, temp_workspace):
         """Test editing when old_text is not found"""
         test_file = temp_workspace.root / "test.py"
@@ -420,8 +508,8 @@ class TestEditFile:
         })
         assert not result.ok
         assert "old_text is empty" in result.content
-        assert "insert_text" in result.content
-        assert "insert_text(path='file.py', line_number=10, text='new content')" in result.content
+        assert "raw=True" in result.content
+        assert "apply_patch" in result.content
 
     def test_edit_file_whitespace_only_old_text_error(self, tool_registry, temp_workspace):
         """Test error message when old_text contains only whitespace"""
@@ -435,7 +523,7 @@ class TestEditFile:
         })
         assert not result.ok
         assert "old_text is empty" in result.content
-        assert "insert_text" in result.content
+        assert "apply_patch" in result.content
 
     def test_edit_file_line_prefix_error_with_example(self, tool_registry, temp_workspace):
         """Test error message with specific example when line prefixes are detected"""
@@ -1491,11 +1579,19 @@ class TestToolSchema:
     def test_get_tool_schemas(self, tool_registry):
         """Test getting all tool schemas in OpenAI format"""
         schemas = tool_registry.get_tool_schemas()
-        assert len(schemas) == 7  # search_code, read_file, edit_file, insert_text, edit_file_by_line, apply_patch, run_command
+        assert len(schemas) == 5
         assert all(isinstance(schema, dict) for schema in schemas)
         assert all(schema["type"] == "function" for schema in schemas)
         tool_names = {schema["function"]["name"] for schema in schemas}
-        assert tool_names == {"search_code", "read_file", "edit_file", "insert_text", "edit_file_by_line", "apply_patch", "run_command"}
+        assert tool_names == {
+            "search_code",
+            "read_file",
+            "edit_file",
+            "apply_patch",
+            "run_command",
+        }
+        assert "insert_text" not in tool_names
+        assert "edit_file_by_line" not in tool_names
 
     def test_get_tool_schema_existing(self, tool_registry):
         """Test getting a specific tool schema that exists"""
@@ -1506,12 +1602,9 @@ class TestToolSchema:
         assert schema.input_schema is not None
         assert isinstance(schema.input_schema, dict)
 
-        # Test the new insert_text tool schema
-        insert_schema = tool_registry.get_tool_schema("insert_text")
-        assert insert_schema is not None
-        assert insert_schema.name == "insert_text"
-        assert insert_schema.description is not None
-        assert insert_schema.input_schema is not None
+        # Compatibility methods are intentionally hidden from the model ACI.
+        assert tool_registry.get_tool_schema("insert_text") is None
+        assert tool_registry.get_tool_schema("edit_file_by_line") is None
 
     def test_get_tool_schema_nonexistent(self, tool_registry):
         """Test getting a specific tool schema that doesn't exist"""

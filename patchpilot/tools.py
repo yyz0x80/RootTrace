@@ -10,9 +10,12 @@ Available tools:
 - search_code: Search for code patterns using ripgrep
 - read_file: Read file content with optional line ranges
 - edit_file: Edit files using exact text replacement
-- insert_text: Insert text at a specific line number
-- apply_patch: Apply a patch to a file (create or modify)
+- apply_patch: Write complete file content when exact replacement is unsuitable
 - run_command: Execute allowed commands in the workspace
+
+The model-facing ACI intentionally exposes only two editing tools. Specialized
+line-based helpers remain available as Python methods for compatibility, but
+are not registered as model tools.
 
 The tool system enforces security boundaries through input validation,
 output size limits, and workspace policy enforcement.
@@ -307,7 +310,13 @@ class ReadFileInput(ToolInput):
 @dataclass
 class EditFileInput(ToolInput):
     """Input for edit_file tool"""
-    description: ClassVar[str] = "Edit file using exact text replacement. Replaces the first occurrence of old_text with new_text and returns a unified diff. Provide context_lines to include surrounding context for better matching. Set preview=True to see the change without applying it. CRITICAL: old_text must NOT contain line number prefixes (e.g., '1:', '2:') - use read_file with raw=True instead. NOTE: old_text cannot be empty - use insert_text tool to add new content at a specific line."
+    description: ClassVar[str] = (
+        "Make a small change to an existing file using unique text replacement. "
+        "The tool preserves block indentation for multiline Python replacements, "
+        "validates the edited file, reverts invalid edits, and returns a unified "
+        "diff. Read the file with raw=True first. old_text must be non-empty and "
+        "must not include displayed line-number prefixes."
+    )
     path: str
     old_text: str
     new_text: str
@@ -396,7 +405,12 @@ class InsertTextInput(ToolInput):
 @dataclass
 class ApplyPatchInput(ToolInput):
     """Input for apply_patch tool"""
-    description: ClassVar[str] = "Apply a patch to a file. If the file exists, replaces its entire content and returns a unified diff. If the file doesn't exist, creates it with the given content. Set preview=True to see the change without applying it."
+    description: ClassVar[str] = (
+        "Write the complete content of one file and return a unified diff. Use "
+        "this for planned file creation or when a change cannot be expressed as "
+        "a small unique replacement. Prefer edit_file for existing files. The "
+        "write is validated and reverted if invalid."
+    )
     path: str
     content: str
     preview: bool = False
@@ -563,7 +577,7 @@ class ToolRegistry:
         self.command_runner = command_runner
 
     def _register_default_tools(self) -> None:
-        """Register the default set of tools"""
+        """Register the compact set of tools exposed to the coding model."""
         self.register_tool(
             name="search_code",
             input_class=SearchCodeInput,
@@ -578,16 +592,6 @@ class ToolRegistry:
             name="edit_file",
             input_class=EditFileInput,
             handler=self.edit_file,
-        )
-        self.register_tool(
-            name="insert_text",
-            input_class=InsertTextInput,
-            handler=self.insert_text,
-        )
-        self.register_tool(
-            name="edit_file_by_line",
-            input_class=EditFileByLineInput,
-            handler=self.edit_file_by_line,
         )
         self.register_tool(
             name="apply_patch",
@@ -868,9 +872,13 @@ class ToolRegistry:
         if not input_data.old_text or not input_data.old_text.strip():
             return ToolResult(
                 ok=False,
-                content="ERROR: old_text is empty. The edit_file tool requires existing text to replace. "
-                       "If you want to insert new content at a specific location, use the insert_text tool instead. "
-                       "Example: insert_text(path='file.py', line_number=10, text='new content')"
+                content=(
+                    "EDIT_REJECTED: old_text is empty or whitespace-only; it "
+                    "must contain existing file text. "
+                    "Re-read the file with raw=True and choose a unique anchor. "
+                    "Use apply_patch only when the plan creates a file or a "
+                    "small replacement cannot express the change."
+                ),
             )
 
         # Early validation for line number prefixes in old_text
@@ -926,8 +934,13 @@ class ToolRegistry:
                            f"Please provide more specific context or use context_lines parameter."
                 )
 
-            # Perform replacement
-            new_content = original_content.replace(matched_text, input_data.new_text, 1)
+            replacement_text = input_data.new_text
+            indentation_repaired = False
+            new_content = original_content.replace(
+                matched_text,
+                replacement_text,
+                1,
+            )
 
             # Generate unified diff
             original_lines = original_content.splitlines(keepends=True)
@@ -955,20 +968,132 @@ class ToolRegistry:
                 display_path=input_data.path,
             )
             if not validation_passed:
+                # Exact replacement preserves indentation before the first
+                # matched line, but not before continuation lines supplied by
+                # the model. Retry once with conservative block indentation.
+                repaired_text, indentation_repaired = (
+                    self._prepare_replacement_text(
+                        original_content=original_content,
+                        matched_text=matched_text,
+                        new_text=input_data.new_text,
+                        is_python=resolved_path.suffix == ".py",
+                    )
+                )
+                if indentation_repaired:
+                    repaired_content = original_content.replace(
+                        matched_text,
+                        repaired_text,
+                        1,
+                    )
+                    with open(resolved_path, "w", encoding="utf-8") as f:
+                        f.write(repaired_content)
+                    validation_passed, validation_errors = (
+                        run_intermediate_validation(
+                            resolved_path,
+                            display_path=input_data.path,
+                        )
+                    )
+                    if validation_passed:
+                        new_content = repaired_content
+                        new_lines = new_content.splitlines(keepends=True)
+                        diff = difflib.unified_diff(
+                            original_lines,
+                            new_lines,
+                            fromfile=input_data.path,
+                            tofile=input_data.path,
+                            lineterm="",
+                        )
+                        diff_text = "".join(diff)
+
+            if not validation_passed:
                 # Revert the change if validation fails
                 with open(resolved_path, "w", encoding="utf-8") as f:
                     f.write(original_content)
                 return ToolResult(
                     ok=False,
-                    content="Edit reverted due to validation failure:\n" + "\n".join(validation_errors)
+                    content=self._format_validation_rejection(
+                        file_content=original_content,
+                        matched_text=matched_text,
+                        file_path=input_data.path,
+                        validation_errors=validation_errors,
+                    ),
                 )
 
-            return ToolResult(ok=True, content=diff_text or "(no diff)")
+            result_content = diff_text or "(no diff)"
+            if indentation_repaired:
+                result_content = (
+                    "Applied with automatic block-indentation repair.\n"
+                    + result_content
+                )
+            return ToolResult(ok=True, content=result_content)
 
         except UnicodeDecodeError:
             return ToolResult(ok=False, content="File is not valid UTF-8 text")
         except OSError as e:
             return ToolResult(ok=False, content=f"Edit failed: {e}")
+
+    @staticmethod
+    def _prepare_replacement_text(
+        original_content: str,
+        matched_text: str,
+        new_text: str,
+        is_python: bool,
+    ) -> tuple[str, bool]:
+        """Indent unindented continuation lines to match a Python code block.
+
+        Only continuation lines without explicit indentation are adjusted. A
+        model can therefore still provide deliberately nested indentation.
+        """
+        if not is_python or "\n" not in new_text:
+            return new_text, False
+
+        match_start = original_content.index(matched_text)
+        line_start = original_content.rfind("\n", 0, match_start) + 1
+        leading_text = original_content[line_start:match_start]
+        if not leading_text or not leading_text.isspace():
+            return new_text, False
+
+        lines = new_text.splitlines(keepends=True)
+        repaired = False
+        for index in range(1, len(lines)):
+            content = lines[index].rstrip("\r\n")
+            line_ending = lines[index][len(content):]
+            if content and not content[0].isspace():
+                lines[index] = leading_text + content + line_ending
+                repaired = True
+
+        return "".join(lines), repaired
+
+    @staticmethod
+    def _format_validation_rejection(
+        file_content: str,
+        matched_text: str,
+        file_path: str,
+        validation_errors: list[str],
+    ) -> str:
+        """Return concise recovery context after an invalid edit is reverted."""
+        lines = file_content.splitlines()
+        match_start = file_content.index(matched_text)
+        match_line = file_content.count("\n", 0, match_start)
+        context_start = max(0, match_line - 2)
+        context_end = min(len(lines), match_line + 4)
+        context = "\n".join(
+            f"{line_number}: {lines[line_number - 1]}"
+            for line_number in range(context_start + 1, context_end + 1)
+        )
+        errors = "\n".join(
+            f"- {error}"
+            for error in validation_errors
+        )
+        return (
+            "EDIT_REJECTED: validation failed and the file was restored.\n"
+            f"File: {file_path}\n"
+            f"Validation errors:\n{errors}\n"
+            "Current code near the rejected edit:\n"
+            f"{context}\n"
+            "Next step: use this current code as the exact replacement anchor "
+            "or re-read a slightly larger block with raw=True."
+        )
 
     def _try_match_with_fallback(self, file_content: str, old_text: str) -> MatchResult:
         """Try to match old_text in file_content using multi-tier fallback strategy.
@@ -1022,8 +1147,7 @@ class ToolRegistry:
         if not old_text or not old_text.strip():
             error_msg = "ERROR: old_text is empty.\n"
             error_msg += "The edit_file tool requires existing text to replace.\n"
-            error_msg += "SOLUTION: If you want to insert new content, use the insert_text tool instead.\n"
-            error_msg += "Example: insert_text(path='file.py', line_number=10, text='new content')\n"
+            error_msg += "SOLUTION: Re-read the file and choose a unique existing anchor.\n"
             return ToolResult(ok=False, content=error_msg)
 
         # Check if old_text contains line number prefixes (common mistake)
@@ -1086,7 +1210,7 @@ class ToolRegistry:
                 error_msg += "Tip: Use read_file with raw=True to get clean content without line numbers.\n"
             else:
                 error_msg += "No similar content found. Please re-read the file to get the exact text.\n"
-                error_msg += "Tip: If you want to insert new content at a specific location, use insert_text instead.\n"
+                error_msg += "Tip: Replace a larger unique block when a small anchor is unavailable.\n"
 
         return ToolResult(ok=False, content=error_msg)
 

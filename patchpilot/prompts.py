@@ -37,19 +37,15 @@ Rules:
 12. When adding new types like Optional, import them at the top of the file using edit_file
 
 TOOL USAGE GUIDELINES:
-- read_file WARNING: Output includes line number prefixes (e.g., "1: content"). These are NOT part of the actual file content.
-- edit_file CRITICAL: NEVER include line number prefixes (like "1:", "2:", etc.) in old_text parameter.
-- edit_file CRITICAL: ALWAYS use read_file with raw=True to get content without line numbers before editing.
-- edit_file CRITICAL: old_text must match the ACTUAL file content exactly, including whitespace and newlines.
-- edit_file CRITICAL: The old_text must be an EXACT substring match. Be careful with trailing newlines.
-- edit_file CRITICAL: old_text MUST NOT be empty. edit_file only replaces existing text, it cannot insert new content.
-- edit_file CRITICAL: To add new imports, include the existing import line(s) in old_text and add the new import in new_text.
-- edit_file recommended workflow: read_file(path="file.py", raw=True) → use exact output as old_text
-- After each edit_file, call read_file again (with raw=True) to verify the change was applied correctly.
-- Track which files you have modified to avoid redundant operations.
-- Use preview=True sparingly - only for complex changes. Most edits should be applied directly.
-- Make SMALL, INCREMENTAL changes. Don't try to replace entire file contents at once.
-- Start with the smallest possible change (e.g., add one field at a time).
+- Use edit_file for focused changes to existing files. Read the relevant block
+  with raw=True first and provide a unique, non-empty old_text value.
+- Do not copy displayed line-number prefixes into old_text.
+- Multiline Python replacements inherit the surrounding block indentation.
+- Use apply_patch only for planned file creation or when a focused replacement
+  cannot express the change. It writes the complete file content.
+- Prefer one coherent edit over several overlapping edit attempts.
+- Read the file again after an edit when the returned diff is not sufficient to
+  confirm the resulting structure.
 
 ERROR RECOVERY STRATEGY:
 - VERIFICATION_FAILURE means the command ran successfully but a deterministic check failed. Analyze the reported test or lint evidence and fix the source code.
