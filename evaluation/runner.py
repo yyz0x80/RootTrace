@@ -58,6 +58,9 @@ class RunResult:
     error_message: str = ""
     outcome_matched: bool = False
     actual_status: str = "UNKNOWN"
+    verification_report_present: bool = False
+    patch_generated: bool = False
+    failure_type: str | None = None
 
 
 @dataclass
@@ -72,6 +75,8 @@ class ScoreResult:
     score: float
     hidden_tests_passed: bool
     outcome_matched: bool
+    verification_report_present: bool = False
+    patch_generated: bool = False
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -497,22 +502,42 @@ def check_verification_report(execute_dir: Path) -> bool:
     return (execute_dir / "verification_report.json").exists()
 
 
-def extract_final_status(execute_dir: Path) -> str:
-    """Extract the final status from the machine-readable run summary.
+def extract_run_status(summary: dict[str, Any]) -> str:
+    """Extract a non-null final status from an execute summary."""
+    final_status = summary.get("final_status")
+    if isinstance(final_status, str) and final_status:
+        return final_status
+    return "UNKNOWN"
 
-    Args:
-        execute_dir: Directory containing execute artifacts.
 
-    Returns:
-        Final status string (e.g., "VERIFIED", "FAILED")
-    """
-    summary_path = execute_dir / "run_summary.json"
-    if not summary_path.exists():
+PREPARE_OUTCOME_STATUSES = {
+    "AMBIGUOUS_REQUIREMENT": "NEEDS_CLARIFICATION",
+    "FILE_SYSTEM_ERROR": "BLOCKED",
+    "INVALID_INPUT": "FAILED",
+    "PLAN_INVALID": "BLOCKED",
+    "PREPARE_FAILED": "FAILED",
+    "PROVIDER_CONFIGURATION_ERROR": "BLOCKED",
+    "PROVIDER_ERROR": "BLOCKED",
+    "READY_FOR_APPROVAL": "READY_FOR_APPROVAL",
+    "REPOSITORY_INVALID": "BLOCKED",
+    "SCOPE_VIOLATION": "BLOCKED",
+}
+
+
+def extract_prepare_status(summary: dict[str, Any] | None) -> str:
+    """Extract a non-null prepare status from a structured summary."""
+    if summary is None:
         return "UNKNOWN"
 
-    with open(summary_path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("final_status", "UNKNOWN")
+    final_status = summary.get("final_status")
+    if isinstance(final_status, str) and final_status:
+        return final_status
+
+    outcome_code = summary.get("outcome_code")
+    if isinstance(outcome_code, str) and outcome_code:
+        return PREPARE_OUTCOME_STATUSES.get(outcome_code, outcome_code)
+
+    return "UNKNOWN"
 
 
 def execute_task(
@@ -595,10 +620,20 @@ def execute_task(
                     baseline_result.stderr or baseline_result.stdout
                 )
                 return result
-            result.actual_status = str(
-                summary.get("final_status", "UNKNOWN")
+            result.actual_status = extract_run_status(summary)
+            result.verification_report_present = check_verification_report(
+                execute_dir
             )
-            if task_config.score_commands and not check_patch_exists(execute_dir):
+            result.patch_generated = check_patch_exists(execute_dir)
+            result.failure_type = (
+                str(summary["failure_type"])
+                if summary.get("failure_type")
+                else None
+            )
+            result.outcome_matched = (
+                result.actual_status == task_config.expected_final_status
+            )
+            if task_config.score_commands and not result.patch_generated:
                 result.status = "patch_not_generated"
                 result.error_message = "patch.diff not found after baseline"
                 return result
@@ -624,11 +659,7 @@ def execute_task(
         if task_config.expected_phase == "prepare":
             result.phase = "prepare"
             summary = load_json_object(prepare_dir / "prepare_summary.json")
-            result.actual_status = (
-                str(summary.get("final_status", "UNKNOWN"))
-                if summary is not None
-                else "UNKNOWN"
-            )
+            result.actual_status = extract_prepare_status(summary)
             result.outcome_matched = (
                 result.actual_status == task_config.expected_final_status
             )
@@ -649,6 +680,13 @@ def execute_task(
             return result
 
         if not result.prepare_success:
+            summary = load_json_object(prepare_dir / "prepare_summary.json")
+            result.actual_status = extract_prepare_status(summary)
+            result.outcome_matched = (
+                result.actual_status == task_config.expected_final_status
+            )
+            if summary is not None and summary.get("outcome_code"):
+                result.failure_type = str(summary["outcome_code"])
             result.status = "prepare_failed"
             result.error_message = prepare_result.stderr or prepare_result.stdout
             return result
@@ -685,12 +723,22 @@ def execute_task(
             result.error_message = execute_result.stderr or execute_result.stdout
             return result
 
-        result.actual_status = str(
-            run_summary.get("final_status", "UNKNOWN")
+        result.actual_status = extract_run_status(run_summary)
+        result.verification_report_present = check_verification_report(
+            execute_dir
+        )
+        result.patch_generated = check_patch_exists(execute_dir)
+        result.failure_type = (
+            str(run_summary["failure_type"])
+            if run_summary.get("failure_type")
+            else None
+        )
+        result.outcome_matched = (
+            result.actual_status == task_config.expected_final_status
         )
 
         # Tasks with hidden tests require a patch for the scoring checkout.
-        if task_config.score_commands and not check_patch_exists(execute_dir):
+        if task_config.score_commands and not result.patch_generated:
             result.status = "patch_not_generated"
             result.error_message = "patch.diff not found after execute"
             return result
@@ -741,7 +789,20 @@ def score_task(
         score=0.0,
         hidden_tests_passed=False,
         outcome_matched=run_result.outcome_matched,
+        verification_report_present=(
+            check_verification_report(execute_dir)
+            if run_result.phase == "execute"
+            else False
+        ),
+        patch_generated=(
+            check_patch_exists(execute_dir)
+            if run_result.phase == "execute"
+            else False
+        ),
     )
+    result.details["run_status"] = run_result.status
+    if run_result.failure_type:
+        result.details["failure_type"] = run_result.failure_type
 
     # For tasks that stopped at prepare phase
     if run_result.phase == "prepare":
@@ -753,17 +814,26 @@ def score_task(
 
     # For tasks that failed during execution
     if not run_result.execute_success:
-        result.actual_status = "EXECUTION_FAILED"
+        result.actual_status = (
+            run_result.actual_status
+            if run_result.actual_status != "UNKNOWN"
+            else "EXECUTION_FAILED"
+        )
         result.score = 0.0
         if run_result.error_message:
             result.details["error_message"] = run_result.error_message
         return result
 
-    # Extract actual status from verification report
-    if check_verification_report(execute_dir):
-        result.actual_status = extract_final_status(execute_dir)
-    else:
-        result.actual_status = "NO_VERIFICATION_REPORT"
+    # The run summary is authoritative even when verification did not run.
+    run_summary = load_json_object(execute_dir / "run_summary.json")
+    result.actual_status = (
+        extract_run_status(run_summary)
+        if run_result.actual_status == "UNKNOWN" and run_summary is not None
+        else run_result.actual_status
+    )
+    result.outcome_matched = (
+        result.actual_status == result.expected_status
+    )
 
     # Create scoring repository copy
     temp_dir = Path(tempfile.mkdtemp())
@@ -845,6 +915,10 @@ def save_score_result(run_dir: Path, score: ScoreResult) -> None:
                 "score": score.score,
                 "hidden_tests_passed": score.hidden_tests_passed,
                 "outcome_matched": score.outcome_matched,
+                "verification_report_present": (
+                    score.verification_report_present
+                ),
+                "patch_generated": score.patch_generated,
                 "details": score.details,
             },
             f,
@@ -1336,6 +1410,18 @@ def main() -> None:
             )
 
             print(f"  Score: {score_result.score:.1f}, Status: {score_result.actual_status}")
+            report_state = (
+                "present"
+                if score_result.verification_report_present
+                else "missing"
+            )
+            patch_state = (
+                "generated" if score_result.patch_generated else "missing"
+            )
+            print(
+                f"  Artifacts: verification_report={report_state}, "
+                f"patch={patch_state}"
+            )
 
             # Save score result
             run_dir = evaluation_root / "runs" / timestamp / task_config.task_id

@@ -365,6 +365,80 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
     assert result.score == 1.0
 
 
+def test_score_task_preserves_failed_status_without_verification_report(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    evaluation_root = tmp_path / "evaluation"
+    shutil.copytree(
+        project_root / "evaluation" / "fixtures" / "day5_python_repo",
+        evaluation_root / "fixtures" / "day5_python_repo",
+    )
+    timestamp = "failed-run"
+    execute_dir = (
+        evaluation_root
+        / "runs"
+        / timestamp
+        / "failed-task"
+        / "execute"
+    )
+    write_json(
+        execute_dir / "run_summary.json",
+        {
+            "final_status": "FAILED",
+            "failure_type": "AGENT_ERROR",
+        },
+    )
+    config = TaskConfig(
+        task_id="failed-task",
+        category="single_file_bug",
+        repository="fixtures/day5_python_repo",
+        base_commit="a3df5b5f8aadf0015070e07ad21c22f744de3230",
+        issue="tasks/failed-task/issue.md",
+        expected_final_status="VERIFIED",
+        allowed_changes=[],
+        target_tests=[],
+        score_commands=[],
+    )
+    result = runner.score_task(
+        task_config=config,
+        run_result=RunResult(
+            task_id="failed-task",
+            phase="execute",
+            status="patch_not_generated",
+            prepare_success=True,
+            execute_success=True,
+            score_success=False,
+            actual_status="FAILED",
+            failure_type="AGENT_ERROR",
+        ),
+        evaluation_root=evaluation_root,
+        timestamp=timestamp,
+    )
+
+    assert result.actual_status == "FAILED"
+    assert result.verification_report_present is False
+    assert result.patch_generated is False
+    assert result.details["run_status"] == "patch_not_generated"
+    assert result.details["failure_type"] == "AGENT_ERROR"
+    runner.save_score_result(execute_dir.parent, result)
+    saved = json.loads(
+        (execute_dir.parent / "score.json").read_text(encoding="utf-8")
+    )
+    assert saved["actual_status"] == "FAILED"
+    assert saved["verification_report_present"] is False
+    assert saved["patch_generated"] is False
+
+
+def test_extract_prepare_status_maps_null_final_status() -> None:
+    assert runner.extract_prepare_status(
+        {
+            "outcome_code": "READY_FOR_APPROVAL",
+            "final_status": None,
+        }
+    ) == "READY_FOR_APPROVAL"
+
+
 def test_aggregate_scores_calculates_deterministic_metrics(
     tmp_path: Path,
 ) -> None:
@@ -594,6 +668,76 @@ def test_execute_task_materializes_expected_git_commit(
     assert result.status == "stopped_at_prepare"
     assert result.outcome_matched is True
     prepare.assert_called_once()
+
+
+def test_execute_task_uses_summary_for_prepare_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    evaluation_root = tmp_path / "evaluation"
+    shutil.copytree(
+        project_root / "evaluation" / "fixtures" / "day5_python_repo",
+        evaluation_root / "fixtures" / "day5_python_repo",
+    )
+    issue = evaluation_root / "tasks" / "plan-invalid" / "issue.md"
+    issue.parent.mkdir(parents=True)
+    issue.write_text("# Add a feature\n", encoding="utf-8")
+
+    def fake_prepare(**kwargs: object) -> subprocess.CompletedProcess[str]:
+        output_dir = kwargs["output_dir"]
+        assert isinstance(output_dir, Path)
+        write_json(
+            output_dir / "prepare_summary.json",
+            {
+                "outcome_code": "PLAN_INVALID",
+                "final_status": "BLOCKED",
+                "reasons": ["AC-2 has no planned source change."],
+            },
+        )
+        return subprocess.CompletedProcess(
+            args=["patchpilot", "prepare"],
+            returncode=1,
+            stdout="",
+            stderr="Plan validation failed",
+        )
+
+    monkeypatch.setattr(
+        "evaluation.runner.run_patchpilot_prepare",
+        fake_prepare,
+    )
+    execute = Mock()
+    monkeypatch.setattr(
+        "evaluation.runner.run_patchpilot_execute",
+        execute,
+    )
+    config = TaskConfig(
+        task_id="plan-invalid",
+        category="small_feature",
+        repository="fixtures/day5_python_repo",
+        base_commit="a3df5b5f8aadf0015070e07ad21c22f744de3230",
+        issue="tasks/plan-invalid/issue.md",
+        expected_final_status="VERIFIED",
+        allowed_changes=[],
+        target_tests=[],
+        score_commands=[],
+    )
+
+    result = execute_task(
+        task_config=config,
+        evaluation_root=evaluation_root,
+        project_root=project_root,
+        model="test-model",
+        max_rounds=4,
+        max_repairs=1,
+        timestamp="prepare-failure-run",
+    )
+
+    assert result.status == "prepare_failed"
+    assert result.actual_status == "BLOCKED"
+    assert result.failure_type == "PLAN_INVALID"
+    assert result.outcome_matched is False
+    execute.assert_not_called()
 
 
 def test_execute_task_baseline_skips_prepare_and_uses_run_summary(

@@ -57,6 +57,10 @@ allowlist, Docker isolation, and read-only tests as PatchPilot.
 Use `--variant patchpilot` for the full
 `prepare -> approve -> execute -> verify -> repair -> evidence` workflow.
 Every subprocess writes `stdout.log` and `stderr.log` beside its artifacts.
+Each task's `score.json` keeps `actual_status`,
+`verification_report_present`, and `patch_generated` as separate fields. A
+missing report or patch therefore remains diagnosable without replacing the
+terminal status recorded by `prepare_summary.json` or `run_summary.json`.
 
 ## Aggregate metrics
 
