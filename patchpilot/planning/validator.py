@@ -145,11 +145,13 @@ def validate_plan(
     # Step 1: Validate plan consistency with repository
     validate_plan_against_repository(plan, repository_context)
 
-    # Step 2: Validate acceptance-criterion coverage when issue context exists
-    if issue is not None:
-        validate_acceptance_coverage(plan, issue)
-
-    # Step 3: Check scope restrictions
+    # Step 2: Reject security and scope violations before asking whether every
+    # acceptance criterion has an implementation mapping.
     scope_result = check_scope(plan)
+
+    # Step 3: Validate coverage only for executable plans. Unsafe plans must be
+    # blocked as-is rather than treated as repairable planning omissions.
+    if scope_result.allowed and issue is not None:
+        validate_acceptance_coverage(plan, issue)
 
     return scope_result

@@ -595,6 +595,79 @@ def test_prepare_writes_to_configured_output_dir(
         assert actual_calls == expected_calls
 
 
+def test_prepare_classifies_exhausted_plan_retry_as_plan_invalid(
+    tmp_path: Path,
+) -> None:
+    """Planner repair exhaustion should produce a blocked plan outcome."""
+    from argparse import Namespace
+
+    from patchpilot.cli import handle_prepare
+    from patchpilot.planning.planner import PlanGenerationError
+    from patchpilot.repository.schema import (
+        RepositoryContext,
+        RepositoryPreflightResult,
+    )
+
+    args = Namespace(
+        repo=str(tmp_path),
+        issue="issue.md",
+        model=None,
+        output_dir=str(tmp_path / "output"),
+    )
+    provider = Mock(
+        model="test-model",
+        llm_call_count=2,
+        prompt_tokens=10,
+        completion_tokens=5,
+    )
+    normalized_issue = NormalizedIssue(
+        title="Fix behavior",
+        task_type="bug",
+        problem_statement="The behavior is incorrect.",
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=[],
+        python_files=[],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    with (
+        patch("patchpilot.cli.load_issue", return_value=Mock()),
+        patch("patchpilot.cli._create_provider", return_value=provider),
+        patch(
+            "patchpilot.cli.normalize_issue",
+            return_value=normalized_issue,
+        ),
+        patch(
+            "patchpilot.cli.validate_repository",
+            return_value=RepositoryPreflightResult(
+                repo_path=tmp_path,
+                head_sha="abc123",
+            ),
+        ),
+        patch(
+            "patchpilot.cli.analyze_repository",
+            return_value=repository_context,
+        ),
+        patch(
+            "patchpilot.cli.create_plan",
+            side_effect=PlanGenerationError("plan remains incomplete"),
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        handle_prepare(args)
+
+    summary = json.loads(
+        (tmp_path / "output" / "prepare_summary.json").read_text()
+    )
+    assert exc_info.value.code == 1
+    assert summary["outcome_code"] == "PLAN_INVALID"
+    assert summary["final_status"] == "BLOCKED"
+
+
 @patch("patchpilot.cli.validate_repository")
 @patch("patchpilot.cli.WorkflowRunner")
 def test_execute_writes_to_configured_output_dir(

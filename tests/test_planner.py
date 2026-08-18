@@ -7,6 +7,7 @@ import pytest
 from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
 from patchpilot.planning.planner import (
     IGNORED_DIRS,
+    PlanGenerationError,
     _extract_json,
     create_plan,
     create_plan_with_path,
@@ -707,3 +708,133 @@ def test_create_plan_with_repository_context():
     prompt = mock_generate.call_args[0][0]
     assert "src/main.py" in prompt
     assert "tracked_files" in prompt
+
+
+def test_create_plan_retries_missing_acceptance_coverage_once():
+    """Retry an incomplete plan with the exact missing AC diagnostic."""
+    issue = NormalizedIssue(
+        title="Fix behavior",
+        task_type="bug",
+        problem_statement="The behavior is incorrect.",
+        acceptance_criteria=[
+            AcceptanceCriterion(id="AC-1", description="First behavior"),
+            AcceptanceCriterion(id="AC-2", description="Second behavior"),
+        ],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["src/main.py", "tests/test_main.py"],
+        python_files=["src/main.py"],
+        test_files=["tests/test_main.py"],
+        config_files=[],
+        keyword_matches=["src/main.py"],
+    )
+    incomplete = """{
+  "repository_match": true,
+  "relevant_files": ["src/main.py"],
+  "planned_changes": [{
+    "path": "src/main.py",
+    "action": "modify",
+    "description": "Fix first behavior",
+    "acceptance_criteria": ["AC-1"]
+  }],
+  "planned_tests": [{
+    "command": "pytest tests/test_main.py",
+    "purpose": "Verify behavior",
+    "acceptance_criteria": ["AC-1", "AC-2"]
+  }],
+  "out_of_scope": [],
+  "risk_level": "low"
+}"""
+    repaired = incomplete.replace(
+        '"acceptance_criteria": ["AC-1"]',
+        '"acceptance_criteria": ["AC-1", "AC-2"]',
+        1,
+    )
+    prompts: list[str] = []
+    responses = iter([incomplete, repaired])
+
+    def mock_generate(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    plan = create_plan(issue, repository_context, mock_generate)
+
+    assert plan.base_commit == "abc123"
+    assert plan.planned_changes[0].acceptance_criteria == ["AC-1", "AC-2"]
+    assert len(prompts) == 2
+    assert "missing planned source changes: AC-2" in prompts[1]
+    assert "read-only" in prompts[1]
+
+
+def test_create_plan_does_not_retry_scope_violation():
+    """Unsafe plans should reach the scope gate without a coverage retry."""
+    issue = NormalizedIssue(
+        title="Disable CI",
+        task_type="feature",
+        problem_statement="Disable quality checks.",
+        acceptance_criteria=[
+            AcceptanceCriterion(id="AC-1", description="Disable CI"),
+        ],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=[".github/workflows/ci.yml"],
+        python_files=[],
+        test_files=[],
+        config_files=[".github/workflows/ci.yml"],
+        keyword_matches=[],
+    )
+    response = """{
+  "repository_match": true,
+  "relevant_files": [".github/workflows/ci.yml"],
+  "planned_changes": [{
+    "path": ".github/workflows/ci.yml",
+    "action": "modify",
+    "description": "Disable CI",
+    "acceptance_criteria": []
+  }],
+  "planned_tests": [],
+  "out_of_scope": [],
+  "risk_level": "low"
+}"""
+    generate = Mock(return_value=response)
+
+    plan = create_plan(issue, repository_context, generate)
+
+    assert plan.planned_changes[0].path == ".github/workflows/ci.yml"
+    generate.assert_called_once()
+
+
+def test_create_plan_raises_plan_generation_error_after_failed_retry():
+    """A plan that remains incomplete should have a stable error type."""
+    issue = NormalizedIssue(
+        title="Fix behavior",
+        task_type="bug",
+        problem_statement="The behavior is incorrect.",
+        acceptance_criteria=[
+            AcceptanceCriterion(id="AC-1", description="Fix behavior"),
+        ],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["src/main.py"],
+        python_files=["src/main.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=["src/main.py"],
+    )
+    incomplete = """{
+  "repository_match": true,
+  "relevant_files": ["src/main.py"],
+  "planned_changes": [],
+  "planned_tests": [],
+  "out_of_scope": [],
+  "risk_level": "low"
+}"""
+    generate = Mock(side_effect=[incomplete, incomplete])
+
+    with pytest.raises(PlanGenerationError, match="after one repair"):
+        create_plan(issue, repository_context, generate)
+
+    assert generate.call_count == 2

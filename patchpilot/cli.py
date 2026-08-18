@@ -22,7 +22,7 @@ from patchpilot.evidence.schema import AcceptanceCoverageReport
 from patchpilot.issue.loader import load_issue
 from patchpilot.issue.normalizer import normalize_issue
 from patchpilot.issue.schema import NormalizedIssue
-from patchpilot.planning.planner import create_plan
+from patchpilot.planning.planner import PlanGenerationError, create_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_plan
@@ -539,6 +539,12 @@ def handle_prepare(args) -> None:
         print(f"\nReview the artifacts in {output_dir}/ directory.")
         print(f"To execute this plan, run: patchpilot execute --repo <repo> --issue {output_dir}/normalized_issue.json --plan {output_dir}/plan.json --output-dir {output_dir} --task-id <task-id>")
 
+    except PlanGenerationError as e:
+        outcome_code = "PLAN_INVALID"
+        final_status = "BLOCKED"
+        reasons = [str(e)]
+        print(f"Plan validation failed: {e}", file=sys.stderr)
+        sys.exit(1)
     except (OpenAIError, ToolCallParseError) as e:
         outcome_code = "PROVIDER_ERROR"
         final_status = "BLOCKED"

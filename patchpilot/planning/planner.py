@@ -10,6 +10,8 @@ from pathlib import Path
 
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan
+from patchpilot.planning.scope_gate import check_scope
+from patchpilot.planning.validator import validate_acceptance_coverage
 from patchpilot.repository.schema import RepositoryContext
 
 # Directories to ignore when scanning repository files
@@ -25,6 +27,12 @@ IGNORED_DIRS = {
     "dist",
     "build",
 }
+
+MAX_PLAN_REPAIR_RESPONSE_CHARS = 5_000
+
+
+class PlanGenerationError(ValueError):
+    """Raised when a generated plan remains invalid after one repair."""
 
 
 def get_repository_files(repo_path: str) -> list[str]:
@@ -86,6 +94,10 @@ Rules:
    NEVER include test files in planned_changes. Tests should only be in planned_tests for verification.
 10. Test file modifications are FORBIDDEN. Even if the issue mentions updating tests,
     the agent should only modify source code and rely on existing tests for verification.
+11. Map every acceptance criterion ID to at least one planned source change and
+    one deterministic planned test. One change or test may map multiple criteria.
+12. Constraints are execution boundaries, not acceptance criteria. Do not invent
+    source changes merely to implement a read-only or security constraint.
 
 Required structure:
 
@@ -148,6 +160,84 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+def _parse_plan_response(response: str, base_commit: str) -> ChangePlan:
+    """Parse one planner response and apply the authoritative base commit."""
+    plan = ChangePlan.model_validate(_extract_json(response))
+    plan.base_commit = base_commit
+    return plan
+
+
+def _validate_generated_plan_coverage(
+    plan: ChangePlan,
+    issue: NormalizedIssue,
+) -> None:
+    """Validate recoverable acceptance coverage errors in a model plan."""
+    # Security and scope violations are terminal decisions, not omissions the
+    # model should be prompted to repair into a more detailed plan.
+    if plan.repository_match and check_scope(plan).allowed:
+        validate_acceptance_coverage(plan, issue)
+
+
+def _build_plan_repair_prompt(
+    original_prompt: str,
+    invalid_response: str,
+    error: ValueError,
+) -> str:
+    """Build one bounded retry prompt for a malformed or incomplete plan."""
+    bounded_response = invalid_response[-MAX_PLAN_REPAIR_RESPONSE_CHARS:]
+    return f"""
+{original_prompt}
+
+Your previous plan was invalid.
+
+Validation error:
+{error}
+
+Previous response:
+{bounded_response}
+
+Return one corrected JSON object only. Every acceptance criterion must map to
+at least one planned source-code change and one deterministic planned test.
+Files under tests/ and files named test_*.py are read-only and must never
+appear in planned_changes. Preserve repository_match=false when the issue does
+not match the repository; do not invent a missing subsystem.
+"""
+
+
+def _generate_plan_with_repair(
+    *,
+    issue: NormalizedIssue,
+    prompt: str,
+    generate: Callable[[str], str],
+    base_commit: str,
+) -> ChangePlan:
+    """Generate a plan and retry once with precise validation feedback."""
+    response = generate(prompt)
+    try:
+        plan = _parse_plan_response(response, base_commit)
+        _validate_generated_plan_coverage(plan, issue)
+        return plan
+    except ValueError as error:
+        repair_prompt = _build_plan_repair_prompt(
+            original_prompt=prompt,
+            invalid_response=response,
+            error=error,
+        )
+        repaired_response = generate(repair_prompt)
+        try:
+            repaired_plan = _parse_plan_response(
+                repaired_response,
+                base_commit,
+            )
+            _validate_generated_plan_coverage(repaired_plan, issue)
+            return repaired_plan
+        except ValueError as repair_error:
+            raise PlanGenerationError(
+                "Planner returned an invalid plan after one repair: "
+                f"{repair_error}"
+            ) from repair_error
+
+
 def create_plan(
     issue: NormalizedIssue,
     repository_context: RepositoryContext,
@@ -179,16 +269,12 @@ def create_plan(
         repository_context=repository_context_json,
     )
 
-    response = generate(prompt)
-
-    data = _extract_json(response)
-
-    plan = ChangePlan.model_validate(data)
-
-    # Set base_commit from repository context (not from LLM)
-    plan.base_commit = repository_context.base_commit
-
-    return plan
+    return _generate_plan_with_repair(
+        issue=issue,
+        prompt=prompt,
+        generate=generate,
+        base_commit=repository_context.base_commit,
+    )
 
 
 def create_plan_with_path(
@@ -221,13 +307,9 @@ def create_plan_with_path(
         repository_context=repository_context_json,
     )
 
-    response = generate(prompt)
-
-    data = _extract_json(response)
-
-    plan = ChangePlan.model_validate(data)
-
-    # Set base_commit from repository context (not from LLM)
-    plan.base_commit = base_commit
-
-    return plan
+    return _generate_plan_with_repair(
+        issue=issue,
+        prompt=prompt,
+        generate=generate,
+        base_commit=base_commit,
+    )

@@ -83,6 +83,43 @@ def test_validate_plan_with_scope_violation():
     assert any(".env" in v for v in result.violations)
 
 
+def test_validate_plan_reports_scope_before_missing_coverage():
+    """Unsafe plans should be blocked without raising a coverage error."""
+    issue = NormalizedIssue(
+        title="Disable CI",
+        task_type="feature",
+        problem_statement="Disable quality checks.",
+        acceptance_criteria=[
+            AcceptanceCriterion(id="AC-1", description="Disable CI"),
+        ],
+    )
+    plan = ChangePlan(
+        repository_match=True,
+        relevant_files=[".github/workflows/ci.yml"],
+        planned_changes=[
+            PlannedChange(
+                path=".github/workflows/ci.yml",
+                action="modify",
+                description="Disable CI",
+            ),
+        ],
+        risk_level="low",
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=[".github/workflows/ci.yml"],
+        python_files=[],
+        test_files=[],
+        config_files=[".github/workflows/ci.yml"],
+        keyword_matches=[],
+    )
+
+    result = validate_plan(plan, repository_context, issue=issue)
+
+    assert not result.allowed
+    assert any("CI/CD" in violation for violation in result.violations)
+
+
 def test_validate_plan_with_repository_mismatch():
     """Test validation raises error for repository mismatch."""
     plan = ChangePlan(
