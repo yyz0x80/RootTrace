@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from collections import Counter
 from dataclasses import dataclass
 from time import perf_counter
@@ -34,6 +35,7 @@ from patchpilot.workspace import Workspace
 logger = logging.getLogger(__name__)
 
 MAX_FAILURE_SUMMARY_CHARS = 500
+EDIT_TOOL_NAMES = frozenset({"edit_file", "apply_patch"})
 SENSITIVE_VALUE_PATTERN = re.compile(
     r"(?i)\b([a-z0-9_]*(?:api[_-]?key|token|password|secret))\b"
     r"(\s*[:=]\s*)([^\s,;]+)"
@@ -102,6 +104,9 @@ class AgentState:
         unique_files_read: Set of file paths that have been read
         recent_failures: List of recent failure signatures for pattern detection
         last_failure_type: Classification of the most recent failure.
+        edit_revision: Monotonic revision incremented after each effective edit.
+        verified_edit_revision: Revision covered by the latest passing Pytest run.
+        linted_edit_revision: Revision covered by the latest passing Ruff run.
     """
 
     files_modified: set[str]
@@ -112,6 +117,9 @@ class AgentState:
     unique_files_read: set[str]
     recent_failures: list[str]
     last_failure_type: ToolFailureType | None
+    edit_revision: int
+    verified_edit_revision: int | None
+    linted_edit_revision: int | None
 
     def __init__(self) -> None:
         self.files_modified = set()
@@ -122,6 +130,9 @@ class AgentState:
         self.unique_files_read = set()
         self.recent_failures = []
         self.last_failure_type = None
+        self.edit_revision = 0
+        self.verified_edit_revision = None
+        self.linted_edit_revision = None
 
     def record_tool_call(
         self,
@@ -174,6 +185,32 @@ class AgentState:
         """
         self.files_modified.add(file_path)
         self.total_edits += 1
+        self.edit_revision += 1
+        self.verified_edit_revision = None
+        self.linted_edit_revision = None
+
+    def record_pytest_result(self, passed: bool) -> None:
+        """Record whether Pytest verified the current edit revision."""
+        self.verified_edit_revision = self.edit_revision if passed else None
+
+    def record_ruff_result(self, passed: bool) -> None:
+        """Record whether Ruff verified the current edit revision."""
+        self.linted_edit_revision = self.edit_revision if passed else None
+
+    def completion_blockers(self) -> list[str]:
+        """Return unmet requirements for a successful coding completion."""
+        blockers = []
+        if self.edit_revision == 0:
+            blockers.append("no effective source edit has been applied")
+        if self.verified_edit_revision != self.edit_revision:
+            blockers.append(
+                "Pytest has not passed after the most recent source edit"
+            )
+        if self.linted_edit_revision != self.edit_revision:
+            blockers.append(
+                "Ruff has not passed after the most recent source edit"
+            )
+        return blockers
 
     def record_file_read(self, file_path: str) -> None:
         """Record that a file was read.
@@ -274,6 +311,7 @@ class AgentLoop:
         enable_early_stopping: bool = True,
         max_consecutive_failures: int = 3,
         enable_progress_tracking: bool = True,
+        enable_completion_gate: bool = True,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -286,6 +324,7 @@ class AgentLoop:
         self.enable_early_stopping = enable_early_stopping
         self.max_consecutive_failures = max_consecutive_failures
         self.enable_progress_tracking = enable_progress_tracking
+        self.enable_completion_gate = enable_completion_gate
         self.state = AgentState()
 
     def update_workspace(self, workspace: Workspace) -> None:
@@ -344,6 +383,10 @@ class AgentLoop:
         ]
 
         tool_schemas = self.tools.get_tool_schemas()
+        completion_gate_enabled = (
+            self.enable_completion_gate
+            and self._has_edit_tool(tool_schemas)
+        )
 
         for round_number in range(1, self.max_rounds + 1):
             logger.info(
@@ -394,11 +437,7 @@ class AgentLoop:
                             round_number, tool_call.name, tool_call.arguments
                         )
             else:
-                print(f"[Round {round_number}] final answer")
-
-                # Notify callback of round completion
-                if self.execute_log_callback:
-                    self.execute_log_callback.on_round_complete(round_number)
+                print(f"[Round {round_number}] completion candidate")
 
             # The assistant message must be stored before its tool results.
             messages.append(
@@ -407,16 +446,37 @@ class AgentLoop:
 
             # No tool calls means the model has finished the task.
             if not assistant_turn.tool_calls:
-                if assistant_turn.content:
-                    logger.info(
-                        "Agent completed after %d round(s)",
-                        round_number,
+                content = (assistant_turn.content or "").strip()
+                if not content:
+                    raise AgentLoopError(
+                        "Model returned neither tool calls nor final content"
                     )
-                    return assistant_turn.content
+                if completion_gate_enabled:
+                    blockers = self.state.completion_blockers()
+                    if blockers:
+                        feedback = self._format_completion_rejection(blockers)
+                        logger.info(
+                            "Completion gate rejected round %d: %s",
+                            round_number,
+                            "; ".join(blockers),
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": feedback,
+                            }
+                        )
+                        continue
 
-                raise AgentLoopError(
-                    "Model returned neither tool calls nor final content"
+                logger.info(
+                    "Agent completed after %d round(s)",
+                    round_number,
                 )
+                if self.execute_log_callback:
+                    self.execute_log_callback.on_round_complete(
+                        round_number
+                    )
+                return content
 
             for tool_call in assistant_turn.tool_calls:
                 logger.info(
@@ -441,21 +501,29 @@ class AgentLoop:
                         duration_seconds,
                     )
 
-                # Update state tracking
-                if self.enable_progress_tracking:
-                    error_content = tool_result.content if not tool_result.ok else ""
-                    self.state.record_tool_call(
-                        tool_call.name,
-                        tool_result.ok,
-                        error_content,
-                        tool_result.failure_type,
-                    )
+                # State is also the completion gate's evidence store, so it
+                # must be maintained even when progress display is disabled.
+                error_content = tool_result.content if not tool_result.ok else ""
+                self.state.record_tool_call(
+                    tool_call.name,
+                    tool_result.ok,
+                    error_content,
+                    tool_result.failure_type,
+                )
 
-                    # Track file operations
-                    if tool_call.name in ["edit_file", "edit_file_by_line", "apply_patch"] and tool_result.ok and "path" in tool_call.arguments:
-                        self.state.record_file_edit(tool_call.arguments["path"])
-                    elif tool_call.name == "read_file" and tool_result.ok and "path" in tool_call.arguments:
-                        self.state.record_file_read(tool_call.arguments["path"])
+                if self._is_effective_edit(tool_call, tool_result):
+                    self.state.record_file_edit(tool_call.arguments["path"])
+                elif (
+                    tool_call.name == "read_file"
+                    and tool_result.ok
+                    and "path" in tool_call.arguments
+                ):
+                    self.state.record_file_read(tool_call.arguments["path"])
+
+                if self._is_pytest_tool_call(tool_call):
+                    self.state.record_pytest_result(tool_result.ok)
+                elif self._is_ruff_tool_call(tool_call):
+                    self.state.record_ruff_result(tool_result.ok)
 
                 logger.info(
                     "Tool completed: %s, success=%s",
@@ -481,6 +549,79 @@ class AgentLoop:
         raise AgentLoopLimitError(
             f"Agent exceeded the maximum of "
             f"{self.max_rounds} rounds"
+        )
+
+    @staticmethod
+    def _has_edit_tool(tool_schemas: list[dict[str, Any]]) -> bool:
+        """Return whether the current Agent interface can modify source files."""
+        return any(
+            schema.get("function", {}).get("name") in EDIT_TOOL_NAMES
+            for schema in tool_schemas
+        )
+
+    @staticmethod
+    def _is_effective_edit(
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+    ) -> bool:
+        """Return whether a tool result represents a persisted file change."""
+        if (
+            tool_call.name not in EDIT_TOOL_NAMES
+            or not tool_result.ok
+            or "path" not in tool_call.arguments
+        ):
+            return False
+        normalized_content = tool_result.content.strip()
+        return (
+            normalized_content != "(no diff)"
+            and not normalized_content.startswith("PREVIEW MODE")
+        )
+
+    @staticmethod
+    def _is_pytest_tool_call(tool_call: ToolCall) -> bool:
+        """Return whether a tool call invokes an allowed Pytest command."""
+        if tool_call.name != "run_command":
+            return False
+        command = tool_call.arguments.get("command")
+        if not isinstance(command, str):
+            return False
+        try:
+            args = shlex.split(command)
+        except ValueError:
+            return False
+        return bool(
+            args
+            and (
+                args[0] == "pytest"
+                or args[:3] == ["python", "-m", "pytest"]
+            )
+        )
+
+    @staticmethod
+    def _is_ruff_tool_call(tool_call: ToolCall) -> bool:
+        """Return whether a tool call invokes an allowed Ruff check."""
+        if tool_call.name != "run_command":
+            return False
+        command = tool_call.arguments.get("command")
+        if not isinstance(command, str):
+            return False
+        try:
+            args = shlex.split(command)
+        except ValueError:
+            return False
+        return args[:2] == ["ruff", "check"]
+
+    @staticmethod
+    def _format_completion_rejection(blockers: list[str]) -> str:
+        """Build actionable feedback for a premature final response."""
+        details = "\n".join(f"- {blocker}" for blocker in blockers)
+        return (
+            "COMPLETION_REJECTED\n"
+            "The coding task is not complete:\n"
+            f"{details}\n"
+            "Continue with the required source edit, Pytest, and Ruff check. "
+            "Return a final answer only after both checks pass for the latest "
+            "edit."
         )
 
     def _inject_state_context(self, messages: list[dict[str, Any]], round_number: int) -> list[dict[str, Any]]:

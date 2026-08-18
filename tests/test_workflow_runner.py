@@ -791,7 +791,10 @@ class TestWorkflowRunnerSetup:
                 trace_path=Path(temp_dir) / "trace.jsonl",
             )
 
-        mock_agent_loop.run.assert_called_once_with(issue="Fix the raw issue.")
+        mock_agent_loop.run.assert_called_once_with(
+            issue="Fix the raw issue.",
+            reset_state=True,
+        )
         mock_verifier.assert_called_once()
         assert result.final_status == CompletionState.VERIFIED
         assert result.max_repairs == 0

@@ -711,7 +711,10 @@ class WorkflowRunner:
             logger.info("Running coding agent for initial implementation")
             initial_prompt = f"Implement the following plan:\n\n{plan}"
             try:
-                self.agent_loop.run(issue=initial_prompt)
+                self.agent_loop.run(
+                    issue=initial_prompt,
+                    reset_state=True,
+                )
             except AgentLoopError as error:
                 partial_changes = _get_workspace_changes(workspace_path)
                 if not partial_changes:
@@ -1029,7 +1032,10 @@ class WorkflowRunner:
         agent_error: AgentLoopError | None = None
         try:
             try:
-                self.agent_loop.run(issue=issue)
+                self.agent_loop.run(
+                    issue=issue,
+                    reset_state=True,
+                )
             except AgentLoopError as error:
                 agent_error = error
                 logger.warning("Baseline agent execution failed: %s", error)

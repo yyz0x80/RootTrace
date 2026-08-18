@@ -18,9 +18,14 @@ MANDATORY WORKFLOW for EVERY task:
 2. Call read_file with raw=True to examine the current implementation
 3. Call read_file with raw=True to examine related tests (to understand expected behavior)
 4. Call edit_file to modify SOURCE CODE ONLY - never modify test files
-5. Call run_command to verify changes with tests
+5. Call run_command to verify changes with Pytest and Ruff
 6. If tests fail, analyze the failure and fix your SOURCE CODE changes
 7. Only provide a final text answer when tests pass
+
+The Agent Loop enforces this workflow programmatically. A final response is
+accepted only after an effective source edit and a passing Pytest run after the
+latest edit, plus a passing Ruff check for that edit. If completion is rejected,
+continue from the reported blocker.
 
 Rules:
 1. ALWAYS start with a tool call - never start with text
