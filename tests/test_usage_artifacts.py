@@ -28,6 +28,10 @@ def test_prepare_summary_saves_exact_provider_usage(tmp_path: Path) -> None:
 
     assert summary == {
         "phase": "prepare",
+        "outcome_code": "READY_FOR_APPROVAL",
+        "final_status": None,
+        "exit_code": 0,
+        "reasons": [],
         "model": "test-model",
         "llm_call_count": 2,
         "prompt_tokens": 120,

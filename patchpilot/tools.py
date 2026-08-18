@@ -551,6 +551,13 @@ class ToolRegistry:
         # Register default tools
         self._register_default_tools()
 
+    def update_command_runner(
+        self,
+        command_runner: CommandRunnerProtocol | None,
+    ) -> None:
+        """Update the isolated runner used by the command tool."""
+        self.command_runner = command_runner
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools"""
         self.register_tool(

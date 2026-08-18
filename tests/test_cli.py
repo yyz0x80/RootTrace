@@ -10,6 +10,64 @@ from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan
 
 
+def test_prepare_summary_records_structured_terminal_outcome(
+    tmp_path: Path,
+) -> None:
+    """Test that prepare results do not depend on console text matching."""
+    from patchpilot.cli import _save_prepare_summary
+
+    provider = Mock(
+        model="test-model",
+        llm_call_count=1,
+        prompt_tokens=20,
+        completion_tokens=5,
+    )
+    _save_prepare_summary(
+        tmp_path,
+        provider,
+        outcome_code="AMBIGUOUS_REQUIREMENT",
+        final_status="NEEDS_CLARIFICATION",
+        exit_code=1,
+        reasons=["Priority values are unspecified."],
+    )
+
+    summary = json.loads((tmp_path / "prepare_summary.json").read_text())
+    assert summary["outcome_code"] == "AMBIGUOUS_REQUIREMENT"
+    assert summary["final_status"] == "NEEDS_CLARIFICATION"
+    assert summary["reasons"] == ["Priority values are unspecified."]
+    assert summary["llm_call_count"] == 1
+
+
+def test_failed_run_summary_records_agent_failure(tmp_path: Path) -> None:
+    """Test that execute failures remain machine-readable."""
+    from argparse import Namespace
+
+    from patchpilot.cli import _save_failed_run_summary
+
+    args = Namespace(
+        output_dir=str(tmp_path),
+        task_id="task-1",
+        model="test-model",
+        max_rounds=8,
+        max_repairs=0,
+    )
+    _save_failed_run_summary(
+        args=args,
+        started=0.0,
+        provider=None,
+        base_commit="abc123",
+        final_status="FAILED",
+        failure_type="AGENT_ROUND_LIMIT",
+        error_message="Agent exceeded the round limit",
+    )
+
+    summary = json.loads((tmp_path / "run_summary.json").read_text())
+    assert summary["final_status"] == "FAILED"
+    assert summary["failure_type"] == "AGENT_ROUND_LIMIT"
+    assert summary["error_message"] == "Agent exceeded the round limit"
+    assert summary["artifacts"] == {}
+
+
 @patch("patchpilot.cli.load_issue")
 @patch("patchpilot.cli.normalize_issue")
 @patch("patchpilot.cli.LLMProvider")
@@ -523,6 +581,7 @@ def test_prepare_writes_to_configured_output_dir(
             str(custom_output_dir / "normalized_issue.json"),
             str(custom_output_dir / "repository_context.json"),
             str(custom_output_dir / "plan.json"),
+            str(custom_output_dir / "prepare_summary.json"),
         ]
         actual_calls = [call[0][0] for call in mock_save_json.call_args_list]
         assert actual_calls == expected_calls

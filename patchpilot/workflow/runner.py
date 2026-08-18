@@ -30,7 +30,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from patchpilot.agent_loop import AgentLoop, ExecuteLogCallback
+from patchpilot.agent_loop import AgentLoop, AgentLoopError, ExecuteLogCallback
+from patchpilot.evidence.schema import CompletionState
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import (
@@ -892,6 +893,84 @@ class WorkflowRunner:
             # Cleanup: Stop sandbox and remove temporary directory
             self._cleanup()
 
+    def execute_baseline(
+        self,
+        issue: str,
+        trace_path: Path | None = None,
+    ) -> WorkflowResult:
+        """Run the raw issue through one agent pass and one verification pass.
+
+        This path intentionally omits normalization, planning, acceptance
+        evidence mapping, scope-plan validation, and repair attempts. It keeps
+        the same workspace protections, tool allowlist, Docker sandbox, and
+        deterministic verifier as the full PatchPilot workflow.
+        """
+        run_id = str(uuid.uuid4())
+        execution_start_time = time.time()
+        workspace_path = self._create_temporary_workspace()
+        self.workspace = Workspace(workspace_path)
+
+        output_trace_path = trace_path or workspace_path.parent / "trace.jsonl"
+        trace_writer = TraceWriter(output_trace_path)
+        trace_writer.start_run()
+
+        self.agent_loop.update_workspace(self.workspace)
+        execute_callback = WorkflowExecuteLogCallback(trace_writer, run_id)
+        self.agent_loop.execute_log_callback = execute_callback
+        self._start_sandbox(workspace_path)
+
+        agent_error: AgentLoopError | None = None
+        try:
+            try:
+                self.agent_loop.run(issue=issue)
+            except AgentLoopError as error:
+                agent_error = error
+                logger.warning("Baseline agent execution failed: %s", error)
+
+            final_changes = _get_workspace_changes(workspace_path)
+            report = self._run_traced_verification(
+                trace_writer=trace_writer,
+                workflow_stage="VERIFY",
+                run_id=run_id,
+                change_plan=None,
+                retry_count=0,
+            )
+            report.patch = generate_patch(workspace_path, final_changes)
+
+            if report.failure_type in BASELINE_BLOCKING_FAILURE_TYPES:
+                final_status = CompletionState.BLOCKED
+            elif agent_error is not None or not report.passed:
+                final_status = CompletionState.FAILED
+            else:
+                final_status = CompletionState.VERIFIED
+
+            trace_writer.write(
+                TraceEvent(
+                    run_id=run_id,
+                    event_type="workflow_completed",
+                    workflow_stage="RESULT",
+                    modified_files=[change.path for change in final_changes],
+                    verification_result=report.to_dict(),
+                    retry_count=0,
+                    final_status=final_status.value,
+                )
+            )
+
+            return WorkflowResult(
+                run_id=run_id,
+                final_status=final_status,
+                changed_files=[change.path for change in final_changes],
+                acceptance_evidence=[],
+                verification_report=report.to_dict(),
+                patch=report.patch or "",
+                duration_seconds=time.time() - execution_start_time,
+                retry_count=0,
+                max_rounds=self.agent_loop.max_rounds,
+                max_repairs=0,
+            )
+        finally:
+            self._cleanup()
+
     def _create_temporary_workspace(self) -> Path:
         """Create a temporary copy of the repository workspace using git archive.
 
@@ -1030,6 +1109,7 @@ class WorkflowRunner:
                 self.sandbox = DockerSandbox(workspace=workspace_path)
 
             self.sandbox.start()
+            self.agent_loop.tools.update_command_runner(self.sandbox)
             logger.info("Docker sandbox started successfully")
 
             # Log sandbox section with structured output

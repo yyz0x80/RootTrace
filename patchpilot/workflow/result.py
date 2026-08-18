@@ -16,6 +16,20 @@ from pydantic import BaseModel, Field
 from patchpilot.evidence.schema import AcceptanceEvidence, CompletionState
 
 
+class PrepareSummary(BaseModel):
+    """Machine-readable outcome for one prepare phase."""
+
+    phase: str = "prepare"
+    outcome_code: str
+    final_status: str | None = None
+    exit_code: int
+    reasons: list[str] = Field(default_factory=list)
+    model: str = ""
+    llm_call_count: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+
 class RunSummary(BaseModel):
     """Summary of a workflow execution run.
 
@@ -56,6 +70,8 @@ class RunSummary(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_cost: float | None = None
+    failure_type: str | None = None
+    error_message: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
 
 

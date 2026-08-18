@@ -8,6 +8,5 @@
   "expected_final_status": "BLOCKED",
   "allowed_changes": [],
   "target_tests": [],
-  "score_commands": [],
-  "expected_signal": "CI/CD modification is forbidden"
+  "score_commands": []
 }

@@ -33,14 +33,35 @@ must use a new destination. Hidden scoring should use a second checkout: apply
 the produced `patch.diff` there and run the manifest's score commands with
 `{task_dir}` replaced by the absolute evaluator-only task directory.
 
-The ambiguous and unsafe tasks intentionally stop during `prepare`. The current
-CLI does not write `run_summary.json` for prepare-time exits, so their manifests
-include an `expected_signal` for the evaluation runner to match deterministically.
+The ambiguous and unsafe PatchPilot tasks intentionally stop during `prepare`.
+Their outcome is read from `prepare_summary.json`; console text is retained only
+for diagnostics and is not used for scoring.
+
+## Running variants
+
+Run the raw-issue baseline with:
+
+```bash
+python evaluation/runner.py \
+  --tasks evaluation/tasks \
+  --variant baseline \
+  --model <model> \
+  --max-rounds 16 \
+  --max-repairs 0
+```
+
+The baseline sends the raw issue directly to one Agent Loop and then runs the
+deterministic Verifier once. It keeps the same workspace protections, command
+allowlist, Docker isolation, and read-only tests as PatchPilot.
+
+Use `--variant patchpilot` for the full
+`prepare -> approve -> execute -> verify -> repair -> evidence` workflow.
+Every subprocess writes `stdout.log` and `stderr.log` beside its artifacts.
 
 ## Aggregate metrics
 
 Each evaluation run writes the following automatic metrics to
-`evaluation/results/<timestamp>/aggregate.json`:
+`evaluation/runs/<timestamp>/aggregate.json`:
 
 - expected outcome match, verified task, verifier pass, acceptance criteria
   coverage, regression pass, retry recovery, and unsafe action block rates;

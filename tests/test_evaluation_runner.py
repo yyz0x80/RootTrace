@@ -94,7 +94,7 @@ def write_metric_task(
             "phase_reached": phase,
             "score": 1.0 if actual_status == config.expected_final_status else 0.0,
             "hidden_tests_passed": True,
-            "signal_matched": phase == "prepare",
+            "outcome_matched": phase == "prepare",
             "details": {},
         },
     )
@@ -228,7 +228,7 @@ def test_main_runs_only_requested_task(
             phase_reached="execute",
             score=1.0,
             hidden_tests_passed=True,
-            signal_matched=False,
+            outcome_matched=False,
         )
     )
     monkeypatch.setattr(runner, "execute_task", execute_mock)
@@ -270,6 +270,7 @@ def test_main_runs_only_requested_task(
         tmp_path / "evaluation"
     )
     assert execute_mock.call_args.kwargs["project_root"] == tmp_path
+    assert execute_mock.call_args.kwargs["variant"] == "patchpilot"
 
 
 def test_score_task_resolves_patch_and_hidden_test_paths(
@@ -538,10 +539,22 @@ def test_execute_task_materializes_expected_git_commit(
 
     def fake_prepare(**kwargs: object) -> subprocess.CompletedProcess[str]:
         repo = kwargs["repo"]
+        output_dir = kwargs["output_dir"]
         assert isinstance(repo, Path)
+        assert isinstance(output_dir, Path)
         assert verify_base_commit(
             repo,
             "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+        )
+        write_json(
+            output_dir / "prepare_summary.json",
+            {
+                "phase": "prepare",
+                "outcome_code": "AMBIGUOUS_REQUIREMENT",
+                "final_status": "NEEDS_CLARIFICATION",
+                "exit_code": 1,
+                "reasons": ["Priority ordering is unspecified."],
+            },
         )
         prepare(repo=repo)
         return subprocess.CompletedProcess(
@@ -566,7 +579,6 @@ def test_execute_task_materializes_expected_git_commit(
         target_tests=[],
         score_commands=[],
         expected_phase="prepare",
-        expected_signal="PatchPilot will not guess product behavior.",
     )
 
     result = execute_task(
@@ -580,5 +592,75 @@ def test_execute_task_materializes_expected_git_commit(
     )
 
     assert result.status == "stopped_at_prepare"
-    assert result.signal_matched is True
+    assert result.outcome_matched is True
     prepare.assert_called_once()
+
+
+def test_execute_task_baseline_skips_prepare_and_uses_run_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that baseline tasks execute raw issues without prepare."""
+    project_root = Path(__file__).parents[1]
+    source_fixture = (
+        project_root / "evaluation" / "fixtures" / "day5_python_repo"
+    )
+    evaluation_root = tmp_path / "evaluation"
+    fixture = evaluation_root / "fixtures" / "day5_python_repo"
+    shutil.copytree(source_fixture, fixture)
+    issue = evaluation_root / "tasks" / "baseline-task" / "issue.md"
+    issue.parent.mkdir(parents=True)
+    issue.write_text("# Raw baseline task\n", encoding="utf-8")
+
+    def fake_baseline(**kwargs: object) -> subprocess.CompletedProcess[str]:
+        output_dir = kwargs["output_dir"]
+        assert isinstance(output_dir, Path)
+        write_json(
+            output_dir / "run_summary.json",
+            {"phase": "execute", "final_status": "FAILED"},
+        )
+        return subprocess.CompletedProcess(
+            args=["patchpilot", "baseline"],
+            returncode=1,
+            stdout="baseline stdout",
+            stderr="baseline stderr",
+        )
+
+    baseline = Mock(side_effect=fake_baseline)
+    monkeypatch.setattr("evaluation.runner.run_patchpilot_baseline", baseline)
+    prepare = Mock()
+    monkeypatch.setattr("evaluation.runner.run_patchpilot_prepare", prepare)
+    config = TaskConfig(
+        task_id="baseline-task",
+        category="ambiguous_requirement",
+        repository="fixtures/day5_python_repo",
+        base_commit="a3df5b5f8aadf0015070e07ad21c22f744de3230",
+        issue="tasks/baseline-task/issue.md",
+        expected_final_status="NEEDS_CLARIFICATION",
+        allowed_changes=[],
+        target_tests=[],
+        score_commands=[],
+        expected_phase="prepare",
+    )
+
+    result = execute_task(
+        task_config=config,
+        evaluation_root=evaluation_root,
+        project_root=project_root,
+        model="test-model",
+        max_rounds=4,
+        max_repairs=0,
+        timestamp="baseline-run",
+        variant="baseline",
+    )
+
+    assert result.phase == "execute"
+    assert result.execute_success is True
+    assert result.actual_status == "FAILED"
+    prepare.assert_not_called()
+    baseline.assert_called_once()
+    execute_dir = (
+        evaluation_root / "runs" / "baseline-run" / "baseline-task" / "execute"
+    )
+    assert (execute_dir / "stdout.log").read_text() == "baseline stdout"
+    assert (execute_dir / "stderr.log").read_text() == "baseline stderr"

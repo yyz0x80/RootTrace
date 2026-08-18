@@ -10,8 +10,11 @@ import logging
 import subprocess  # noqa: F401
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from openai import OpenAIError
 
 from patchpilot.agent_loop import AgentLoop, AgentLoopError, AgentLoopLimitError
 from patchpilot.evidence import render_acceptance_coverage
@@ -24,7 +27,7 @@ from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_plan
 from patchpilot.prompts import REPAIR_PROMPT
-from patchpilot.provider import LLMProvider
+from patchpilot.provider import LLMProvider, ToolCallParseError
 from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
 from patchpilot.sandbox.docker_runner import CommandResult
@@ -38,6 +41,7 @@ from patchpilot.workflow import (
     run_repair_loop,
 )
 from patchpilot.workflow.execute_logger import ExecuteLogger
+from patchpilot.workflow.result import PrepareSummary, RunSummary
 from patchpilot.workflow.runner import WorkflowRunner, WorkflowRunnerError
 from patchpilot.workspace import Workspace
 
@@ -105,20 +109,91 @@ def _provider_usage(provider: object) -> ProviderUsageSnapshot:
     )
 
 
-def _save_prepare_summary(output_dir: Path, provider: object) -> None:
-    """Persist prepare-phase model usage for cross-process evaluation."""
+def _save_prepare_summary(
+    output_dir: Path,
+    provider: object,
+    *,
+    outcome_code: str = "READY_FOR_APPROVAL",
+    final_status: str | None = None,
+    exit_code: int = 0,
+    reasons: list[str] | None = None,
+) -> None:
+    """Persist the structured prepare outcome and exact model usage."""
     usage = _provider_usage(provider)
-    summary = {
-        "phase": "prepare",
-        "model": usage.model,
-        "llm_call_count": usage.llm_call_count,
-        "prompt_tokens": usage.prompt_tokens,
-        "completion_tokens": usage.completion_tokens,
-    }
+    summary = PrepareSummary(
+        outcome_code=outcome_code,
+        final_status=final_status,
+        exit_code=exit_code,
+        reasons=reasons or [],
+        model=usage.model,
+        llm_call_count=usage.llm_call_count,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     save_json(
         str(output_dir / "prepare_summary.json"),
-        json.dumps(summary, indent=2),
+        summary.model_dump_json(indent=2),
+    )
+
+
+def _existing_execute_artifacts(output_dir: Path) -> dict[str, str]:
+    """Return only execute artifacts that currently exist on disk."""
+    candidates = {
+        "patch": output_dir / "patch.diff",
+        "verification_report": output_dir / "verification_report.json",
+        "acceptance_coverage": output_dir / "acceptance_coverage.md",
+        "acceptance_evidence": output_dir / "acceptance_evidence.json",
+        "execution_trace": output_dir / "execution_trace.jsonl",
+    }
+    return {
+        name: str(path)
+        for name, path in candidates.items()
+        if path.exists()
+    }
+
+
+def _save_failed_run_summary(
+    *,
+    args: argparse.Namespace,
+    started: float,
+    provider: object | None,
+    base_commit: str,
+    final_status: str,
+    failure_type: str,
+    error_message: str,
+) -> None:
+    """Persist a terminal execute result when the workflow raises an error."""
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    usage = _provider_usage(provider) if provider is not None else ProviderUsageSnapshot(
+        model=args.model or "",
+        llm_call_count=0,
+        prompt_tokens=None,
+        completion_tokens=None,
+    )
+    summary = RunSummary(
+        run_id=str(uuid.uuid4()),
+        task_id=args.task_id,
+        phase="execute",
+        base_commit=base_commit,
+        model=usage.model,
+        max_rounds=args.max_rounds,
+        max_repairs=args.max_repairs,
+        retry_count=0,
+        final_status=final_status,
+        exit_code=1,
+        duration_seconds=time.monotonic() - started,
+        llm_call_count=usage.llm_call_count,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        failure_type=failure_type,
+        error_message=error_message,
+        artifacts=_existing_execute_artifacts(output_dir),
+    )
+    save_json(
+        str(output_dir / "run_summary.json"),
+        summary.model_dump_json(indent=2),
     )
 
 
@@ -248,6 +323,18 @@ def main() -> None:
         required=True,
         help="Stable evaluation task identifier",
     )
+
+    baseline_parser = subparsers.add_parser(
+        "baseline",
+        help="Run the raw-issue evaluation baseline",
+    )
+    baseline_parser.add_argument("--repo", required=True)
+    baseline_parser.add_argument("--issue", required=True)
+    baseline_parser.add_argument("--model", default=None)
+    baseline_parser.add_argument("--max-rounds", type=int, default=16)
+    baseline_parser.add_argument("--max-repairs", type=int, default=0)
+    baseline_parser.add_argument("--output-dir", required=True)
+    baseline_parser.add_argument("--task-id", required=True)
     
     args = parser.parse_args()
     
@@ -257,6 +344,8 @@ def main() -> None:
         handle_run(args)
     elif args.command == "execute":
         handle_execute(args)
+    elif args.command == "baseline":
+        handle_baseline(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -276,6 +365,10 @@ def handle_prepare(args) -> None:
     8. Output artifacts (normalized_issue.json, repository_context.json, plan.json)
     """
     provider: LLMProvider | None = None
+    outcome_code = "PREPARE_FAILED"
+    final_status: str | None = "FAILED"
+    exit_code = 1
+    reasons: list[str] = []
     try:
         # Step 1: Load raw issue
         ExecuteLogger.log_issue_loading(args.issue)
@@ -285,6 +378,9 @@ def handle_prepare(args) -> None:
         try:
             provider = _create_provider(args.model)
         except ValueError as e:
+            outcome_code = "PROVIDER_CONFIGURATION_ERROR"
+            final_status = "BLOCKED"
+            reasons = [str(e)]
             print(f"Provider initialization failed: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -296,6 +392,9 @@ def handle_prepare(args) -> None:
 
         # Check for ambiguous points
         if normalized_issue.ambiguous_points:
+            outcome_code = "AMBIGUOUS_REQUIREMENT"
+            final_status = "NEEDS_CLARIFICATION"
+            reasons = list(normalized_issue.ambiguous_points)
             ExecuteLogger.log_issue_normalization(
                 success=False,
                 ambiguous_points=normalized_issue.ambiguous_points,
@@ -314,6 +413,9 @@ def handle_prepare(args) -> None:
                 head_sha=preflight_result.head_sha,
             )
         except RepositoryPreflightError as e:
+            outcome_code = "REPOSITORY_INVALID"
+            final_status = "BLOCKED"
+            reasons = [str(e)]
             ExecuteLogger.log_repository_validation(
                 is_valid=False,
                 error=str(e),
@@ -358,6 +460,9 @@ def handle_prepare(args) -> None:
                 issue=normalized_issue,
             )
         except ValueError as e:
+            outcome_code = "PLAN_INVALID"
+            final_status = "BLOCKED"
+            reasons = [str(e)]
             print(f"Plan validation failed: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -365,6 +470,9 @@ def handle_prepare(args) -> None:
         scope_result = validation_result
 
         if not scope_result.allowed:
+            outcome_code = "SCOPE_VIOLATION"
+            final_status = "BLOCKED"
+            reasons = list(scope_result.violations)
             ExecuteLogger.log_plan_validation(
                 allowed=False,
                 violations=scope_result.violations,
@@ -402,24 +510,47 @@ def handle_prepare(args) -> None:
 
         ExecuteLogger.log_artifacts(artifact_paths)
 
+        outcome_code = "READY_FOR_APPROVAL"
+        final_status = None
+        exit_code = 0
+        reasons = []
+
         print(f"\nReview the artifacts in {output_dir}/ directory.")
         print(f"To execute this plan, run: patchpilot execute --repo <repo> --issue {output_dir}/normalized_issue.json --plan {output_dir}/plan.json --output-dir {output_dir} --task-id <task-id>")
 
+    except (OpenAIError, ToolCallParseError) as e:
+        outcome_code = "PROVIDER_ERROR"
+        final_status = "BLOCKED"
+        reasons = [str(e)]
+        print(f"Provider error: {e}", file=sys.stderr)
+        sys.exit(1)
     except ValueError as e:
+        if outcome_code == "PREPARE_FAILED":
+            outcome_code = "INVALID_INPUT"
+            reasons = [str(e)]
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
+        outcome_code = "FILE_SYSTEM_ERROR"
+        final_status = "BLOCKED"
+        reasons = [str(e)]
         print(f"File system error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        if provider is not None:
-            try:
-                _save_prepare_summary(Path(args.output_dir), provider)
-            except OSError as error:
-                print(
-                    f"Failed to save prepare usage summary: {error}",
-                    file=sys.stderr,
-                )
+        try:
+            _save_prepare_summary(
+                Path(args.output_dir),
+                provider or object(),
+                outcome_code=outcome_code,
+                final_status=final_status,
+                exit_code=exit_code,
+                reasons=reasons,
+            )
+        except OSError as error:
+            print(
+                f"Failed to save prepare summary: {error}",
+                file=sys.stderr,
+            )
 
 
 def handle_run(args) -> None:
@@ -722,12 +853,24 @@ def handle_execute(args) -> None:
     7. Save verification report
     """
     started = time.monotonic()
+    provider: LLMProvider | None = None
+    base_commit = ""
 
     try:
         # Step 1: Load normalized issue
         issue_path = Path(args.issue)
         if not issue_path.exists():
-            print(f"Error: Issue file not found: {args.issue}", file=sys.stderr)
+            message = f"Issue file not found: {args.issue}"
+            _save_failed_run_summary(
+                args=args,
+                started=started,
+                provider=provider,
+                base_commit=base_commit,
+                final_status="FAILED",
+                failure_type="INPUT_ERROR",
+                error_message=message,
+            )
+            print(f"Error: {message}", file=sys.stderr)
             sys.exit(1)
 
         with open(issue_path, encoding="utf-8") as f:
@@ -737,12 +880,23 @@ def handle_execute(args) -> None:
         # Step 2: Load approved plan
         plan_path = Path(args.plan)
         if not plan_path.exists():
-            print(f"Error: Plan file not found: {args.plan}", file=sys.stderr)
+            message = f"Plan file not found: {args.plan}"
+            _save_failed_run_summary(
+                args=args,
+                started=started,
+                provider=provider,
+                base_commit=base_commit,
+                final_status="FAILED",
+                failure_type="INPUT_ERROR",
+                error_message=message,
+            )
+            print(f"Error: {message}", file=sys.stderr)
             sys.exit(1)
 
         with open(plan_path, encoding="utf-8") as f:
             plan_data = json.load(f)
         plan = ChangePlan.model_validate(plan_data)
+        base_commit = plan.base_commit
 
         # Log precheck section
         ExecuteLogger.log_precheck(
@@ -762,13 +916,32 @@ def handle_execute(args) -> None:
         try:
             preflight_result = validate_repository(repo_path)
         except RepositoryPreflightError as e:
+            _save_failed_run_summary(
+                args=args,
+                started=started,
+                provider=provider,
+                base_commit=base_commit,
+                final_status="BLOCKED",
+                failure_type="REPOSITORY_INVALID",
+                error_message=str(e),
+            )
             print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
 
         # Step 3: Verify repository baseline matches plan
         if preflight_result.head_sha != plan.base_commit:
+            message = "Repository HEAD has changed since the plan was generated."
+            _save_failed_run_summary(
+                args=args,
+                started=started,
+                provider=provider,
+                base_commit=base_commit,
+                final_status="BLOCKED",
+                failure_type="BASE_COMMIT_MISMATCH",
+                error_message=message,
+            )
             print(
-                "Repository HEAD has changed since the plan was generated.",
+                message,
                 file=sys.stderr
             )
             print(f"Plan base commit: {plan.base_commit[:8]}...", file=sys.stderr)
@@ -780,6 +953,15 @@ def handle_execute(args) -> None:
         try:
             provider = _create_provider(args.model)
         except ValueError as e:
+            _save_failed_run_summary(
+                args=args,
+                started=started,
+                provider=provider,
+                base_commit=base_commit,
+                final_status="BLOCKED",
+                failure_type="PROVIDER_CONFIGURATION_ERROR",
+                error_message=str(e),
+            )
             print(f"Provider initialization failed: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -892,20 +1074,232 @@ def handle_execute(args) -> None:
         # Exit with code from run summary (ensures summary is saved before exit)
         sys.exit(run_summary.exit_code)
         
+    except json.JSONDecodeError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="JSON_ERROR",
+            error_message=str(e),
+        )
+        print(f"JSON parsing error: {e}", file=sys.stderr)
+        sys.exit(1)
     except ValueError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="INPUT_ERROR",
+            error_message=str(e),
+        )
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except (AgentLoopError, AgentLoopLimitError) as e:
+    except AgentLoopLimitError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="AGENT_ROUND_LIMIT",
+            error_message=str(e),
+        )
+        print(f"Agent error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except AgentLoopError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="AGENT_ERROR",
+            error_message=str(e),
+        )
         print(f"Agent error: {e}", file=sys.stderr)
         sys.exit(1)
     except WorkflowRunnerError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="WORKFLOW_ERROR",
+            error_message=str(e),
+        )
         print(f"Workflow error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="BLOCKED",
+            failure_type="FILE_SYSTEM_ERROR",
+            error_message=str(e),
+        )
         print(f"File system error: {e}", file=sys.stderr)
         sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"JSON parsing error: {e}", file=sys.stderr)
+    except (OpenAIError, ToolCallParseError) as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="PROVIDER_ERROR",
+            error_message=str(e),
+        )
+        print(f"Provider execution error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def handle_baseline(args) -> None:
+    """Run the evaluation baseline without planning or repair behavior."""
+    started = time.monotonic()
+    provider: LLMProvider | None = None
+    base_commit = ""
+
+    try:
+        if args.max_repairs != 0:
+            raise ValueError("Baseline evaluation requires --max-repairs 0")
+
+        raw_issue = load_issue(args.issue)
+        repo_path = Path(args.repo)
+        preflight_result = validate_repository(repo_path)
+        base_commit = preflight_result.head_sha
+        provider = _create_provider(args.model)
+
+        workspace = Workspace(root=repo_path)
+        tools = ToolRegistry(workspace=workspace)
+        agent_loop = AgentLoop(
+            provider=provider,
+            tools=tools,
+            max_rounds=args.max_rounds,
+        )
+        runner = WorkflowRunner(
+            agent_loop=agent_loop,
+            verifier=None,
+            workspace=workspace,
+            max_repair_attempts=0,
+        )
+
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        result = runner.execute_baseline(
+            issue=raw_issue.body,
+            trace_path=output_dir / "execution_trace.jsonl",
+        )
+
+        usage = _provider_usage(provider)
+        result.duration_seconds = time.monotonic() - started
+        result.llm_call_count = usage.llm_call_count
+        result.prompt_tokens = usage.prompt_tokens
+        result.completion_tokens = usage.completion_tokens
+
+        save_json(
+            str(output_dir / "verification_report.json"),
+            json.dumps(result.verification_report, indent=2),
+        )
+        if result.patch:
+            (output_dir / "patch.diff").write_text(
+                result.patch,
+                encoding="utf-8",
+            )
+
+        coverage_path = output_dir / "acceptance_coverage.md"
+        coverage_path.write_text(
+            render_acceptance_coverage([], result.final_status.value),
+            encoding="utf-8",
+        )
+        evidence_report = AcceptanceCoverageReport(
+            acceptance_evidence=[],
+            completion_state=result.final_status,
+            summary="The raw-issue baseline does not map acceptance evidence.",
+        )
+        save_json(
+            str(output_dir / "acceptance_evidence.json"),
+            evidence_report.model_dump_json(indent=2),
+        )
+
+        run_summary = result.to_run_summary(
+            task_id=args.task_id,
+            base_commit=base_commit,
+            model=usage.model,
+            output_dir=str(output_dir),
+        )
+        save_json(
+            str(output_dir / "run_summary.json"),
+            run_summary.model_dump_json(indent=2),
+        )
+        print(f"Final status: {result.final_status.value}")
+        sys.exit(run_summary.exit_code)
+
+    except RepositoryPreflightError as error:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="BLOCKED",
+            failure_type="REPOSITORY_INVALID",
+            error_message=str(error),
+        )
+        print(f"Repository validation failed: {error}", file=sys.stderr)
+        sys.exit(1)
+    except AgentLoopError as error:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="AGENT_ERROR",
+            error_message=str(error),
+        )
+        print(f"Agent error: {error}", file=sys.stderr)
+        sys.exit(1)
+    except WorkflowRunnerError as error:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="WORKFLOW_ERROR",
+            error_message=str(error),
+        )
+        print(f"Workflow error: {error}", file=sys.stderr)
+        sys.exit(1)
+    except (ValueError, OSError) as error:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="BASELINE_ERROR",
+            error_message=str(error),
+        )
+        print(f"Baseline error: {error}", file=sys.stderr)
+        sys.exit(1)
+    except (OpenAIError, ToolCallParseError) as error:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="PROVIDER_ERROR",
+            error_message=str(error),
+        )
+        print(f"Baseline provider error: {error}", file=sys.stderr)
         sys.exit(1)
 
 

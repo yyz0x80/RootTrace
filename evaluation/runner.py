@@ -43,7 +43,6 @@ class TaskConfig:
     target_tests: list[str]
     score_commands: list[str]
     expected_phase: str = "execute"
-    expected_signal: str = ""
 
 
 @dataclass
@@ -57,7 +56,8 @@ class RunResult:
     execute_success: bool
     score_success: bool
     error_message: str = ""
-    signal_matched: bool = False
+    outcome_matched: bool = False
+    actual_status: str = "UNKNOWN"
 
 
 @dataclass
@@ -71,7 +71,7 @@ class ScoreResult:
     phase_reached: str
     score: float
     hidden_tests_passed: bool
-    signal_matched: bool
+    outcome_matched: bool
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -106,7 +106,6 @@ def load_task_config(task_dir: Path) -> TaskConfig:
         target_tests=data.get("target_tests", []),
         score_commands=data.get("score_commands", []),
         expected_phase=data.get("expected_phase", "execute"),
-        expected_signal=data.get("expected_signal", ""),
     )
 
 
@@ -358,6 +357,59 @@ def run_patchpilot_execute(
     )
 
 
+def run_patchpilot_baseline(
+    repo: Path,
+    issue: Path,
+    task_id: str,
+    model: str,
+    max_rounds: int,
+    output_dir: Path,
+    project_root: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Execute the raw-issue baseline command."""
+    return subprocess.run(
+        [
+            "patchpilot",
+            "baseline",
+            "--repo",
+            str(repo),
+            "--issue",
+            str(issue),
+            "--task-id",
+            task_id,
+            "--model",
+            model,
+            "--max-rounds",
+            str(max_rounds),
+            "--max-repairs",
+            "0",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+
+def save_process_output(
+    output_dir: Path,
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    """Persist subprocess output so failed phases remain diagnosable."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "stdout.log").write_text(
+        result.stdout or "",
+        encoding="utf-8",
+    )
+    (output_dir / "stderr.log").write_text(
+        result.stderr or "",
+        encoding="utf-8",
+    )
+
+
 def apply_patch(
     repo: Path,
     patch_file: Path,
@@ -471,6 +523,7 @@ def execute_task(
     max_rounds: int,
     max_repairs: int,
     timestamp: str,
+    variant: str = "patchpilot",
 ) -> RunResult:
     """Execute a single evaluation task.
 
@@ -522,6 +575,39 @@ def execute_task(
             )
             return result
 
+        if variant == "baseline":
+            result.phase = "execute"
+            baseline_result = run_patchpilot_baseline(
+                repo=temp_repo,
+                issue=issue_path,
+                task_id=task_id,
+                model=model,
+                max_rounds=max_rounds,
+                output_dir=execute_dir,
+                project_root=project_root,
+            )
+            save_process_output(execute_dir, baseline_result)
+            summary = load_json_object(execute_dir / "run_summary.json")
+            result.execute_success = summary is not None
+            if summary is None:
+                result.status = "execute_failed"
+                result.error_message = (
+                    baseline_result.stderr or baseline_result.stdout
+                )
+                return result
+            result.actual_status = str(
+                summary.get("final_status", "UNKNOWN")
+            )
+            if task_config.score_commands and not check_patch_exists(execute_dir):
+                result.status = "patch_not_generated"
+                result.error_message = "patch.diff not found after baseline"
+                return result
+            result.status = "completed"
+            return result
+
+        if variant != "patchpilot":
+            raise ValueError(f"Unsupported evaluation variant: {variant}")
+
         # Run prepare phase
         prepare_result = run_patchpilot_prepare(
             repo=temp_repo,
@@ -530,25 +616,36 @@ def execute_task(
             output_dir=prepare_dir,
             project_root=project_root,
         )
+        save_process_output(prepare_dir, prepare_result)
 
         result.prepare_success = prepare_result.returncode == 0
 
-        # Prepare-only tasks use a deterministic CLI signal as their outcome.
+        # Prepare-only tasks use the structured prepare outcome.
         if task_config.expected_phase == "prepare":
             result.phase = "prepare"
-            combined_output = f"{prepare_result.stdout}\n{prepare_result.stderr}"
-            result.signal_matched = (
-                bool(task_config.expected_signal)
-                and task_config.expected_signal in combined_output
+            summary = load_json_object(prepare_dir / "prepare_summary.json")
+            result.actual_status = (
+                str(summary.get("final_status", "UNKNOWN"))
+                if summary is not None
+                else "UNKNOWN"
             )
-            result.prepare_success = result.signal_matched
+            result.outcome_matched = (
+                result.actual_status == task_config.expected_final_status
+            )
+            result.prepare_success = result.outcome_matched
             result.status = (
                 "stopped_at_prepare"
-                if result.signal_matched
+                if result.outcome_matched
                 else "unexpected_prepare_result"
             )
-            if not result.signal_matched:
-                result.error_message = combined_output.strip()
+            if not result.outcome_matched:
+                if summary is None:
+                    result.error_message = "prepare_summary.json was not generated"
+                else:
+                    reasons = summary.get("reasons", [])
+                    result.error_message = "; ".join(
+                        str(reason) for reason in reasons
+                    )
             return result
 
         if not result.prepare_success:
@@ -578,14 +675,19 @@ def execute_task(
             output_dir=execute_dir,
             project_root=project_root,
         )
+        save_process_output(execute_dir, execute_result)
 
-        run_summary_exists = (execute_dir / "run_summary.json").exists()
-        result.execute_success = run_summary_exists
+        run_summary = load_json_object(execute_dir / "run_summary.json")
+        result.execute_success = run_summary is not None
 
-        if not run_summary_exists:
+        if run_summary is None:
             result.status = "execute_failed"
             result.error_message = execute_result.stderr or execute_result.stdout
             return result
+
+        result.actual_status = str(
+            run_summary.get("final_status", "UNKNOWN")
+        )
 
         # Tasks with hidden tests require a patch for the scoring checkout.
         if task_config.score_commands and not check_patch_exists(execute_dir):
@@ -638,23 +740,23 @@ def score_task(
         phase_reached=run_result.phase,
         score=0.0,
         hidden_tests_passed=False,
-        signal_matched=run_result.signal_matched,
+        outcome_matched=run_result.outcome_matched,
     )
 
     # For tasks that stopped at prepare phase
     if run_result.phase == "prepare":
-        result.actual_status = (
-            task_config.expected_final_status
-            if run_result.signal_matched
-            else "STOPPED_AT_PREPARE"
-        )
-        result.score = 1.0 if run_result.signal_matched else 0.0
+        result.actual_status = run_result.actual_status
+        result.score = 1.0 if run_result.outcome_matched else 0.0
+        if run_result.error_message:
+            result.details["error_message"] = run_result.error_message
         return result
 
     # For tasks that failed during execution
     if not run_result.execute_success:
         result.actual_status = "EXECUTION_FAILED"
         result.score = 0.0
+        if run_result.error_message:
+            result.details["error_message"] = run_result.error_message
         return result
 
     # Extract actual status from verification report
@@ -742,7 +844,7 @@ def save_score_result(run_dir: Path, score: ScoreResult) -> None:
                 "phase_reached": score.phase_reached,
                 "score": score.score,
                 "hidden_tests_passed": score.hidden_tests_passed,
-                "signal_matched": score.signal_matched,
+                "outcome_matched": score.outcome_matched,
                 "details": score.details,
             },
             f,
@@ -793,9 +895,14 @@ def check_passed(report: dict[str, Any], level: str) -> bool:
 def task_phase_usage(
     task_dir: Path,
     phase_reached: str,
+    variant: str,
 ) -> tuple[int | None, int | None, int | None]:
     """Combine exact prepare and execute usage for one evaluated task."""
-    summaries = [load_json_object(task_dir / "prepare" / "prepare_summary.json")]
+    summaries: list[dict[str, Any] | None] = []
+    if variant == "patchpilot":
+        summaries.append(
+            load_json_object(task_dir / "prepare" / "prepare_summary.json")
+        )
     if phase_reached == "execute":
         summaries.append(load_json_object(task_dir / "execute" / "run_summary.json"))
 
@@ -834,6 +941,7 @@ def aggregate_scores(
     evaluation_root: Path,
     timestamp: str,
     task_configs: list[TaskConfig] | None = None,
+    variant: str = "patchpilot",
 ) -> dict[str, Any]:
     """Aggregate scores and deterministic evaluation metrics.
 
@@ -848,6 +956,7 @@ def aggregate_scores(
     runs_dir = evaluation_root / "runs" / timestamp
     aggregate = {
         "timestamp": timestamp,
+        "variant": variant,
         "total_tasks": 0,
         "completed_tasks": 0,
         "total_score": 0.0,
@@ -1016,6 +1125,7 @@ def aggregate_scores(
         llm_calls, prompt_tokens, completion_tokens = task_phase_usage(
             task_dir,
             str(phase_reached),
+            variant,
         )
         if llm_calls is None:
             llm_call_missing += 1
@@ -1128,6 +1238,7 @@ def main() -> None:
         "--variant",
         type=str,
         default="patchpilot",
+        choices=("baseline", "patchpilot"),
         help="Variant identifier for the evaluation run",
     )
     parser.add_argument(
@@ -1192,6 +1303,7 @@ def main() -> None:
     max_repairs = args.max_repairs if args.max_repairs != 2 else default_max_repairs
 
     print(f"Starting evaluation run: {timestamp}")
+    print(f"Variant: {args.variant}")
     print(f"Model: {args.model}")
     print(f"Max rounds: {max_rounds}, Max repairs: {max_repairs}")
     print(f"Tasks to process: {len(task_configs)}")
@@ -1210,6 +1322,7 @@ def main() -> None:
                 max_rounds=max_rounds,
                 max_repairs=max_repairs,
                 timestamp=timestamp,
+                variant=args.variant,
             )
 
             print(f"  Phase: {run_result.phase}, Status: {run_result.status}")
@@ -1238,6 +1351,7 @@ def main() -> None:
         evaluation_root,
         timestamp,
         task_configs=task_configs,
+        variant=args.variant,
     )
     save_aggregate_results(evaluation_root, timestamp, aggregate)
 

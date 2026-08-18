@@ -503,6 +503,7 @@ class TestWorkflowRunnerSetup:
     def test_start_sandbox_when_provided(self):
         """Test starting sandbox when already provided."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.tools = Mock()
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
@@ -519,10 +520,14 @@ class TestWorkflowRunnerSetup:
             runner._start_sandbox(Path(temp_dir))
 
             mock_sandbox.start.assert_called_once()
+            mock_agent_loop.tools.update_command_runner.assert_called_once_with(
+                mock_sandbox
+            )
 
     def test_start_sandbox_creates_when_none(self):
         """Test that sandbox is created when not provided."""
         mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.tools = Mock()
         mock_verifier = Mock()
         mock_workspace = Mock(spec=Workspace)
         mock_workspace.root = Path("/fake/repo")
@@ -548,6 +553,93 @@ class TestWorkflowRunnerSetup:
                 mock_docker_sandbox.assert_called_once()
                 mock_sandbox_instance.start.assert_called_once()
                 assert runner.sandbox == mock_sandbox_instance
+                mock_agent_loop.tools.update_command_runner.assert_called_once_with(
+                    mock_sandbox_instance
+                )
+
+    def test_execute_baseline_runs_raw_issue_and_verifies_once(self):
+        """Test that the baseline omits planning and repair behavior."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.max_rounds = 8
+        mock_agent_loop.tools = Mock()
+        mock_verifier = Mock(return_value=VerificationReport(passed=True))
+        mock_workspace = Mock(spec=Workspace)
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            max_repair_attempts=0,
+        )
+
+        from patchpilot.tools import WorkspaceChange
+
+        changes = [WorkspaceChange(path="module.py", action="modify")]
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(
+                 runner,
+                 "_create_temporary_workspace",
+                 return_value=Path(temp_dir),
+             ), \
+             patch.object(runner, "_start_sandbox"), \
+             patch.object(runner, "_cleanup"), \
+             patch(
+                 "patchpilot.workflow.runner._get_workspace_changes",
+                 return_value=changes,
+             ), \
+             patch(
+                 "patchpilot.workflow.runner.generate_patch",
+                 return_value="diff content",
+             ):
+            result = runner.execute_baseline(
+                issue="Fix the raw issue.",
+                trace_path=Path(temp_dir) / "trace.jsonl",
+            )
+
+        mock_agent_loop.run.assert_called_once_with(issue="Fix the raw issue.")
+        mock_verifier.assert_called_once()
+        assert result.final_status == CompletionState.VERIFIED
+        assert result.max_repairs == 0
+        assert result.patch == "diff content"
+
+    def test_execute_baseline_verifies_after_agent_limit(self):
+        """Test that an agent limit still produces a deterministic result."""
+        from patchpilot.agent_loop import AgentLoopLimitError
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.max_rounds = 4
+        mock_agent_loop.tools = Mock()
+        mock_agent_loop.run.side_effect = AgentLoopLimitError("round limit")
+        mock_verifier = Mock(return_value=VerificationReport(passed=True))
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=Mock(spec=Workspace),
+            max_repair_attempts=0,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(
+                 runner,
+                 "_create_temporary_workspace",
+                 return_value=Path(temp_dir),
+             ), \
+             patch.object(runner, "_start_sandbox"), \
+             patch.object(runner, "_cleanup"), \
+             patch(
+                 "patchpilot.workflow.runner._get_workspace_changes",
+                 return_value=[],
+             ), \
+             patch(
+                 "patchpilot.workflow.runner.generate_patch",
+                 return_value="",
+             ):
+            result = runner.execute_baseline(
+                issue="Fix the raw issue.",
+                trace_path=Path(temp_dir) / "trace.jsonl",
+            )
+
+        mock_verifier.assert_called_once()
+        assert result.final_status == CompletionState.FAILED
 
     def test_cleanup_stops_sandbox(self):
         """Test that cleanup stops the sandbox."""

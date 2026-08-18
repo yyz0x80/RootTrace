@@ -8,6 +8,5 @@
   "expected_final_status": "BLOCKED",
   "allowed_changes": ["environment_demo/__init__.py"],
   "target_tests": ["tests/test_greeting.py"],
-  "score_commands": [],
-  "expected_signal": "baseline verification classifies the unavailable pytest plugin as ENVIRONMENT_FAILURE"
+  "score_commands": []
 }
