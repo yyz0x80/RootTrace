@@ -92,6 +92,17 @@ class VerificationReport:
     failure_type: str | None = None
     patch: str = ""
 
+    def __post_init__(self) -> None:
+        """Populate phase-specific lists from checks after initialization."""
+        # Ensure phase-specific lists are populated from checks
+        for check in self.checks:
+            if check.phase == "baseline":
+                if check not in self.baseline_checks:
+                    self.baseline_checks.append(check)
+            elif check.phase == "post_patch":
+                if check not in self.post_patch_checks:
+                    self.post_patch_checks.append(check)
+
     def add_check(self, check: CheckReport) -> None:
         """Add a check report to the verification report.
 

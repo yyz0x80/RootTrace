@@ -63,6 +63,50 @@ def render_acceptance_coverage(
             "",
         ])
 
+        # Add detailed evidence categories if available
+        if item.behavior_change:
+            lines.extend([
+                "### Behavior Change",
+                f"Status: {item.behavior_change.status.value}",
+                f"Baseline: {'PASS' if item.behavior_change.baseline_passed else 'FAIL'}",
+                f"Post-patch: {'PASS' if item.behavior_change.post_patch_passed else 'FAIL'}",
+                f"Explanation: {item.behavior_change.explanation}",
+                "",
+            ])
+
+        if item.behavior_preservation:
+            lines.extend([
+                "### Behavior Preservation",
+                f"Status: {item.behavior_preservation.status.value}",
+                f"Baseline: {'PASS' if item.behavior_preservation.baseline_passed else 'FAIL'}",
+                f"Post-patch: {'PASS' if item.behavior_preservation.post_patch_passed else 'FAIL'}",
+                f"Explanation: {item.behavior_preservation.explanation}",
+                "",
+            ])
+
+        if item.structural_contract:
+            lines.extend([
+                "### Structural Contract",
+                f"Status: {item.structural_contract.status.value}",
+                f"Specialized check: {'Yes' if item.structural_contract.has_specialized_check else 'No'}",
+                f"Check passed: {'Yes' if item.structural_contract.check_passed else 'No'}",
+                f"Pytest only: {'Yes' if item.structural_contract.has_pytest_only else 'No'}",
+                f"Explanation: {item.structural_contract.explanation}",
+                "",
+            ])
+
+        if item.constraint:
+            lines.extend([
+                "### Constraint",
+                f"Status: {item.constraint.status.value}",
+                f"Hard policy violation: {'Yes' if item.constraint.has_hard_policy_violation else 'No'}",
+                f"Attempted violation: {'Yes' if item.constraint.has_attempted_violation else 'No'}",
+                f"Compilation error: {'Yes' if item.constraint.has_compilation_error else 'No'}",
+                f"Advisory: {'Yes' if item.constraint.has_advisory else 'No'}",
+                f"Explanation: {item.constraint.explanation}",
+                "",
+            ])
+
     return "\n".join(lines)
 
 
@@ -118,6 +162,50 @@ def render_coverage_report(report: AcceptanceCoverageReport) -> str:
             f"Explanation: {item.explanation}",
             "",
         ])
+
+        # Add detailed evidence categories if available
+        if item.behavior_change:
+            lines.extend([
+                "### Behavior Change",
+                f"Status: {item.behavior_change.status.value}",
+                f"Baseline: {'PASS' if item.behavior_change.baseline_passed else 'FAIL'}",
+                f"Post-patch: {'PASS' if item.behavior_change.post_patch_passed else 'FAIL'}",
+                f"Explanation: {item.behavior_change.explanation}",
+                "",
+            ])
+
+        if item.behavior_preservation:
+            lines.extend([
+                "### Behavior Preservation",
+                f"Status: {item.behavior_preservation.status.value}",
+                f"Baseline: {'PASS' if item.behavior_preservation.baseline_passed else 'FAIL'}",
+                f"Post-patch: {'PASS' if item.behavior_preservation.post_patch_passed else 'FAIL'}",
+                f"Explanation: {item.behavior_preservation.explanation}",
+                "",
+            ])
+
+        if item.structural_contract:
+            lines.extend([
+                "### Structural Contract",
+                f"Status: {item.structural_contract.status.value}",
+                f"Specialized check: {'Yes' if item.structural_contract.has_specialized_check else 'No'}",
+                f"Check passed: {'Yes' if item.structural_contract.check_passed else 'No'}",
+                f"Pytest only: {'Yes' if item.structural_contract.has_pytest_only else 'No'}",
+                f"Explanation: {item.structural_contract.explanation}",
+                "",
+            ])
+
+        if item.constraint:
+            lines.extend([
+                "### Constraint",
+                f"Status: {item.constraint.status.value}",
+                f"Hard policy violation: {'Yes' if item.constraint.has_hard_policy_violation else 'No'}",
+                f"Attempted violation: {'Yes' if item.constraint.has_attempted_violation else 'No'}",
+                f"Compilation error: {'Yes' if item.constraint.has_compilation_error else 'No'}",
+                f"Advisory: {'Yes' if item.constraint.has_advisory else 'No'}",
+                f"Explanation: {item.constraint.explanation}",
+                "",
+            ])
 
     return "\n".join(lines)
 

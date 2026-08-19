@@ -5,6 +5,40 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+class BehaviorChangeStatus(str, Enum):
+    """Status for behavior change verification (baseline to post-patch)."""
+
+    PASS = "PASS"
+    ALREADY_SATISFIED = "ALREADY_SATISFIED"
+    FAIL = "FAIL"
+    UNVERIFIED = "UNVERIFIED"
+
+
+class BehaviorPreservationStatus(str, Enum):
+    """Status for behavior preservation verification."""
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    UNVERIFIED = "UNVERIFIED"
+
+
+class StructuralContractStatus(str, Enum):
+    """Status for structural contract verification (AST/mock checks)."""
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    UNVERIFIED = "UNVERIFIED"
+
+
+class ConstraintStatus(str, Enum):
+    """Status for constraint verification (policy compliance)."""
+
+    COMPLIANT = "COMPLIANT"
+    VIOLATED = "VIOLATED"
+    UNSUPPORTED = "UNSUPPORTED"
+    ADVISORY = "ADVISORY"
+
+
 class EvidenceStatus(str, Enum):
     """Verification status for a single acceptance criterion."""
 
@@ -29,6 +63,85 @@ class CompletionState(str, Enum):
     BLOCKED = "BLOCKED"
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
     FAILED = "FAILED"
+    REGRESSION = "REGRESSION"
+
+
+class BehaviorChangeEvidence(BaseModel):
+    """Evidence for behavior change verification.
+
+    Tracks verification results from baseline to post-patch execution.
+
+    Attributes:
+        status: Behavior change status based on baseline and post-patch results.
+        baseline_passed: Whether baseline checks passed.
+        post_patch_passed: Whether post-patch checks passed.
+        explanation: Human-readable explanation of the status determination.
+    """
+
+    status: BehaviorChangeStatus
+    baseline_passed: bool
+    post_patch_passed: bool
+    explanation: str
+
+
+class BehaviorPreservationEvidence(BaseModel):
+    """Evidence for behavior preservation verification.
+
+    Tracks that existing behavior is not broken by changes.
+
+    Attributes:
+        status: Behavior preservation status.
+        baseline_passed: Whether baseline checks passed.
+        post_patch_passed: Whether post-patch checks passed.
+        explanation: Human-readable explanation of the status determination.
+    """
+
+    status: BehaviorPreservationStatus
+    baseline_passed: bool
+    post_patch_passed: bool
+    explanation: str
+
+
+class StructuralContractEvidence(BaseModel):
+    """Evidence for structural contract verification.
+
+    Tracks AST/mock verification results.
+
+    Attributes:
+        status: Structural contract status.
+        has_specialized_check: Whether specialized AST/mock checks were run.
+        check_passed: Whether specialized checks passed.
+        has_pytest_only: Whether only pytest was available.
+        explanation: Human-readable explanation of the status determination.
+    """
+
+    status: StructuralContractStatus
+    has_specialized_check: bool
+    check_passed: bool
+    has_pytest_only: bool
+    explanation: str
+
+
+class ConstraintEvidence(BaseModel):
+    """Evidence for constraint verification.
+
+    Tracks policy compliance during code changes.
+
+    Attributes:
+        status: Constraint compliance status.
+        has_hard_policy_violation: Whether hard policy was violated.
+        has_attempted_violation: Whether violation was attempted but rejected.
+        has_compilation_error: Whether compilation failed.
+        has_advisory: Whether advisory issues exist.
+        explanation: Human-readable explanation of the status determination.
+    """
+
+    status: ConstraintStatus
+    has_hard_policy_violation: bool
+    has_attempted_violation: bool
+    has_compilation_error: bool
+    has_advisory: bool
+    explanation: str
 
 
 class AcceptanceEvidence(BaseModel):
@@ -46,6 +159,10 @@ class AcceptanceEvidence(BaseModel):
         tests: List of test names/paths that verify this criterion.
         command_results: List of verification command outputs supporting this criterion.
         explanation: Human-readable explanation of why this status was assigned.
+        behavior_change: Evidence for behavior change verification.
+        behavior_preservation: Evidence for behavior preservation verification.
+        structural_contract: Evidence for structural contract verification.
+        constraint: Evidence for constraint verification.
     """
 
     criterion_id: str
@@ -55,6 +172,10 @@ class AcceptanceEvidence(BaseModel):
     tests: list[str] = Field(default_factory=list)
     command_results: list[str] = Field(default_factory=list)
     explanation: str
+    behavior_change: BehaviorChangeEvidence | None = None
+    behavior_preservation: BehaviorPreservationEvidence | None = None
+    structural_contract: StructuralContractEvidence | None = None
+    constraint: ConstraintEvidence | None = None
 
 
 class AcceptanceCoverageReport(BaseModel):
