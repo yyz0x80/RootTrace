@@ -19,8 +19,14 @@ Important rules:
    this semantic distinction even when the issue lists such boundaries under
    an "Acceptance requirements" heading.
 3. Do NOT invent missing product behavior.
-4. If missing information could affect externally visible behavior,
-   put it into ambiguous_points.
+4. Use ambiguous_points conservatively. Only report missing information when
+   it would lead to at least two incompatible but reasonable externally
+   observable behaviors. Do NOT report as ambiguous:
+   - Multiple valid implementation approaches
+   - Hypothetical scenarios not required by the issue
+   - Details determinable from existing code or tests
+   - Background context the model wants for understanding
+   - Modifications already prohibited by security policies
 5. Reasonable implementation choices that do not change product
    behavior may go into implementation_notes.
 6. Acceptance criteria must have sequential IDs:

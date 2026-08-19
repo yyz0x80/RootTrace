@@ -247,59 +247,36 @@ def _classify_ambiguities(
 ) -> ChangePlan:
     """Run deterministic ambiguity classifier for undefined semantics.
 
-    This function checks for undefined user-visible semantics such as:
-    - Ordering requirements not specified
-    - Conflict resolution strategies not defined
-    - Default values not specified
-    - Priority rules not established
+    This function applies a conservative standard for blocking ambiguities:
+    Only when missing information would lead to at least two incompatible but
+    reasonable externally observable behaviors should it be considered a blocking
+    ambiguity.
 
-    When such ambiguities are detected, the plan is marked as needing clarification.
+    The following are NOT considered blocking ambiguities:
+    - Multiple valid implementation approaches
+    - Hypothetical scenarios not required by the issue
+    - Details that can be determined from existing code or tests
+    - Background information the model wants for context
+    - Modifications already prohibited by security policies
+
+    Actual ambiguity detection is primarily handled by the LLM-based normalizer
+    through the ambiguous_points field. This function provides defense-in-depth
+    for cases where programmatic detection is feasible and reliable.
 
     Args:
         plan: The change plan to process.
         issue: The normalized issue.
 
     Returns:
-        The original plan if no semantic ambiguities detected.
+        The original plan (no programmatic ambiguity classification applied).
 
     Raises:
         PlanPostProcessError: If semantic ambiguities are detected.
     """
-    ambiguity_indicators = [
-        "order",
-        "priority",
-        "default",
-        "conflict",
-        "resolution",
-        "sorting",
-        "ranking",
-    ]
-
-    # Check if issue mentions ordering/priority without specifying rules
-    problem_lower = issue.problem_statement.lower()
-    has_indicator = any(indicator in problem_lower for indicator in ambiguity_indicators)
-
-    if has_indicator:
-        # Check if the issue explicitly defines the semantics
-        explicit_definitions = [
-            "in order of",
-            "sorted by",
-            "priority is",
-            "default value is",
-            "conflict resolution",
-            "tie-breaker",
-        ]
-
-        has_explicit_definition = any(
-            definition in problem_lower for definition in explicit_definitions
-        )
-
-        if not has_explicit_definition:
-            raise PlanPostProcessError(
-                "Issue references ordering, priority, or conflict resolution "
-                "without explicit semantic rules. This requires clarification."
-            )
-
+    # Keyword-based ambiguity classification removed as it was too restrictive
+    # and caused false positives on legitimate tasks involving priority/ordering.
+    # Ambiguity detection now relies on LLM-based classification through
+    # ambiguous_points in the normalized issue.
     return plan
 
 
@@ -432,7 +409,7 @@ def post_process_plan(
     2. Merge duplicate file changes
     3. Validate pytest targets
     4. Check for ambiguous points
-    5. Classify semantic ambiguities
+    5. Classify semantic ambiguities (currently no-op, relies on LLM)
     6. Complete AC mapping errors locally (if skip_ac_validation is False)
 
     Args:

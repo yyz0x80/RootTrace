@@ -325,7 +325,7 @@ def test_check_ambiguity_no_ambiguous_points() -> None:
 
 
 def test_classify_ambiguities_ordering_without_rules() -> None:
-    """Test that ordering without explicit rules raises error."""
+    """Test that ordering without explicit rules now passes (keyword check removed)."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -347,12 +347,13 @@ def test_classify_ambiguities_ordering_without_rules() -> None:
         implementation_notes=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="ordering, priority, or conflict resolution"):
-        _classify_ambiguities(plan, issue)
+    # Should not raise - keyword-based classification removed
+    processed = _classify_ambiguities(plan, issue)
+    assert processed == plan
 
 
 def test_classify_ambiguities_ordering_with_rules() -> None:
-    """Test that ordering with explicit rules passes."""
+    """Test that ordering with explicit rules passes (no-op after keyword removal)."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -374,7 +375,7 @@ def test_classify_ambiguities_ordering_with_rules() -> None:
         implementation_notes=[],
     )
 
-    # Should not raise
+    # Should not raise - function is now a no-op
     processed = _classify_ambiguities(plan, issue)
     assert processed == plan
 
