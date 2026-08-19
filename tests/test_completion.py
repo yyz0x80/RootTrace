@@ -8,7 +8,9 @@ from patchpilot.evidence.schema import (
     ConstraintStatus,
     EvidenceStatus,
 )
-from patchpilot.workflow.completion import CompletionDecision, determine_completion_state
+from patchpilot.workflow.completion import (
+    determine_completion_state,
+)
 
 
 def test_needs_clarification_state():

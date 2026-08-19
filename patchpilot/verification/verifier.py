@@ -8,12 +8,27 @@ into a VerificationReport with proper failure classification.
 The verifier implements different strategies for each phase:
 - Baseline: Records current state, can fail-fast for blocking failures
 - Post-patch: Collects complete evidence, does not fail-fast
+
+The verifier now supports specialized verification checks when a ChangePlan
+includes acceptance probes or structural checks:
+- Acceptance Probes: Model-generated verification scripts executed in isolated
+  temporary directories to test specific aspects of code changes
+- Structural Checks: AST-based verification to ensure code structure meets
+  requirements without execution
+- Constraint Audit: Deterministic policy validation against actual git diff
+
+Specialized checks are only executed when the approved ChangePlan explicitly
+defines sufficient validated information for those checks. Missing optional
+specialized checks result in UNVERIFIED evidence rather than invented PASS.
 """
 
 from __future__ import annotations
 
 import shlex
+import subprocess
 from dataclasses import asdict
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.verification.error_parser import parse_failure
@@ -22,6 +37,9 @@ from patchpilot.verification.report import (
     VerificationReport,
 )
 from patchpilot.workflow.failure_classifier import classify_failure
+
+if TYPE_CHECKING:
+    from patchpilot.planning.schema import ChangePlan
 
 
 class Verifier:
@@ -38,32 +56,56 @@ class Verifier:
         sandbox: DockerSandbox instance for isolated command execution
     """
 
-    def __init__(self, sandbox: DockerSandbox) -> None:
+    def __init__(self, sandbox: DockerSandbox, workspace_root: Path | None = None) -> None:
         """Initialize the Verifier with a Docker sandbox.
 
         Args:
             sandbox: DockerSandbox instance for running verification commands
+            workspace_root: Optional workspace root path for specialized checks
         """
         self.sandbox = sandbox
+        self.workspace_root = workspace_root
+        self._specialized_verifier = None
+
+    def _get_specialized_verifier(self):
+        """Get or create the specialized verifier instance.
+
+        Returns:
+            SpecializedVerifier instance if workspace_root is set, None otherwise
+        """
+        if self.workspace_root is None:
+            return None
+
+        if self._specialized_verifier is None:
+            from patchpilot.verification.specialized import SpecializedVerifier
+
+            self._specialized_verifier = SpecializedVerifier(self.workspace_root)
+
+        return self._specialized_verifier
 
     def verify_baseline(
         self,
         run_id: str,
         target_tests: list[str] | None = None,
         subject_ids: list[str] | None = None,
+        change_plan: ChangePlan | None = None,
     ) -> VerificationReport:
         """Run baseline verification before making changes.
 
         Records the current state of the repository:
         - Regression test status
         - Preservation behavior status
-        - Acceptance Probe results (if applicable)
-        - Structural checker results (if applicable)
+        - Acceptance Probe results (if ChangePlan includes acceptance_probes)
+        - Structural checker results (if ChangePlan includes structural_checks)
+
+        Specialized checks are only executed when the ChangePlan contains
+        validated acceptance probe or structural check specifications.
 
         Args:
             run_id: Unique identifier for this verification run
             target_tests: Optional list of specific test paths to run
             subject_ids: Optional list of acceptance criteria IDs
+            change_plan: Optional ChangePlan with specialized verification specs
 
         Returns:
             VerificationReport containing baseline check results
@@ -110,6 +152,15 @@ class Verifier:
             )
             checks.append(target_check)
 
+        # Run specialized checks if change plan provides them
+        specialized_verifier = self._get_specialized_verifier()
+        if specialized_verifier and change_plan and specialized_verifier.has_specialized_checks(change_plan):
+            specialized_checks = specialized_verifier.execute_specialized_checks(
+                change_plan,
+                phase="baseline",
+            )
+            checks.extend(specialized_checks)
+
         # Create baseline report
         report = VerificationReport(
             run_id=run_id,
@@ -133,16 +184,22 @@ class Verifier:
         subject_ids: list[str] | None = None,
         direct_subject_ids: list[str] | None = None,
         retry_count: int = 0,
+        change_plan: ChangePlan | None = None,
     ) -> VerificationReport:
         """Run post-patch verification after making changes.
 
         Executes comprehensive checks without fail-fast to collect complete evidence:
         - Ruff linting
         - Precise target tests
-        - Acceptance Probe (if applicable)
-        - Structural check (if applicable)
+        - Acceptance Probe (if ChangePlan includes acceptance_probes)
+        - Structural check (if ChangePlan includes structural_checks)
         - Full regression tests
-        - Constraint audit
+        - Constraint audit (deterministic policy validation against git diff)
+
+        Specialized checks are only executed when the ChangePlan contains
+        validated acceptance probe or structural check specifications.
+        Constraint audit is performed deterministically against the actual
+        git diff using policy validation, not model judgment.
 
         Args:
             run_id: Unique identifier for this verification run
@@ -150,6 +207,7 @@ class Verifier:
             subject_ids: Optional list of acceptance criteria IDs
             direct_subject_ids: Optional list of directly exercised acceptance criteria IDs
             retry_count: Number of retry attempts for failed checks
+            change_plan: Optional ChangePlan with specialized verification specs
 
         Returns:
             VerificationReport containing post-patch check results
@@ -196,6 +254,15 @@ class Verifier:
             )
             checks.append(target_check)
 
+        # Level 2.5: Specialized checks (if change plan provides them)
+        specialized_verifier = self._get_specialized_verifier()
+        if specialized_verifier and change_plan and specialized_verifier.has_specialized_checks(change_plan):
+            specialized_checks = specialized_verifier.execute_specialized_checks(
+                change_plan,
+                phase="post_patch",
+            )
+            checks.extend(specialized_checks)
+
         # Level 3: Full regression tests
         regression_command = "python -m pytest -q -p no:cacheprovider"
         regression_result = self.sandbox.run(
@@ -213,6 +280,14 @@ class Verifier:
             direct=False,
         )
         checks.append(regression_check)
+
+        # Level 4: Constraint audit (if policy information available)
+        if change_plan:
+            constraint_checks = self._create_constraint_audit_checks(
+                run_id,
+                change_plan,
+            )
+            checks.extend(constraint_checks)
 
         # Create post-patch report (non-fail-fast)
         report = VerificationReport(
@@ -237,6 +312,7 @@ class Verifier:
         target_acceptance_criteria: list[str] | None = None,
         target_direct_acceptance_criteria: list[str] | None = None,
         retry_count: int = 0,
+        change_plan: ChangePlan | None = None,
     ) -> VerificationReport:
         """Run post-patch verification for backward compatibility.
 
@@ -250,6 +326,7 @@ class Verifier:
             target_direct_acceptance_criteria: Criteria directly exercised by
                 precise target test node IDs.
             retry_count: Number of retry attempts for failed checks
+            change_plan: Optional ChangePlan with specialized verification specs
 
         Returns:
             VerificationReport containing results of all executed checks
@@ -260,6 +337,7 @@ class Verifier:
             subject_ids=target_acceptance_criteria,
             direct_subject_ids=target_direct_acceptance_criteria,
             retry_count=retry_count,
+            change_plan=change_plan,
         )
 
     def _create_check_report(
@@ -316,3 +394,115 @@ class Verifier:
             subject_ids=subject_ids,
             direct=direct,
         )
+
+    def _create_constraint_audit_checks(
+        self,
+        run_id: str,
+        change_plan: ChangePlan,
+    ) -> list[CheckReport]:
+        """Create constraint audit checks based on policy and final diff.
+
+        This method performs deterministic policy validation against the actual
+        changes made, ensuring compliance with security boundaries without
+        allowing the model to decide compliance.
+
+        Args:
+            run_id: Unique identifier for this verification run
+            change_plan: The approved ChangePlan for policy validation
+
+        Returns:
+            List of CheckReport objects for constraint audit
+        """
+        checks: list[CheckReport] = []
+
+        # Import runtime audit here to avoid circular dependencies
+        try:
+            from patchpilot.policy.builtins import get_builtin_policies
+            from patchpilot.policy.runtime_audit import audit_git_diff
+        except ImportError:
+            # If policy modules are not available, skip constraint audit
+            return checks
+
+        if not self.workspace_root:
+            return checks
+
+        # Get policy set for constraint validation
+        try:
+            policy_set = get_builtin_policies()
+        except (ImportError, RuntimeError):
+            # If policy compilation fails, skip constraint audit
+            return checks
+
+        # Get planned files from change plan
+        planned_files = {change.path for change in change_plan.planned_changes}
+
+        # Run runtime audit against actual git diff
+        try:
+            audit_result = audit_git_diff(
+                workspace_root=self.workspace_root,
+                policy_set=policy_set,
+                planned_files=planned_files,
+            )
+        except (subprocess.CalledProcessError, RuntimeError, OSError):
+            # If audit fails, create a failure check
+            checks.append(
+                CheckReport(
+                    method="constraint_audit",
+                    phase="constraint_audit",
+                    level="CONSTRAINT_AUDIT",
+                    command="git_diff_audit",
+                    passed=False,
+                    exit_code=1,
+                    duration_seconds=0.0,
+                    failure_type="audit_error",
+                    summary={
+                        "error": "Constraint audit execution failed",
+                    },
+                    subject_ids=[],
+                    direct=False,
+                )
+            )
+            return checks
+
+        # Create constraint audit check report
+        if audit_result.passed:
+            checks.append(
+                CheckReport(
+                    method="constraint_audit",
+                    phase="constraint_audit",
+                    level="CONSTRAINT_AUDIT",
+                    command="git_diff_audit",
+                    passed=True,
+                    exit_code=0,
+                    duration_seconds=0.0,
+                    subject_ids=[],
+                    direct=False,
+                )
+            )
+        else:
+            # Create failure check with bounded violation output
+            violations_output = "\n".join(audit_result.violations)
+            if len(violations_output) > 2000:
+                violations_output = violations_output[:2000] + "\n... (truncated)"
+
+            checks.append(
+                CheckReport(
+                    method="constraint_audit",
+                    phase="constraint_audit",
+                    level="CONSTRAINT_AUDIT",
+                    command="git_diff_audit",
+                    passed=False,
+                    exit_code=1,
+                    duration_seconds=0.0,
+                    failure_type="policy_violation",
+                    summary={
+                        "violation_type": "hard_policy",
+                        "violations": audit_result.violations,
+                        "output": violations_output,
+                    },
+                    subject_ids=[],
+                    direct=False,
+                )
+            )
+
+        return checks

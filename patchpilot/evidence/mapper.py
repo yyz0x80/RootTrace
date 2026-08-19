@@ -73,12 +73,12 @@ def map_acceptance_evidence(
         tests = [
             check.command
             for check in mapped_checks
-            if "pytest" in check.command
+            if "pytest" in check.command or check.method in ("acceptance_probe", "structural_check")
         ]
 
         # Extract command results for evidence
         command_results = [
-            f"{check.level}: {'PASSED' if check.passed else 'FAILED'}"
+            f"{check.method}/{check.level}: {'PASSED' if check.passed else 'FAILED'}"
             for check in mapped_checks
         ]
 

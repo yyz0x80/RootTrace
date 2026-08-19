@@ -4,8 +4,8 @@ import pytest
 
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import check_scope, validate_actual_changes
-from patchpilot.tools import WorkspaceChange
 from patchpilot.policy.builtins import get_builtin_policies
+from patchpilot.tools import WorkspaceChange
 
 
 def test_check_scope_basic():

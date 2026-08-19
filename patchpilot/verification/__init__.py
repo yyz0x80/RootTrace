@@ -30,19 +30,24 @@ from patchpilot.verification.report import (
     VerificationReport,
     failure_fingerprint,
 )
+from patchpilot.verification.specialized import SpecializedVerifier
 from patchpilot.verification.structural import (
     ASTChecker,
-    CheckResult as StructuralCheckResult,
     CheckType,
     StructuralCheck,
     StructuralReport,
     StructuralRunner,
 )
+from patchpilot.verification.structural import (
+    CheckResult as StructuralCheckResult,
+)
 from patchpilot.verification.verifier import Verifier
 
 __all__ = [
+    "ASTChecker",
     "AcceptanceProbe",
     "CheckReport",
+    "CheckType",
     "FailureSummary",
     "ProbeExecutionResult",
     "ProbeRunner",
@@ -50,13 +55,12 @@ __all__ = [
     "ProbeType",
     "ProbeValidationError",
     "ProbeValidator",
+    "SpecializedVerifier",
     "StepResult",
-    "ASTChecker",
     "StructuralCheck",
     "StructuralCheckResult",
     "StructuralReport",
     "StructuralRunner",
-    "CheckType",
     "VerificationReport",
     "Verifier",
     "failure_fingerprint",

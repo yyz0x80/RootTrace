@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +83,43 @@ class PlannedTest(BaseModel):
     criterion_ids: list[str] = Field(default_factory=list)
 
 
+class AcceptanceProbeSpec(BaseModel):
+    """Specification for an acceptance probe.
+
+    Acceptance probes are model-generated verification scripts that test
+    specific aspects of code changes without becoming part of the patch itself.
+    """
+
+    probe_id: str
+    target_function: str
+    probe_type: Literal["function_io", "exception", "state_change", "invariant", "return_structure"]
+    criterion_ids: list[str] = Field(default_factory=list)
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    setup_code: str = ""
+    teardown_code: str = ""
+
+
+class StructuralCheckSpec(BaseModel):
+    """Specification for a structural check.
+
+    Structural checks use AST analysis to verify code structure without execution.
+    """
+
+    check_id: str
+    check_type: Literal[
+        "function_exists",
+        "signature_preserved",
+        "call_relationship",
+        "no_new_imports",
+        "method_exists",
+        "decorator_exists",
+    ]
+    target: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    criterion_ids: list[str] = Field(default_factory=list)
+    file_path: str
+
+
 class ChangePlan(BaseModel):
     """Comprehensive plan for addressing a normalized issue.
 
@@ -107,3 +144,7 @@ class ChangePlan(BaseModel):
     criterion_plans: list[CriterionPlan] = Field(default_factory=list)
     verification_specs: list[VerificationSpec] = Field(default_factory=list)
     plan_disposition: PlanDisposition = PlanDisposition.CHANGE_REQUIRED
+
+    # Specialized verification specifications
+    acceptance_probes: list[AcceptanceProbeSpec] = Field(default_factory=list)
+    structural_checks: list[StructuralCheckSpec] = Field(default_factory=list)

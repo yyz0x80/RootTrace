@@ -236,12 +236,12 @@ def _aggregate_structural_contract(
     Returns:
         StructuralContractEvidence with computed status, or None if no structural checks exist
     """
-    # Find specialized structural checks (AST/mock)
+    # Find specialized structural checks (acceptance_probe, structural_check, ast_check, mock_check)
     specialized_checks = [
         check
         for check in report.checks
         if criterion_id in check.subject_ids
-        and check.method in ("ast_check", "mock_check", "structural_check")
+        and check.method in ("acceptance_probe", "structural_check", "ast_check", "mock_check")
     ]
 
     # Find pytest checks
@@ -262,14 +262,14 @@ def _aggregate_structural_contract(
         check_passed = all(check.passed for check in specialized_checks)
         if check_passed:
             status = StructuralContractStatus.PASS
-            explanation = "Specialized AST/mock checks passed."
+            explanation = "Specialized acceptance probe and/or structural checks passed."
         else:
             status = StructuralContractStatus.FAIL
-            explanation = "Specialized AST/mock checks failed."
+            explanation = "Specialized acceptance probe and/or structural checks failed."
     elif has_pytest_only:
         status = StructuralContractStatus.UNVERIFIED
         check_passed = False
-        explanation = "Only pytest available; structural contract requires specialized AST/mock checks."
+        explanation = "Only pytest available; structural contract requires specialized acceptance probe or structural checks."
     else:
         status = StructuralContractStatus.UNVERIFIED
         check_passed = False
@@ -305,18 +305,18 @@ def _aggregate_constraint(
     Returns:
         ConstraintEvidence with computed status, or None if no constraint checks exist
     """
-    # Find constraint audit checks
+    # Find constraint audit checks (now apply to all criteria since constraint audit is global)
     constraint_checks = [
         check
         for check in report.checks
-        if check.phase == "constraint_audit" and criterion_id in check.subject_ids
+        if check.phase == "constraint_audit"
     ]
 
     # If no constraint checks, return None (no evidence)
     if not constraint_checks:
         return None
 
-    # Determine constraint status from check results
+    # Determine constraint status from check results (global constraint audit)
     has_hard_policy_violation = False
     has_attempted_violation = False
     has_compilation_error = False

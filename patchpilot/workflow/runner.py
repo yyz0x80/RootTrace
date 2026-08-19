@@ -473,6 +473,7 @@ class WorkflowRunner:
                 run_id=run_id,
                 target_tests=selection.tests,
                 subject_ids=selection.acceptance_criteria,
+                change_plan=change_plan,
             )
         else:
             return verifier.verify_post_patch(
@@ -481,6 +482,7 @@ class WorkflowRunner:
                 subject_ids=selection.acceptance_criteria,
                 direct_subject_ids=selection.direct_acceptance_criteria,
                 retry_count=retry_count,
+                change_plan=change_plan,
             )
 
     def _get_sandbox_verifier(self) -> Verifier:
@@ -494,7 +496,10 @@ class WorkflowRunner:
             # Import here to avoid a circular dependency during module loading.
             from patchpilot.verification.verifier import Verifier
 
-            self._sandbox_verifier = Verifier(self.sandbox)
+            self._sandbox_verifier = Verifier(
+                self.sandbox,
+                workspace_root=self.workspace.root,
+            )
 
         return self._sandbox_verifier
 
