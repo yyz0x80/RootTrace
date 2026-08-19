@@ -693,12 +693,12 @@ class WorkflowRunner:
                         )
                     )
                     artifacts = {
-                        "verification_report.json": (
+                        "verification_report": (
                             "artifacts/verification_report.json"
                         )
                     }
                     if trace_path is not None:
-                        artifacts["execution_trace.jsonl"] = str(trace_path)
+                        artifacts["execution_trace"] = str(trace_path)
                     ExecuteLogger.log_result(
                         passed=False,
                         artifacts=artifacts,
@@ -1002,10 +1002,10 @@ class WorkflowRunner:
             # Log final result section
             artifacts = {}
             if report.patch:
-                artifacts["patch.diff"] = "artifacts/patch.diff"
-            artifacts["verification_report.json"] = "artifacts/verification_report.json"
+                artifacts["patch"] = "artifacts/patch.diff"
+            artifacts["verification_report"] = "artifacts/verification_report.json"
             if trace_path is not None:
-                artifacts["execution_trace.jsonl"] = str(trace_path)
+                artifacts["execution_trace"] = str(trace_path)
 
             ExecuteLogger.log_result(
                 passed=report.passed,
