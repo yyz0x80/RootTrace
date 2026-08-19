@@ -19,7 +19,13 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 from patchpilot.issue.schema import NormalizedIssue
-from patchpilot.planning.schema import ChangePlan, PlannedChange, PlannedTest
+from patchpilot.planning.schema import (
+    ChangePlan,
+    PlannedChange,
+    PlannedTest,
+    CriterionPlan,
+    CriterionPlanDetail,
+)
 from patchpilot.repository.schema import RepositoryContext
 
 
@@ -72,6 +78,7 @@ def _migrate_test_files_to_tests(plan: ChangePlan) -> ChangePlan:
                 command=command,
                 purpose=f"Verify test file: {change.path}",
                 acceptance_criteria=change.acceptance_criteria,
+                criterion_ids=change.criterion_ids,
             )
             test_commands.append(test_command)
         else:
@@ -105,12 +112,16 @@ def _merge_duplicate_file_changes(plan: ChangePlan) -> ChangePlan:
             changes_by_path[change.path] = {
                 "descriptions": [],
                 "acceptance_criteria": [],
+                "criterion_ids": [],
                 "actions": [],
             }
 
         changes_by_path[change.path]["descriptions"].append(change.description)
         changes_by_path[change.path]["acceptance_criteria"].extend(
             change.acceptance_criteria
+        )
+        changes_by_path[change.path]["criterion_ids"].extend(
+            change.criterion_ids
         )
         changes_by_path[change.path]["actions"].append(change.action.value)
 
@@ -125,6 +136,14 @@ def _merge_duplicate_file_changes(plan: ChangePlan) -> ChangePlan:
                 seen.add(ac)
                 unique_criteria.append(ac)
 
+        # Deduplicate criterion_ids while preserving order
+        unique_criterion_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for cid in data["criterion_ids"]:
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                unique_criterion_ids.append(cid)
+
         # Merge descriptions
         merged_description = "; ".join(data["descriptions"])
 
@@ -137,6 +156,7 @@ def _merge_duplicate_file_changes(plan: ChangePlan) -> ChangePlan:
                 action=final_action,
                 description=merged_description,
                 acceptance_criteria=unique_criteria,
+                criterion_ids=unique_criterion_ids,
             )
         )
 
@@ -280,6 +300,77 @@ def _classify_ambiguities(
     return plan
 
 
+def _validate_criterion_plans(
+    plan: ChangePlan,
+    issue: NormalizedIssue,
+) -> ChangePlan:
+    """Validate criterion plans according to the new requirements.
+
+    This function ensures that:
+    - ALREADY_SATISFIED criteria have baseline_evidence
+    - Structural criteria have relevant_source_files
+    - Preservation criteria may not have planned changes
+
+    Args:
+        plan: The change plan to process.
+        issue: The normalized issue.
+
+    Returns:
+        The original plan if validation passes.
+
+    Raises:
+        PlanPostProcessError: If criterion plan validation fails.
+    """
+    # Skip validation for issues without acceptance criteria
+    if not issue.acceptance_criteria:
+        return plan
+
+    known_ids = {criterion.id for criterion in issue.acceptance_criteria}
+
+    for criterion_plan in plan.criterion_plans:
+        # Check if criterion_id is valid
+        if criterion_plan.criterion_id not in known_ids:
+            raise PlanPostProcessError(
+                f"Unknown criterion ID in criterion_plans: {criterion_plan.criterion_id}"
+            )
+
+        # Check ALREADY_SATISFIED has baseline_evidence
+        if (
+            criterion_plan.disposition == CriterionPlanDetail.ALREADY_SATISFIED
+            and not criterion_plan.baseline_evidence
+        ):
+            raise PlanPostProcessError(
+                f"ALREADY_SATISFIED criterion {criterion_plan.criterion_id} must have baseline_evidence"
+            )
+
+        # Check if structural criteria have relevant_source_files
+        # This is a heuristic - we consider criteria that reference source files as structural
+        if (
+            criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT
+            and not criterion_plan.relevant_source_files
+        ):
+            # For to_implement, we require source files to be specified
+            raise PlanPostProcessError(
+                f"TO_IMPLEMENT criterion {criterion_plan.criterion_id} must specify relevant_source_files"
+            )
+
+    # Check that preservation criteria don't have planned changes
+    preservation_criteria = {
+        cp.criterion_id
+        for cp in plan.criterion_plans
+        if cp.disposition == CriterionPlanDetail.TO_PRESERVE
+    }
+
+    for change in plan.planned_changes:
+        for criterion_id in change.criterion_ids:
+            if criterion_id in preservation_criteria:
+                raise PlanPostProcessError(
+                    f"Preservation criterion {criterion_id} should not have planned changes"
+                )
+
+    return plan
+
+
 def _complete_ac_mapping(
     plan: ChangePlan,
     issue: NormalizedIssue,
@@ -319,6 +410,7 @@ def _complete_ac_mapping(
             corrected_changes = []
             for change in plan.planned_changes:
                 corrected_criteria: list[str] = []
+                corrected_criterion_ids: list[str] = []
                 for ac_id in change.acceptance_criteria:
                     if ac_id in known_ids:
                         corrected_criteria.append(ac_id)
@@ -332,10 +424,27 @@ def _complete_ac_mapping(
                                 corrected_criteria.append(known_id)
                                 break
 
-                if corrected_criteria != change.acceptance_criteria:
+                for cid in change.criterion_ids:
+                    if cid in known_ids:
+                        corrected_criterion_ids.append(cid)
+                    else:
+                        for known_id in known_ids:
+                            if (
+                                cid.lower() == known_id.lower()
+                                or cid.replace("-", "") == known_id.replace("-", "")
+                            ):
+                                corrected_criterion_ids.append(known_id)
+                                break
+
+                if corrected_criteria != change.acceptance_criteria or corrected_criterion_ids != change.criterion_ids:
                     # Create a new change with corrected AC IDs
                     corrected_changes.append(
-                        change.model_copy(update={"acceptance_criteria": corrected_criteria})
+                        change.model_copy(
+                            update={
+                                "acceptance_criteria": corrected_criteria,
+                                "criterion_ids": corrected_criterion_ids,
+                            }
+                        )
                     )
                 else:
                     corrected_changes.append(change)
@@ -343,6 +452,7 @@ def _complete_ac_mapping(
             corrected_tests = []
             for test in plan.planned_tests:
                 corrected_criteria: list[str] = []
+                corrected_criterion_ids: list[str] = []
                 for ac_id in test.acceptance_criteria:
                     if ac_id in known_ids:
                         corrected_criteria.append(ac_id)
@@ -355,10 +465,27 @@ def _complete_ac_mapping(
                                 corrected_criteria.append(known_id)
                                 break
 
-                if corrected_criteria != test.acceptance_criteria:
+                for cid in test.criterion_ids:
+                    if cid in known_ids:
+                        corrected_criterion_ids.append(cid)
+                    else:
+                        for known_id in known_ids:
+                            if (
+                                cid.lower() == known_id.lower()
+                                or cid.replace("-", "") == known_id.replace("-", "")
+                            ):
+                                corrected_criterion_ids.append(known_id)
+                                break
+
+                if corrected_criteria != test.acceptance_criteria or corrected_criterion_ids != test.criterion_ids:
                     # Create a new test with corrected AC IDs
                     corrected_tests.append(
-                        test.model_copy(update={"acceptance_criteria": corrected_criteria})
+                        test.model_copy(
+                            update={
+                                "acceptance_criteria": corrected_criteria,
+                                "criterion_ids": corrected_criterion_ids,
+                            }
+                        )
                     )
                 else:
                     corrected_tests.append(test)
@@ -410,7 +537,8 @@ def post_process_plan(
     3. Validate pytest targets
     4. Check for ambiguous points
     5. Classify semantic ambiguities (currently no-op, relies on LLM)
-    6. Complete AC mapping errors locally (if skip_ac_validation is False)
+    6. Validate criterion plans (if skip_ac_validation is False)
+    7. Complete AC mapping errors locally (if skip_ac_validation is False)
 
     Args:
         plan: The change plan generated by the LLM.
@@ -440,7 +568,11 @@ def post_process_plan(
     # Step 5: Classify semantic ambiguities
     plan = _classify_ambiguities(plan, issue)
 
-    # Step 6: Complete AC mapping errors locally (skip if requested)
+    # Step 6: Validate criterion plans (skip if requested)
+    if not skip_ac_validation:
+        plan = _validate_criterion_plans(plan, issue)
+
+    # Step 7: Complete AC mapping errors locally (skip if requested)
     if not skip_ac_validation:
         plan = _complete_ac_mapping(plan, issue)
 

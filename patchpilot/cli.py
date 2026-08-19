@@ -26,6 +26,7 @@ from patchpilot.planning.planner import PlanGenerationError, create_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_plan
+from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.provider import (
     LLMProvider,
     ToolCallParseError,
@@ -678,7 +679,8 @@ def handle_run(args) -> None:
         )
         
         # Validate plan against scope restrictions
-        scope_result = check_scope(plan)
+        policy_set = get_builtin_policies()
+        scope_result = check_scope(plan, policy_set)
         
         if not scope_result.allowed:
             print("SCOPE_CHECK_FAILED\n")

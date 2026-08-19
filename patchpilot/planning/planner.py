@@ -117,9 +117,19 @@ Rules:
    NEVER include test files in planned_changes. Tests should only be in planned_tests for verification.
 10. Test file modifications are FORBIDDEN. Even if the issue mentions updating tests,
     the agent should only modify source code and rely on existing tests for verification.
-11. Map every acceptance criterion ID to at least one planned source change and
+11. For each acceptance criterion, you must explicitly specify its disposition:
+    - "to_implement": The criterion requires changes to be implemented
+    - "to_preserve": The criterion must be preserved (no changes needed)
+    - "already_satisfied": The criterion is already met by existing code
+    - "cannot_verify": The criterion cannot be verified with available information
+12. For "already_satisfied" disposition, you MUST provide baseline_evidence
+    explaining exactly what existing code or behavior satisfies the criterion.
+13. For structural criteria, you MUST specify relevant_source_files that contain
+    the related source code.
+14. Preservation criteria ("to_preserve") may not have planned changes.
+15. Map "to_implement" criteria to at least one planned source change and
     one deterministic planned test. One change or test may map multiple criteria.
-12. Constraints are execution boundaries, not acceptance criteria. Do not invent
+16. Constraints are execution boundaries, not acceptance criteria. Do not invent
     source changes merely to implement a read-only or security constraint.
 
 Required structure:
@@ -133,18 +143,37 @@ Required structure:
       "path": "...",
       "action": "create|modify|delete",
       "description": "...",
-      "acceptance_criteria": ["AC-1"]
+      "acceptance_criteria": ["AC-1"],
+      "criterion_ids": ["AC-1"]
     }}
   ],
   "planned_tests": [
     {{
       "command": "pytest ...",
       "purpose": "...",
-      "acceptance_criteria": ["AC-1"]
+      "acceptance_criteria": ["AC-1"],
+      "criterion_ids": ["AC-1"]
+    }}
+  ],
+  "criterion_plans": [
+    {{
+      "criterion_id": "AC-1",
+      "disposition": "to_implement|to_preserve|already_satisfied|cannot_verify",
+      "relevant_source_files": ["file1.py", "file2.py"],
+      "baseline_evidence": "Explanation if already_satisfied"
+    }}
+  ],
+  "verification_specs": [
+    {{
+      "criterion_id": "AC-1",
+      "command": "pytest ...",
+      "expected_result": "...",
+      "baseline_evidence": "..."
     }}
   ],
   "out_of_scope": [],
-  "risk_level": "low"
+  "risk_level": "low",
+  "plan_disposition": "change_required|already_satisfied|repository_mismatch|blocked"
 }}
 """
 
@@ -220,11 +249,14 @@ Validation error:
 Previous response:
 {bounded_response}
 
-Return one corrected JSON object only. Every acceptance criterion must map to
-at least one planned source-code change and one deterministic planned test.
-Files under tests/ and files named test_*.py are read-only and must never
-appear in planned_changes. Preserve repository_match=false when the issue does
-not match the repository; do not invent a missing subsystem.
+Return one corrected JSON object only. Every acceptance criterion must have a
+criterion_plan with explicit disposition (to_implement, to_preserve, already_satisfied,
+or cannot_verify). For "already_satisfied", provide baseline_evidence. For structural
+criteria, specify relevant_source_files. "to_implement" criteria must map to at least
+one planned source-code change and one deterministic planned test. Files under tests/
+and files named test_*.py are read-only and must never appear in planned_changes.
+Preserve repository_match=false when the issue does not match the repository; do not
+invent a missing subsystem.
 """
 
 

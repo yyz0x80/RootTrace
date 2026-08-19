@@ -46,6 +46,7 @@ from patchpilot.planning.scope_gate import (
     check_scope,
     validate_actual_changes,
 )
+from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.prompts import REPAIR_PROMPT, REPAIR_SYSTEM_PROMPT
 from patchpilot.sandbox.docker_runner import DockerSandbox
 from patchpilot.tools import (
@@ -1502,7 +1503,8 @@ class WorkflowRunner:
         )
 
         # Run scope gate validation
-        scope_result = check_scope(change_plan)
+        policy_set = get_builtin_policies()
+        scope_result = check_scope(change_plan, policy_set)
 
         if not scope_result.allowed:
             logger.warning(

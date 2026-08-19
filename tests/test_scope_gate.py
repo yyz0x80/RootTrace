@@ -5,6 +5,7 @@ import pytest
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import check_scope, validate_actual_changes
 from patchpilot.tools import WorkspaceChange
+from patchpilot.policy.builtins import get_builtin_policies
 
 
 def test_check_scope_basic():
@@ -22,7 +23,8 @@ def test_check_scope_basic():
         risk_level="low"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is True
     assert len(result.violations) == 0
@@ -41,7 +43,8 @@ def test_check_scope_too_many_files():
         risk_level="low"
     )
 
-    result = check_scope(plan, max_modified_files=6)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set, max_modified_files=6)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -64,12 +67,13 @@ def test_check_scope_forbidden_file():
         risk_level="low"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
     assert ".env" in result.violations[0]
-    assert "forbidden" in result.violations[0]
+    assert "Write denied" in result.violations[0]
 
 
 def test_check_scope_forbidden_prefix():
@@ -87,11 +91,13 @@ def test_check_scope_forbidden_prefix():
         risk_level="low"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
-    assert "CI/CD modification is forbidden" in result.violations[0]
+    assert "Write denied" in result.violations[0]
+    assert "CI/CD" in result.violations[0]
 
 
 def test_check_scope_database_migration():
@@ -109,7 +115,8 @@ def test_check_scope_database_migration():
         risk_level="low"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -131,7 +138,8 @@ def test_check_scope_not_in_relevant_files():
         risk_level="low"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is True
     assert len(result.violations) == 0
@@ -155,7 +163,8 @@ def test_check_scope_high_risk():
         risk_level="high"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -174,7 +183,8 @@ def test_check_scope_multiple_violations():
         risk_level="high"
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 3  # .env, CI/CD, high risk
@@ -202,8 +212,9 @@ class TestValidateActualChanges:
             WorkspaceChange(path="src/main.py", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         # Should not raise any exception
-        validate_actual_changes(plan, actual_changes)
+        validate_actual_changes(plan, actual_changes, policy_set)
 
     def test_validate_actual_changes_env_forbidden(self):
         """Test validation rejects .env modifications."""
@@ -224,11 +235,12 @@ class TestValidateActualChanges:
             WorkspaceChange(path=".env", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
         assert ".env" in str(exc_info.value)
-        assert "forbidden" in str(exc_info.value)
+        assert "Write denied" in str(exc_info.value)
 
     def test_validate_actual_changes_ci_workflow_forbidden(self):
         """Test validation rejects CI workflow modifications."""
@@ -249,11 +261,12 @@ class TestValidateActualChanges:
             WorkspaceChange(path=".github/workflows/ci.yml", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
-        assert "CI workflow" in str(exc_info.value)
-        assert "forbidden" in str(exc_info.value)
+        assert "CI/CD" in str(exc_info.value)
+        assert "Write denied" in str(exc_info.value)
 
     def test_validate_actual_changes_unplanned_file(self):
         """Test validation rejects changes to files not in the plan."""
@@ -274,8 +287,9 @@ class TestValidateActualChanges:
             WorkspaceChange(path="src/unplanned.py", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
         assert "outside the approved plan" in str(exc_info.value)
         assert "src/unplanned.py" in str(exc_info.value)
@@ -299,8 +313,9 @@ class TestValidateActualChanges:
             WorkspaceChange(path="src/main.py", action="create")  # Wrong action
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
         assert "Unexpected change action" in str(exc_info.value)
         assert "expected modify" in str(exc_info.value)
@@ -331,8 +346,9 @@ class TestValidateActualChanges:
             WorkspaceChange(path="src/utils.py", action="create")
         ]
 
+        policy_set = get_builtin_policies()
         # Should not raise any exception
-        validate_actual_changes(plan, actual_changes)
+        validate_actual_changes(plan, actual_changes, policy_set)
 
     def test_validate_actual_changes_delete_action(self):
         """Test validation handles delete actions correctly."""
@@ -353,8 +369,9 @@ class TestValidateActualChanges:
             WorkspaceChange(path="src/old.py", action="delete")
         ]
 
+        policy_set = get_builtin_policies()
         # Should not raise any exception
-        validate_actual_changes(plan, actual_changes)
+        validate_actual_changes(plan, actual_changes, policy_set)
 
     def test_validate_actual_changes_test_prefix_file(self):
         """Test validation rejects test_*.py modifications at runtime."""
@@ -375,11 +392,12 @@ class TestValidateActualChanges:
             WorkspaceChange(path="test_utils.py", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
         assert "test_utils.py" in str(exc_info.value)
-        assert "Test file modification is forbidden" in str(exc_info.value)
+        assert "Write denied" in str(exc_info.value)
 
     def test_validate_actual_changes_github_workflow_runtime(self):
         """Test validation rejects .github/workflows modifications at runtime."""
@@ -400,11 +418,12 @@ class TestValidateActualChanges:
             WorkspaceChange(path=".github/workflows/ci.yml", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
-        assert "CI workflow" in str(exc_info.value)
-        assert "forbidden" in str(exc_info.value)
+        assert "CI/CD" in str(exc_info.value)
+        assert "Write denied" in str(exc_info.value)
 
     def test_validate_actual_changes_runtime_unplanned_sensitive_file(self):
         """Test validation rejects unplanned access to sensitive files at runtime."""
@@ -426,11 +445,12 @@ class TestValidateActualChanges:
             WorkspaceChange(path=".env", action="modify")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
         assert ".env" in str(exc_info.value)
-        assert "forbidden" in str(exc_info.value)
+        assert "Write denied" in str(exc_info.value)
 
     def test_validate_actual_changes_runtime_multiple_unplanned_files(self):
         """Test validation rejects multiple unplanned file changes at runtime."""
@@ -453,7 +473,8 @@ class TestValidateActualChanges:
             WorkspaceChange(path="src/utils.py", action="create")
         ]
 
+        policy_set = get_builtin_policies()
         with pytest.raises(RuntimeError) as exc_info:
-            validate_actual_changes(plan, actual_changes)
+            validate_actual_changes(plan, actual_changes, policy_set)
 
         assert "outside the approved plan" in str(exc_info.value)

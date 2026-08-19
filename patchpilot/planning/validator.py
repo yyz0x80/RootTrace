@@ -8,6 +8,7 @@ from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import ScopeGateResult, check_scope
 from patchpilot.repository.schema import RepositoryContext
+from patchpilot.policy.builtins import get_builtin_policies
 
 
 def validate_plan_against_repository(
@@ -147,7 +148,8 @@ def validate_plan(
 
     # Step 2: Reject security and scope violations before asking whether every
     # acceptance criterion has an implementation mapping.
-    scope_result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    scope_result = check_scope(plan, policy_set)
 
     # Step 3: Validate coverage only for executable plans. Unsafe plans must be
     # blocked as-is rather than treated as repairable planning omissions.

@@ -12,6 +12,50 @@ class ChangeAction(str, Enum):
     DELETE = "delete"
 
 
+class PlanDisposition(str, Enum):
+    """Disposition of the overall change plan."""
+
+    CHANGE_REQUIRED = "change_required"
+    ALREADY_SATISFIED = "already_satisfied"
+    REPOSITORY_MISMATCH = "repository_mismatch"
+    BLOCKED = "blocked"
+
+
+class CriterionPlanDetail(str, Enum):
+    """Detailed disposition for a single acceptance criterion."""
+
+    TO_IMPLEMENT = "to_implement"
+    TO_PRESERVE = "to_preserve"
+    ALREADY_SATISFIED = "already_satisfied"
+    CANNOT_VERIFY = "cannot_verify"
+
+
+class VerificationSpec(BaseModel):
+    """Verification specification for acceptance criteria.
+
+    Each verification spec defines how to verify a criterion,
+    including the command to run and the expected result.
+    """
+
+    criterion_id: str
+    command: str
+    expected_result: str = Field(default="")
+    baseline_evidence: str = Field(default="")
+
+
+class CriterionPlan(BaseModel):
+    """Plan for a single acceptance criterion.
+
+    Each criterion plan specifies the disposition of the criterion
+    and relevant source files for structural criteria.
+    """
+
+    criterion_id: str
+    disposition: CriterionPlanDetail
+    relevant_source_files: list[str] = Field(default_factory=list)
+    baseline_evidence: str = Field(default="")
+
+
 class PlannedChange(BaseModel):
     """Represents a single planned code change.
 
@@ -23,6 +67,7 @@ class PlannedChange(BaseModel):
     action: ChangeAction
     description: str
     acceptance_criteria: list[str] = Field(default_factory=list)
+    criterion_ids: list[str] = Field(default_factory=list)
 
 
 class PlannedTest(BaseModel):
@@ -35,6 +80,7 @@ class PlannedTest(BaseModel):
     command: str
     purpose: str
     acceptance_criteria: list[str] = Field(default_factory=list)
+    criterion_ids: list[str] = Field(default_factory=list)
 
 
 class ChangePlan(BaseModel):
@@ -56,3 +102,8 @@ class ChangePlan(BaseModel):
     out_of_scope: list[str] = Field(default_factory=list)
 
     risk_level: Literal["low", "medium", "high"]
+
+    # New fields for enhanced AC planning
+    criterion_plans: list[CriterionPlan] = Field(default_factory=list)
+    verification_specs: list[VerificationSpec] = Field(default_factory=list)
+    plan_disposition: PlanDisposition = PlanDisposition.CHANGE_REQUIRED
