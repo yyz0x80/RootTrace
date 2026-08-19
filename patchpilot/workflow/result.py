@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from patchpilot.evidence.schema import AcceptanceEvidence, CompletionState
+from patchpilot.workflow.completion import CompletionDecision
 
 
 class PrepareSummary(BaseModel):
@@ -52,6 +53,13 @@ class RunSummary(BaseModel):
         prompt_tokens: Total prompt tokens used (null if not available).
         completion_tokens: Total completion tokens used (null if not available).
         total_cost: Total cost of the run (null if not available).
+        outcome_code: Detailed outcome code from completion decision.
+        criterion_pass_count: Number of required criteria that passed.
+        criterion_unverified_count: Number of required criteria that are unverified.
+        constraint_violation_count: Number of constraint violations detected.
+        evidence_precision_hint: Human-readable hint about evidence precision.
+        failure_type: Type of failure if final_status is FAILED.
+        error_message: Error message if execution failed.
         artifacts: Dictionary mapping artifact names to their file paths.
     """
 
@@ -70,6 +78,11 @@ class RunSummary(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_cost: float | None = None
+    outcome_code: str = ""
+    criterion_pass_count: int = 0
+    criterion_unverified_count: int = 0
+    constraint_violation_count: int = 0
+    evidence_precision_hint: str = ""
     failure_type: str | None = None
     error_message: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
@@ -124,6 +137,7 @@ class WorkflowResult(BaseModel):
         base_commit: str = "",
         model: str = "",
         output_dir: str = "artifacts",
+        decision: CompletionDecision | None = None,
     ) -> RunSummary:
         """Convert workflow result to run summary format.
 
@@ -132,6 +146,7 @@ class WorkflowResult(BaseModel):
             base_commit: Base commit SHA for the repository.
             model: Model identifier used for the run.
             output_dir: Directory where artifacts are saved.
+            decision: Optional CompletionDecision object with detailed metrics.
 
         Returns:
             RunSummary object with execution metadata and results.
@@ -150,6 +165,22 @@ class WorkflowResult(BaseModel):
             "execution_trace": f"{output_dir}/execution_trace.jsonl",
         }
 
+        # Extract metrics from decision if available
+        outcome_code = ""
+        criterion_pass_count = 0
+        criterion_unverified_count = 0
+        constraint_violation_count = 0
+        evidence_precision_hint = ""
+        failure_type = None
+
+        if decision:
+            outcome_code = decision.state.value
+            criterion_pass_count = decision.criterion_pass_count
+            criterion_unverified_count = decision.criterion_unverified_count
+            constraint_violation_count = decision.constraint_violation_count
+            evidence_precision_hint = decision.evidence_precision_hint
+            failure_type = decision.failure_type.value if decision.failure_type else None
+
         return RunSummary(
             run_id=self.run_id,
             task_id=task_id,
@@ -166,5 +197,11 @@ class WorkflowResult(BaseModel):
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
             total_cost=self.total_cost,
+            outcome_code=outcome_code,
+            criterion_pass_count=criterion_pass_count,
+            criterion_unverified_count=criterion_unverified_count,
+            constraint_violation_count=constraint_violation_count,
+            evidence_precision_hint=evidence_precision_hint,
+            failure_type=failure_type,
             artifacts=artifacts,
         )

@@ -22,6 +22,7 @@ from patchpilot.evidence.schema import (
     BehaviorPreservationEvidence,
     BehaviorPreservationStatus,
     ConstraintEvidence,
+    ConstraintSeverity,
     ConstraintStatus,
     EvidenceStatus,
     StructuralContractEvidence,
@@ -336,22 +337,28 @@ def _aggregate_constraint(
     # Apply deterministic rules
     if has_compilation_error:
         status = ConstraintStatus.UNSUPPORTED
+        severity = ConstraintSeverity.CRITICAL
         explanation = "Cannot compile (unsupported change)."
     elif has_hard_policy_violation:
         status = ConstraintStatus.VIOLATED
+        severity = ConstraintSeverity.CRITICAL
         explanation = "Hard policy violation detected in final diff."
     elif has_advisory:
         status = ConstraintStatus.ADVISORY
+        severity = ConstraintSeverity.LOW
         explanation = "Advisory issues detected (not blocking)."
     elif has_attempted_violation:
         status = ConstraintStatus.COMPLIANT
+        severity = ConstraintSeverity.MEDIUM
         explanation = "Compliant (violation attempted but rejected, no real change made)."
     else:
         status = ConstraintStatus.COMPLIANT
+        severity = ConstraintSeverity.MEDIUM
         explanation = "Compliant (no hard policy violations)."
 
     return ConstraintEvidence(
         status=status,
+        severity=severity,
         has_hard_policy_violation=has_hard_policy_violation,
         has_attempted_violation=has_attempted_violation,
         has_compilation_error=has_compilation_error,

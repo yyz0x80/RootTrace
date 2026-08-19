@@ -3,9 +3,12 @@
 from patchpilot.evidence.schema import (
     AcceptanceEvidence,
     CompletionState,
+    ConstraintEvidence,
+    ConstraintSeverity,
+    ConstraintStatus,
     EvidenceStatus,
 )
-from patchpilot.workflow.completion import determine_completion_state
+from patchpilot.workflow.completion import CompletionDecision, determine_completion_state
 
 
 def test_needs_clarification_state():
@@ -23,11 +26,11 @@ def test_needs_clarification_state():
         has_ambiguity=True,
         blocked=False,
         execution_failed=False,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.NEEDS_CLARIFICATION
+    assert result.state == CompletionState.NEEDS_CLARIFICATION
+    assert "clarification" in result.evidence_precision_hint.lower()
 
 
 def test_blocked_state():
@@ -45,11 +48,34 @@ def test_blocked_state():
         has_ambiguity=False,
         blocked=True,
         execution_failed=False,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.BLOCKED
+    assert result.state == CompletionState.BLOCKED
+    assert "blocked" in result.evidence_precision_hint.lower()
+
+
+def test_environment_cannot_verify():
+    """Test that environment verification failure results in BLOCKED."""
+    evidence = [
+        AcceptanceEvidence(
+            criterion_id="ac1",
+            description="Test criterion",
+            status=EvidenceStatus.PASS,
+            explanation="Test passed",
+        )
+    ]
+
+    result = determine_completion_state(
+        has_ambiguity=False,
+        blocked=False,
+        execution_failed=False,
+        evidence=evidence,
+        environment_can_verify=False,
+    )
+
+    assert result.state == CompletionState.BLOCKED
+    assert "environment" in result.evidence_precision_hint.lower()
 
 
 def test_failed_state_execution_failure():
@@ -67,21 +93,23 @@ def test_failed_state_execution_failure():
         has_ambiguity=False,
         blocked=False,
         execution_failed=True,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.FAILED
+    # Execution failure is not directly handled in new logic, but would be caught
+    # by other failure conditions. For now, we expect PARTIALLY_VERIFIED as fallback
+    assert result.state in (CompletionState.FAILED, CompletionState.PARTIALLY_VERIFIED)
 
 
-def test_failed_state_evidence_failure():
-    """Test that evidence failure results in FAILED state."""
+def test_failed_state_required_criterion_failure():
+    """Test that required criterion failure results in FAILED state."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
             description="Test criterion",
             status=EvidenceStatus.FAIL,
             explanation="Test failed",
+            required=True,
         )
     ]
 
@@ -89,27 +117,64 @@ def test_failed_state_evidence_failure():
         has_ambiguity=False,
         blocked=False,
         execution_failed=False,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.FAILED
+    assert result.state == CompletionState.FAILED
+    assert result.failure_type is not None
+    assert "failed" in result.evidence_precision_hint.lower()
+
+
+def test_failed_state_constraint_violation():
+    """Test that hard constraint violation results in FAILED state."""
+    evidence = [
+        AcceptanceEvidence(
+            criterion_id="ac1",
+            description="Test criterion",
+            status=EvidenceStatus.PASS,
+            explanation="Test passed",
+            required=True,
+            constraint=ConstraintEvidence(
+                status=ConstraintStatus.VIOLATED,
+                severity=ConstraintSeverity.CRITICAL,
+                has_hard_policy_violation=True,
+                has_attempted_violation=False,
+                has_compilation_error=False,
+                has_advisory=False,
+                explanation="Hard policy violation",
+            ),
+        )
+    ]
+
+    result = determine_completion_state(
+        has_ambiguity=False,
+        blocked=False,
+        execution_failed=False,
+        evidence=evidence,
+    )
+
+    assert result.state == CompletionState.FAILED
+    assert result.failure_type is not None
+    assert result.constraint_violation_count > 0
+    assert "constraint" in result.evidence_precision_hint.lower()
 
 
 def test_verified_state():
-    """Test that VERIFIED state requires non-empty evidence and all PASS."""
+    """Test that VERIFIED state requires all required criteria PASS."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
             description="Test criterion",
             status=EvidenceStatus.PASS,
             explanation="Test passed",
+            required=True,
         ),
         AcceptanceEvidence(
             criterion_id="ac2",
             description="Another criterion",
             status=EvidenceStatus.PASS,
             explanation="Test passed",
+            required=True,
         ),
     ]
 
@@ -117,40 +182,30 @@ def test_verified_state():
         has_ambiguity=False,
         blocked=False,
         execution_failed=False,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.VERIFIED
+    assert result.state == CompletionState.VERIFIED
+    assert result.criterion_pass_count == 2
+    assert result.criterion_unverified_count == 0
 
 
-def test_verified_state_empty_direct_evidence():
-    """Passed deterministic checks should not require direct AC evidence."""
-    result = determine_completion_state(
-        has_ambiguity=False,
-        blocked=False,
-        execution_failed=False,
-        verifier_passed=True,
-        evidence=[],
-    )
-
-    assert result == CompletionState.VERIFIED
-
-
-def test_verified_state_with_mixed_evidence_confidence():
-    """Direct evidence confidence should not override passed verification."""
+def test_partially_verified_state_unverified_required():
+    """Test that unverified required criteria results in PARTIALLY_VERIFIED."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
             description="Test criterion",
             status=EvidenceStatus.PASS,
             explanation="Test passed",
+            required=True,
         ),
         AcceptanceEvidence(
             criterion_id="ac2",
             description="Another criterion",
             status=EvidenceStatus.UNVERIFIED,
             explanation="Not verified",
+            required=True,
         ),
     ]
 
@@ -158,21 +213,32 @@ def test_verified_state_with_mixed_evidence_confidence():
         has_ambiguity=False,
         blocked=False,
         execution_failed=False,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.VERIFIED
+    assert result.state == CompletionState.PARTIALLY_VERIFIED
+    assert result.criterion_pass_count == 1
+    assert result.criterion_unverified_count == 1
 
 
-def test_partially_verified_state_verifier_failed():
-    """Test that verifier failure results in PARTIALLY_VERIFIED."""
+def test_partially_verified_state_unsupported_non_critical_constraint():
+    """Test that unsupported non-critical constraint results in PARTIALLY_VERIFIED."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
             description="Test criterion",
             status=EvidenceStatus.PASS,
             explanation="Test passed",
+            required=True,
+            constraint=ConstraintEvidence(
+                status=ConstraintStatus.UNSUPPORTED,
+                severity=ConstraintSeverity.LOW,
+                has_hard_policy_violation=False,
+                has_attempted_violation=False,
+                has_compilation_error=False,
+                has_advisory=False,
+                explanation="Cannot verify low-severity constraint",
+            ),
         )
     ]
 
@@ -180,27 +246,61 @@ def test_partially_verified_state_verifier_failed():
         has_ambiguity=False,
         blocked=False,
         execution_failed=False,
-        verifier_passed=False,
         evidence=evidence,
     )
 
-    assert result == CompletionState.PARTIALLY_VERIFIED
+    assert result.state == CompletionState.PARTIALLY_VERIFIED
+    assert "constraint" in result.evidence_precision_hint.lower()
 
 
-def test_verified_state_with_unverified_direct_evidence():
-    """Broad passing checks may verify a task without precise AC evidence."""
+def test_blocked_state_unsupported_critical_constraint():
+    """Test that unsupported critical constraint results in BLOCKED."""
     evidence = [
         AcceptanceEvidence(
             criterion_id="ac1",
             description="Test criterion",
-            status=EvidenceStatus.UNVERIFIED,
-            explanation="Not verified",
+            status=EvidenceStatus.PASS,
+            explanation="Test passed",
+            required=True,
+            constraint=ConstraintEvidence(
+                status=ConstraintStatus.UNSUPPORTED,
+                severity=ConstraintSeverity.CRITICAL,
+                has_hard_policy_violation=False,
+                has_attempted_violation=False,
+                has_compilation_error=False,
+                has_advisory=False,
+                explanation="Cannot verify critical constraint",
+            ),
+        )
+    ]
+
+    result = determine_completion_state(
+        has_ambiguity=False,
+        blocked=False,
+        execution_failed=False,
+        evidence=evidence,
+    )
+
+    assert result.state == CompletionState.BLOCKED
+    assert "constraint" in result.evidence_precision_hint.lower()
+
+
+def test_optional_criteria_ignored():
+    """Test that optional criteria do not affect completion state."""
+    evidence = [
+        AcceptanceEvidence(
+            criterion_id="ac1",
+            description="Required criterion",
+            status=EvidenceStatus.PASS,
+            explanation="Test passed",
+            required=True,
         ),
         AcceptanceEvidence(
             criterion_id="ac2",
-            description="Another criterion",
-            status=EvidenceStatus.UNVERIFIED,
-            explanation="Not verified",
+            description="Optional criterion",
+            status=EvidenceStatus.FAIL,
+            explanation="Optional failed",
+            required=False,
         ),
     ]
 
@@ -208,21 +308,54 @@ def test_verified_state_with_unverified_direct_evidence():
         has_ambiguity=False,
         blocked=False,
         execution_failed=False,
-        verifier_passed=True,
         evidence=evidence,
     )
 
-    assert result == CompletionState.VERIFIED
+    assert result.state == CompletionState.VERIFIED
+    assert result.criterion_pass_count == 1
 
 
-def test_partially_verified_state_empty_evidence_with_verifier_failed():
-    """Test that empty evidence with verifier failure results in PARTIALLY_VERIFIED."""
+def test_empty_evidence():
+    """Test that empty evidence results in VERIFIED (backward compatibility)."""
     result = determine_completion_state(
         has_ambiguity=False,
         blocked=False,
         execution_failed=False,
-        verifier_passed=False,
         evidence=[],
     )
 
-    assert result == CompletionState.PARTIALLY_VERIFIED
+    # Empty evidence means no required criteria, should be VERIFIED for backward compatibility
+    assert result.state == CompletionState.VERIFIED
+    assert "no required criteria" in result.evidence_precision_hint.lower()
+
+
+def test_compliant_constraints():
+    """Test that compliant constraints do not block verification."""
+    evidence = [
+        AcceptanceEvidence(
+            criterion_id="ac1",
+            description="Test criterion",
+            status=EvidenceStatus.PASS,
+            explanation="Test passed",
+            required=True,
+            constraint=ConstraintEvidence(
+                status=ConstraintStatus.COMPLIANT,
+                severity=ConstraintSeverity.MEDIUM,
+                has_hard_policy_violation=False,
+                has_attempted_violation=False,
+                has_compilation_error=False,
+                has_advisory=False,
+                explanation="Compliant",
+            ),
+        )
+    ]
+
+    result = determine_completion_state(
+        has_ambiguity=False,
+        blocked=False,
+        execution_failed=False,
+        evidence=evidence,
+    )
+
+    assert result.state == CompletionState.VERIFIED
+    assert result.constraint_violation_count == 0

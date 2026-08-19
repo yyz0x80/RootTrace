@@ -39,6 +39,21 @@ class ConstraintStatus(str, Enum):
     ADVISORY = "ADVISORY"
 
 
+class ConstraintSeverity(str, Enum):
+    """Severity level for constraint violations or unsupported status."""
+
+    CRITICAL = "CRITICAL"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+class CriterionRequirement(str, Enum):
+    """Requirement level for acceptance criteria."""
+
+    REQUIRED = "REQUIRED"
+    OPTIONAL = "OPTIONAL"
+
+
 class EvidenceStatus(str, Enum):
     """Verification status for a single acceptance criterion."""
 
@@ -64,6 +79,14 @@ class CompletionState(str, Enum):
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
     FAILED = "FAILED"
     REGRESSION = "REGRESSION"
+
+
+class FailureType(str, Enum):
+    """Type of failure when completion state is FAILED."""
+
+    CONSTRAINT_VIOLATION = "CONSTRAINT_VIOLATION"
+    ACCEPTANCE_CRITERION_FAILURE = "ACCEPTANCE_CRITERION_FAILURE"
+    EXECUTION_FAILURE = "EXECUTION_FAILURE"
 
 
 class BehaviorChangeEvidence(BaseModel):
@@ -129,6 +152,7 @@ class ConstraintEvidence(BaseModel):
 
     Attributes:
         status: Constraint compliance status.
+        severity: Severity level for the constraint status.
         has_hard_policy_violation: Whether hard policy was violated.
         has_attempted_violation: Whether violation was attempted but rejected.
         has_compilation_error: Whether compilation failed.
@@ -137,6 +161,7 @@ class ConstraintEvidence(BaseModel):
     """
 
     status: ConstraintStatus
+    severity: ConstraintSeverity = ConstraintSeverity.MEDIUM
     has_hard_policy_violation: bool
     has_attempted_violation: bool
     has_compilation_error: bool
@@ -155,6 +180,7 @@ class AcceptanceEvidence(BaseModel):
         criterion_id: ID reference to the original AcceptanceCriterion.
         description: Human-readable description of the acceptance criterion.
         status: Verification status based on concrete evidence.
+        required: Whether this criterion is required for completion.
         changed_files: List of files that were modified to satisfy this criterion.
         tests: List of test names/paths that verify this criterion.
         command_results: List of verification command outputs supporting this criterion.
@@ -168,6 +194,7 @@ class AcceptanceEvidence(BaseModel):
     criterion_id: str
     description: str
     status: EvidenceStatus
+    required: bool = True
     changed_files: list[str] = Field(default_factory=list)
     tests: list[str] = Field(default_factory=list)
     command_results: list[str] = Field(default_factory=list)

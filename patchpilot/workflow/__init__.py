@@ -12,7 +12,7 @@ This module provides workflow orchestration components including:
 - Permission audit system for security enforcement
 """
 
-from patchpilot.workflow.completion import determine_completion_state
+from patchpilot.workflow.completion import CompletionDecision, determine_completion_state
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import (
     FailureType,
@@ -47,6 +47,7 @@ from patchpilot.workflow.trace import TraceEvent, TraceWriter
 
 __all__ = [
     "MAX_REPAIR_ATTEMPTS",
+    "CompletionDecision",
     "ExecuteLogger",
     "FailureType",
     "PermissionAuditor",

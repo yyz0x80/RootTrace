@@ -676,13 +676,13 @@ class WorkflowRunner:
                         )
                         for criterion in normalized_issue.acceptance_criteria
                     ]
-                    final_status = determine_completion_state(
+                    decision = determine_completion_state(
                         has_ambiguity=False,
                         blocked=True,
                         execution_failed=False,
-                        verifier_passed=False,
                         evidence=evidence,
                     )
+                    final_status = decision.state
                     trace_writer.write(
                         TraceEvent(
                             run_id=run_id,
@@ -956,7 +956,7 @@ class WorkflowRunner:
                 evidence = []
 
             # Step 16: Determine final completion state
-            final_status = determine_completion_state(
+            decision = determine_completion_state(
                 has_ambiguity=bool(normalized_issue.ambiguous_points),
                 blocked=report.failure_type in {
                     "ENVIRONMENT_FAILURE",
@@ -966,9 +966,10 @@ class WorkflowRunner:
                     "NO_SOURCE_CHANGES",
                 },
                 execution_failed=not report.passed,
-                verifier_passed=report.passed,
                 evidence=evidence,
+                environment_can_verify=report.passed,
             )
+            final_status = decision.state
 
             # Step 17: Write final trace event before workspace cleanup
             # Use the shared writer so this remains the final event in the trace.
