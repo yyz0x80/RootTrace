@@ -443,6 +443,7 @@ class WorkflowRunner:
         change_plan: ChangePlan | None,
         retry_count: int,
         phase: str = "post_patch",
+        changed_files: list[str] | None = None,
     ) -> VerificationReport:
         """Run an injected verifier or the built-in sandbox verifier.
 
@@ -451,6 +452,7 @@ class WorkflowRunner:
             change_plan: Optional ChangePlan for target test selection
             retry_count: Current retry attempt number
             phase: Verification phase ("baseline" or "post_patch")
+            changed_files: Optional list of changed file paths for dependency analysis
 
         Returns:
             VerificationReport containing verification results
@@ -468,10 +470,30 @@ class WorkflowRunner:
                 "Cannot run verification before the sandbox is started"
             )
 
-        selection = select_target_tests(change_plan)
+        # Gather repository context for dependency analysis
+        python_files: list[str] = []
+        repo_root = self.workspace.root
+
+        try:
+            from patchpilot.repository.analyzer import _git_ls_files
+
+            tracked_files = _git_ls_files(repo_root)
+            python_files = [f for f in tracked_files if f.endswith(".py")]
+        except (OSError, subprocess.SubprocessError):
+            # If we can't get python files, dependency analysis will fall back gracefully
+            logger.debug("Could not gather Python files for dependency analysis")
+            python_files = []
+
+        # Perform intelligent test selection with dependency analysis
+        selection = select_target_tests(
+            change_plan,
+            changed_files=changed_files,
+            repo_root=repo_root,
+            python_files=python_files,
+        )
 
         verifier = self._get_sandbox_verifier()
-        
+
         if phase == "baseline":
             return verifier.verify_baseline(
                 run_id=run_id,
@@ -517,6 +539,7 @@ class WorkflowRunner:
         change_plan: ChangePlan | None,
         retry_count: int,
         phase: str = "post_patch",
+        changed_files: list[str] | None = None,
     ) -> VerificationReport:
         """Run verification and append its complete report to the trace."""
         report = self._run_verification(
@@ -524,6 +547,7 @@ class WorkflowRunner:
             change_plan=change_plan,
             retry_count=retry_count,
             phase=phase,
+            changed_files=changed_files,
         )
         trace_writer.write(
             TraceEvent(
@@ -653,6 +677,7 @@ class WorkflowRunner:
                     change_plan=change_plan,
                     retry_count=0,
                     phase="baseline",
+                    changed_files=None,  # No changes yet for baseline
                 )
                 baseline_results = {
                     check.command or check.level: check.passed
@@ -788,12 +813,16 @@ class WorkflowRunner:
             logger.info("Running post-change verification")
             retry_count = 0
 
+            # Get changed files for dependency analysis
+            changed_file_paths = [change.path for change in actual_changes]
+
             report = self._run_traced_verification(
                 trace_writer=trace_writer,
                 workflow_stage="VERIFY",
                 run_id=run_id,
                 change_plan=change_plan,
                 retry_count=retry_count,
+                changed_files=changed_file_paths,
             )
 
             # Merge baseline checks into the post-patch report for behavior comparison
@@ -938,13 +967,15 @@ class WorkflowRunner:
                         report.checks[-1].summary["scope_warnings"] = scope_result.warnings
                     break
 
-                # Re-run verification
+                # Re-run verification with updated changed files
+                repair_changed_paths = [change.path for change in repair_changes]
                 report = self._run_traced_verification(
                     trace_writer=trace_writer,
                     workflow_stage="REPAIR_VERIFY",
                     run_id=run_id,
                     change_plan=change_plan,
                     retry_count=retry_count,
+                    changed_files=repair_changed_paths,
                 )
 
                 # Merge baseline checks into the repair report for behavior comparison
