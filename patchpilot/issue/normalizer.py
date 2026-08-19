@@ -2,7 +2,11 @@ import json
 from collections.abc import Callable
 
 from patchpilot.issue.loader import RawIssue
-from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
+from patchpilot.issue.schema import (
+    AcceptanceCriterion,
+    NormalizedIssue,
+    TaskConstraint,
+)
 
 NORMALIZER_PROMPT = """
 You are the Issue Normalizer of PatchPilot.
@@ -31,7 +35,19 @@ Important rules:
    behavior may go into implementation_notes.
 6. Acceptance criteria must have sequential IDs:
    AC-1, AC-2, AC-3...
-7. Return JSON only. Do not return Markdown.
+7. Classify acceptance criteria by kind:
+   - behavior: Final program behavior (e.g., "reject invalid input", "users can login")
+   - preservation: Existing behavior must not regress (e.g., "keep function signature", "maintain backward compatibility")
+   - structural: Required source code structure (e.g., "must call normalize_email", "use factory pattern")
+8. Verification instructions (how to test) are NOT acceptance criteria. Put them in implementation_notes.
+9. Constraints must have sequential IDs: C-1, C-2, C-3...
+10. Classify constraints by kind:
+    - READ_SCOPE: Restrictions on what files can be read
+    - WRITE_SCOPE: Restrictions on what files can be modified
+    - COMMAND: Restrictions on commands that can be run
+    - NETWORK: Restrictions on network access
+    - OTHER: Other execution boundary constraints
+11. Return JSON only. Do not return Markdown.
 
 Allowed task_type:
 bug, feature, test, refactor, dependency, other.
@@ -45,10 +61,18 @@ Required JSON shape:
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "..."
+      "description": "...",
+      "kind": "behavior|preservation|structural",
+      "required": true
     }
   ],
-  "constraints": [],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "...",
+      "kind": "READ_SCOPE|WRITE_SCOPE|COMMAND|NETWORK|OTHER"
+    }
+  ],
   "ambiguous_points": [],
   "expected_test_areas": [],
   "implementation_notes": []
@@ -57,7 +81,6 @@ Required JSON shape:
 
 MAX_STRUCTURED_REPAIR_RESPONSE_CHARS = 4_000
 _DESCRIPTION_LIST_FIELDS = (
-    "constraints",
     "ambiguous_points",
     "expected_test_areas",
     "implementation_notes",
@@ -101,6 +124,86 @@ _EXECUTION_SCOPE_MARKERS = (
 )
 
 
+# High-confidence constraint kind patterns
+_CONSTRAINT_KIND_PATTERNS = {
+    "WRITE_SCOPE": (
+        "do not modify",
+        "must not modify",
+        "keep unchanged",
+        "read only",
+        "read-only",
+        "only modify",
+        "no changes outside",
+        "do not make any changes",
+        "must not make any changes",
+    ),
+    "READ_SCOPE": (
+        "do not access",
+        "must not access",
+    ),
+    "COMMAND": (
+        "do not run",
+        "must not run",
+        "do not install",
+        "must not install",
+        "git push",
+    ),
+    "NETWORK": (
+        "network",
+        "download",
+        "fetch",
+    ),
+}
+
+
+def _infer_constraint_kind(description: str) -> str:
+    """Infer constraint kind from description with high-confidence patterns.
+
+    Only applies high-confidence patterns. Returns OTHER if no match.
+    """
+    normalized = " ".join(description.lower().split())
+
+    for kind, patterns in _CONSTRAINT_KIND_PATTERNS.items():
+        if any(pattern in normalized for pattern in patterns):
+            return kind
+
+    return "OTHER"
+
+
+def _migrate_string_constraints(
+    constraints: list[str] | list[TaskConstraint],
+) -> list[TaskConstraint]:
+    """Migrate old string constraints to TaskConstraint objects.
+
+    Args:
+        constraints: List of either strings or TaskConstraint objects.
+
+    Returns:
+        List of TaskConstraint objects with inferred kinds and sequential IDs.
+    """
+    migrated: list[TaskConstraint] = []
+    for index, constraint in enumerate(constraints, start=1):
+        if isinstance(constraint, str):
+            kind = _infer_constraint_kind(constraint)
+            migrated.append(
+                TaskConstraint(
+                    id=f"C-{index}",
+                    description=constraint,
+                    kind=kind,  # type: ignore
+                )
+            )
+        elif isinstance(constraint, TaskConstraint):
+            # Ensure sequential ID for existing TaskConstraint objects
+            migrated.append(
+                constraint.model_copy(update={"id": f"C-{index}"})
+            )
+        else:
+            # Skip invalid constraint types
+            continue
+
+    return migrated
+
+
 def _is_execution_constraint(description: str) -> bool:
     """Return whether an AC describes an execution boundary.
 
@@ -127,12 +230,14 @@ def _separate_execution_constraints(
 ) -> NormalizedIssue:
     """Move execution-boundary ACs into constraints and renumber AC IDs."""
     product_criteria: list[AcceptanceCriterion] = []
-    constraints = list(issue.constraints)
+    constraint_descriptions = [
+        c.description for c in issue.constraints
+    ]
 
     for criterion in issue.acceptance_criteria:
         if _is_execution_constraint(criterion.description):
-            if criterion.description not in constraints:
-                constraints.append(criterion.description)
+            if criterion.description not in constraint_descriptions:
+                constraint_descriptions.append(criterion.description)
             continue
 
         product_criteria.append(criterion)
@@ -142,10 +247,13 @@ def _separate_execution_constraints(
         for index, criterion in enumerate(product_criteria, start=1)
     ]
 
+    # Convert constraint descriptions to TaskConstraint objects
+    migrated_constraints = _migrate_string_constraints(constraint_descriptions)
+
     return issue.model_copy(
         update={
             "acceptance_criteria": normalized_criteria,
-            "constraints": constraints,
+            "constraints": migrated_constraints,
         }
     )
 
@@ -212,14 +320,74 @@ def _repair_description_lists(data: dict) -> dict:
             normalized_values.append(value)
         repaired[field_name] = normalized_values
 
+    # Handle constraints field separately for backward compatibility
+    if "constraints" in repaired:
+        constraints = repaired["constraints"]
+        if isinstance(constraints, list):
+            # If constraints are strings, migrate them to TaskConstraint objects
+            if all(isinstance(c, str) for c in constraints):
+                repaired["constraints"] = [
+                    {
+                        "id": f"C-{i+1}",
+                        "description": c,
+                        "kind": _infer_constraint_kind(c),
+                    }
+                    for i, c in enumerate(constraints)
+                ]
+            # If constraints are already objects, ensure they have required fields
+            elif all(isinstance(c, dict) for c in constraints):
+                normalized_constraints = []
+                for i, c in enumerate(constraints, start=1):
+                    if isinstance(c, str):
+                        # Handle mixed string/object constraints
+                        normalized_constraints.append({
+                            "id": f"C-{i}",
+                            "description": c,
+                            "kind": _infer_constraint_kind(c),
+                        })
+                    elif isinstance(c, dict):
+                        # Ensure ID and kind are present
+                        if "id" not in c:
+                            c["id"] = f"C-{i}"
+                        if "kind" not in c:
+                            c["kind"] = _infer_constraint_kind(c.get("description", ""))
+                        normalized_constraints.append(c)
+                repaired["constraints"] = normalized_constraints
+
     return repaired
+
+
+def _post_process_constraints(
+    constraints: list[TaskConstraint],
+) -> list[TaskConstraint]:
+    """Post-process constraints to fix high-confidence misclassifications.
+
+    Only applies high-confidence patterns. Does not use broad keyword guessing.
+    """
+    processed: list[TaskConstraint] = []
+    for constraint in constraints:
+        # Re-apply high-confidence kind inference for safety
+        inferred_kind = _infer_constraint_kind(constraint.description)
+        if inferred_kind != "OTHER":
+            # Use inferred kind if it's a high-confidence match
+            processed.append(
+                constraint.model_copy(update={"kind": inferred_kind})  # type: ignore
+            )
+        else:
+            # Keep original kind if no high-confidence pattern matches
+            processed.append(constraint)
+
+    return processed
 
 
 def _parse_normalized_issue(response: str) -> NormalizedIssue:
     """Parse and locally repair one normalized-issue response."""
     data = _repair_description_lists(_extract_json(response))
     normalized_issue = NormalizedIssue.model_validate(data)
-    return _separate_execution_constraints(normalized_issue)
+    separated_issue = _separate_execution_constraints(normalized_issue)
+    # Post-process constraints to fix high-confidence misclassifications
+    processed_constraints = _post_process_constraints(separated_issue.constraints)
+    return separated_issue.model_copy(update={"constraints": processed_constraints})
 
 
 def _build_normalizer_repair_prompt(
@@ -240,9 +408,10 @@ Validation error:
 Previous response:
 {bounded_response}
 
-Return one corrected JSON object only. Preserve the issue meaning. Every item
-in constraints, ambiguous_points, expected_test_areas, and
-implementation_notes must be a JSON string, not an object.
+Return one corrected JSON object only. Preserve the issue meaning.
+- acceptance_criteria must have id, description, kind (behavior|preservation|structural), and required (boolean)
+- constraints must have id, description, and kind (READ_SCOPE|WRITE_SCOPE|COMMAND|NETWORK|OTHER)
+- Items in ambiguous_points, expected_test_areas, and implementation_notes must be JSON strings, not objects.
 """
 
 

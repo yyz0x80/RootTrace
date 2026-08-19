@@ -2,8 +2,16 @@ import pytest
 from pydantic import ValidationError
 
 from patchpilot.issue.loader import RawIssue
-from patchpilot.issue.normalizer import _extract_json, normalize_issue
-from patchpilot.issue.schema import NormalizedIssue
+from patchpilot.issue.normalizer import (
+    _extract_json,
+    _infer_constraint_kind,
+    _migrate_string_constraints,
+    normalize_issue,
+)
+from patchpilot.issue.schema import (
+    NormalizedIssue,
+    TaskConstraint,
+)
 
 
 def test_extract_json_from_plain_json():
@@ -72,7 +80,9 @@ def test_normalize_issue_with_mock_generate():
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "Users can login with special characters in password"
+      "description": "Users can login with special characters in password",
+      "kind": "behavior",
+      "required": true
     }
   ],
   "constraints": [],
@@ -88,6 +98,7 @@ def test_normalize_issue_with_mock_generate():
     assert result.task_type == "bug"
     assert len(result.acceptance_criteria) == 1
     assert result.acceptance_criteria[0].id == "AC-1"
+    assert result.acceptance_criteria[0].kind == "behavior"
 
 
 def test_normalize_issue_handles_markdown_response():
@@ -107,7 +118,9 @@ def test_normalize_issue_handles_markdown_response():
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "User list supports page and limit parameters"
+      "description": "User list supports page and limit parameters",
+      "kind": "behavior",
+      "required": true
     }
   ],
   "constraints": [],
@@ -155,7 +168,9 @@ def test_normalize_issue_with_ambiguous_points():
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "Preference settings are accessible"
+      "description": "Preference settings are accessible",
+      "kind": "behavior",
+      "required": true
     }
   ],
   "constraints": [],
@@ -191,7 +206,9 @@ def test_normalize_issue_with_empty_ambiguous_points():
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "Typo is fixed"
+      "description": "Typo is fixed",
+      "kind": "behavior",
+      "required": true
     }
   ],
   "constraints": [],
@@ -222,7 +239,9 @@ def test_normalize_issue_with_complex_ambiguity():
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "Cache is implemented"
+      "description": "Cache is implemented",
+      "kind": "behavior",
+      "required": true
     }
   ],
   "constraints": [],
@@ -266,22 +285,36 @@ def test_normalize_issue_separates_execution_constraints():
   "acceptance_criteria": [
     {
       "id": "AC-1",
-      "description": "Use sum(prices, start=0.0)."
+      "description": "Use sum(prices, start=0.0).",
+      "kind": "behavior",
+      "required": true
     },
     {
       "id": "AC-2",
-      "description": "Keep the existing tests read-only."
+      "description": "Keep the existing tests read-only.",
+      "kind": "behavior",
+      "required": true
     },
     {
       "id": "AC-3",
-      "description": "Reject non-positive page numbers."
+      "description": "Reject non-positive page numbers.",
+      "kind": "behavior",
+      "required": true
     },
     {
       "id": "AC-4",
-      "description": "Do not make any changes outside of the pricing.py file."
+      "description": "Do not make any changes outside of the pricing.py file.",
+      "kind": "behavior",
+      "required": true
     }
   ],
-  "constraints": ["Do not run git push."],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "Do not run git push.",
+      "kind": "COMMAND"
+    }
+  ],
   "ambiguous_points": [],
   "expected_test_areas": ["tests/test_pricing.py"],
   "implementation_notes": []
@@ -301,11 +334,15 @@ def test_normalize_issue_separates_execution_constraints():
         "Use sum(prices, start=0.0).",
         "Reject non-positive page numbers.",
     ]
-    assert result.constraints == [
-        "Do not run git push.",
-        "Keep the existing tests read-only.",
-        "Do not make any changes outside of the pricing.py file.",
-    ]
+    # Check that constraints are TaskConstraint objects
+    assert len(result.constraints) == 3
+    assert all(isinstance(c, TaskConstraint) for c in result.constraints)
+    assert result.constraints[0].description == "Do not run git push."
+    assert result.constraints[0].kind == "COMMAND"
+    assert result.constraints[1].description == "Keep the existing tests read-only."
+    assert result.constraints[1].kind == "WRITE_SCOPE"
+    assert result.constraints[2].description == "Do not make any changes outside of the pricing.py file."
+    assert result.constraints[2].kind == "WRITE_SCOPE"
 
 
 def test_normalize_issue_repairs_description_wrapped_string_lists():
@@ -370,3 +407,404 @@ def test_normalize_issue_retries_invalid_structured_output_once():
     assert result.task_type == "bug"
     assert len(prompts) == 2
     assert "previous JSON response did not match" in prompts[1]
+
+
+def test_behavior_criterion_classification():
+    """Behavior criterion: 'reject invalid input' is classified as behavior."""
+    issue = RawIssue(
+        title="Inventory validation",
+        body="Ensure inventory is not modified for invalid input",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Inventory validation",
+  "task_type": "feature",
+  "problem_statement": "Ensure inventory is not modified for invalid input",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Invalid input does not modify inventory",
+      "kind": "behavior",
+      "required": true
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert len(result.acceptance_criteria) == 1
+    assert result.acceptance_criteria[0].kind == "behavior"
+    assert result.acceptance_criteria[0].required is True
+
+
+def test_write_constraint_classification():
+    """Write constraint: 'do not modify tests' is classified as WRITE_SCOPE."""
+    issue = RawIssue(
+        title="Feature implementation",
+        body="Implement feature while keeping tests read-only",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Feature implementation",
+  "task_type": "feature",
+  "problem_statement": "Implement feature while keeping tests read-only",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Feature is implemented",
+      "kind": "behavior",
+      "required": true
+    }
+  ],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "Do not modify tests",
+      "kind": "WRITE_SCOPE"
+    }
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert len(result.constraints) == 1
+    assert result.constraints[0].kind == "WRITE_SCOPE"
+    assert result.constraints[0].description == "Do not modify tests"
+
+
+def test_preservation_criterion_classification():
+    """Preservation criterion: 'keep function signature' is classified as preservation."""
+    issue = RawIssue(
+        title="Refactor function",
+        body="Refactor function internals while keeping signature",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Refactor function",
+  "task_type": "refactor",
+  "problem_statement": "Refactor function internals while keeping signature",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Function signature remains unchanged",
+      "kind": "preservation",
+      "required": true
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert len(result.acceptance_criteria) == 1
+    assert result.acceptance_criteria[0].kind == "preservation"
+
+
+def test_structural_criterion_classification():
+    """Structural criterion: 'must call normalize_email' is classified as structural."""
+    issue = RawIssue(
+        title="Email validation",
+        body="Add email validation using normalize_email function",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Email validation",
+  "task_type": "feature",
+  "problem_statement": "Add email validation using normalize_email function",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Must call normalize_email before validation",
+      "kind": "structural",
+      "required": true
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert len(result.acceptance_criteria) == 1
+    assert result.acceptance_criteria[0].kind == "structural"
+
+
+def test_schema_repair_old_string_constraints():
+    """Old string constraints are migrated to TaskConstraint objects."""
+    issue = RawIssue(
+        title="Legacy constraint test",
+        body="Test with old string constraint format",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Legacy constraint test",
+  "task_type": "feature",
+  "problem_statement": "Test with old string constraint format",
+  "acceptance_criteria": [],
+  "constraints": [
+    "Keep tests read-only",
+    "Do not access .env",
+    "Only modify pricing.py"
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert len(result.constraints) == 3
+    assert isinstance(result.constraints[0], TaskConstraint)
+    assert result.constraints[0].id == "C-1"
+    assert result.constraints[0].description == "Keep tests read-only"
+    assert result.constraints[0].kind == "WRITE_SCOPE"
+
+    assert result.constraints[1].id == "C-2"
+    assert result.constraints[1].description == "Do not access .env"
+    assert result.constraints[1].kind == "READ_SCOPE"
+
+    assert result.constraints[2].id == "C-3"
+    assert result.constraints[2].description == "Only modify pricing.py"
+    assert result.constraints[2].kind == "WRITE_SCOPE"
+
+
+def test_constraint_id_stability():
+    """Constraint IDs remain stable and sequential."""
+    issue = RawIssue(
+        title="ID stability test",
+        body="Test constraint ID assignment",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "ID stability test",
+  "task_type": "feature",
+  "problem_statement": "Test constraint ID assignment",
+  "acceptance_criteria": [],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "First constraint",
+      "kind": "WRITE_SCOPE"
+    },
+    {
+      "id": "C-2",
+      "description": "Second constraint",
+      "kind": "READ_SCOPE"
+    }
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.constraints[0].id == "C-1"
+    assert result.constraints[1].id == "C-2"
+
+
+def test_constraint_order_stability():
+    """Constraint order is preserved during migration."""
+    issue = RawIssue(
+        title="Order stability test",
+        body="Test constraint order preservation",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Order stability test",
+  "task_type": "feature",
+  "problem_statement": "Test constraint order preservation",
+  "acceptance_criteria": [],
+  "constraints": [
+    "First constraint",
+    "Second constraint",
+    "Third constraint"
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.constraints[0].description == "First constraint"
+    assert result.constraints[1].description == "Second constraint"
+    assert result.constraints[2].description == "Third constraint"
+
+
+def test_infer_constraint_kind():
+    """Test constraint kind inference for high-confidence patterns."""
+    # WRITE_SCOPE patterns
+    assert _infer_constraint_kind("Do not modify tests") == "WRITE_SCOPE"
+    assert _infer_constraint_kind("Keep tests read-only") == "WRITE_SCOPE"
+    assert _infer_constraint_kind("Only modify pricing.py") == "WRITE_SCOPE"
+
+    # READ_SCOPE patterns
+    assert _infer_constraint_kind("Do not access .env") == "READ_SCOPE"
+    assert _infer_constraint_kind("Must not access secrets") == "READ_SCOPE"
+
+    # COMMAND patterns
+    assert _infer_constraint_kind("Do not run git push") == "COMMAND"
+    assert _infer_constraint_kind("Must not install dependencies") == "COMMAND"
+
+    # NETWORK patterns
+    assert _infer_constraint_kind("No network access") == "NETWORK"
+    assert _infer_constraint_kind("Do not download files") == "NETWORK"
+
+    # Default to OTHER for unknown patterns
+    assert _infer_constraint_kind("Some random constraint") == "OTHER"
+
+
+def test_migrate_string_constraints():
+    """Test migration of string constraints to TaskConstraint objects."""
+    string_constraints = [
+        "Keep tests read-only",
+        "Do not access .env",
+        "Do not run git push",
+    ]
+
+    result = _migrate_string_constraints(string_constraints)
+
+    assert len(result) == 3
+    assert result[0].id == "C-1"
+    assert result[0].description == "Keep tests read-only"
+    assert result[0].kind == "WRITE_SCOPE"
+
+    assert result[1].id == "C-2"
+    assert result[1].description == "Do not access .env"
+    assert result[1].kind == "READ_SCOPE"
+
+    assert result[2].id == "C-3"
+    assert result[2].description == "Do not run git push"
+    assert result[2].kind == "COMMAND"
+
+
+def test_migrate_mixed_constraints():
+    """Test migration with mixed string and TaskConstraint objects."""
+    mixed_constraints = [
+        "Keep tests read-only",
+        TaskConstraint(
+            id="C-2",
+            description="Do not access .env",
+            kind="READ_SCOPE",
+        ),
+        "Do not run git push",
+    ]
+
+    result = _migrate_string_constraints(mixed_constraints)
+
+    assert len(result) == 3
+    assert result[0].id == "C-1"
+    assert result[0].description == "Keep tests read-only"
+    assert result[0].kind == "WRITE_SCOPE"
+
+    assert result[1].id == "C-2"
+    assert result[1].description == "Do not access .env"
+    assert result[1].kind == "READ_SCOPE"
+
+    assert result[2].id == "C-3"
+    assert result[2].description == "Do not run git push"
+    assert result[2].kind == "COMMAND"
+
+
+def test_post_process_constraints_high_confidence():
+    """Post-processor fixes high-confidence constraint misclassifications."""
+    issue = RawIssue(
+        title="Post-process test",
+        body="Test constraint post-processing",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Post-process test",
+  "task_type": "feature",
+  "problem_statement": "Test constraint post-processing",
+  "acceptance_criteria": [],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "Do not modify tests",
+      "kind": "OTHER"
+    },
+    {
+      "id": "C-2",
+      "description": "Keep tests read-only",
+      "kind": "OTHER"
+    }
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    # Post-processor should fix the high-confidence misclassifications
+    assert result.constraints[0].kind == "WRITE_SCOPE"
+    assert result.constraints[1].kind == "WRITE_SCOPE"
+
+
+def test_verification_not_in_acceptance_criteria():
+    """Verification instructions are not classified as acceptance criteria."""
+    issue = RawIssue(
+        title="Feature with verification",
+        body="Implement feature with verification steps",
+        source="test"
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Feature with verification",
+  "task_type": "feature",
+  "problem_statement": "Implement feature with verification steps",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Feature works correctly",
+      "kind": "behavior",
+      "required": true
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": [
+    "Verify by running pytest tests/test_feature.py",
+    "Check that feature passes integration tests"
+  ]
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    # Verification steps should be in implementation_notes, not acceptance_criteria
+    assert len(result.acceptance_criteria) == 1
+    assert result.acceptance_criteria[0].description == "Feature works correctly"
+    assert len(result.implementation_notes) == 2
+    assert "pytest" in result.implementation_notes[0]
