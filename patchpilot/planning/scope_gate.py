@@ -2,7 +2,7 @@
 
 This module provides functionality to validate change plans against security
 and scope restrictions before execution, as well as runtime validation of
-actual changes against approved plans.
+actual changes against approved plans using the unified PolicySet system.
 """
 
 from pathlib import PurePosixPath
@@ -10,6 +10,8 @@ from pathlib import PurePosixPath
 from pydantic import BaseModel, Field
 
 from patchpilot.planning.schema import ChangePlan
+from patchpilot.policy.evaluator import PolicyEvaluator
+from patchpilot.policy.schema import PolicySet
 from patchpilot.tools import WorkspaceChange
 
 
@@ -26,16 +28,6 @@ class ScopeGateResult(BaseModel):
     violations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
-
-# Files that are never allowed to be modified
-FORBIDDEN_FILES = {
-    ".env",
-}
-
-# Path prefixes that are forbidden to modify
-FORBIDDEN_PREFIXES = (
-    ".github/workflows/",
-)
 
 # Directory names to ignore during runtime validation
 IGNORED_DIRECTORIES = (
@@ -61,10 +53,10 @@ DATABASE_MIGRATION_HINTS = (
 
 def _should_ignore_file(file_path: str) -> bool:
     """Check if a file should be ignored during runtime validation.
-    
+
     Args:
         file_path: The file path to check
-        
+
     Returns:
         True if the file should be ignored, False otherwise
     """
@@ -83,12 +75,14 @@ def _should_ignore_file(file_path: str) -> bool:
 
 def check_scope(
     plan: ChangePlan,
+    policy_set: PolicySet,
     max_modified_files: int = 6,
 ) -> ScopeGateResult:
     """Validate a change plan against security and scope restrictions.
 
     Args:
         plan: The change plan to validate.
+        policy_set: The compiled PolicySet containing security policies.
         max_modified_files: Maximum number of files allowed to be modified.
 
     Returns:
@@ -103,6 +97,9 @@ def check_scope(
         for change in plan.planned_changes
     ]
 
+    # Create policy evaluator for checking policies
+    policy_evaluator = PolicyEvaluator(policy_set)
+
     # 1. Maximum file count check
     if len(set(planned_files)) > max_modified_files:
         violations.append(
@@ -110,20 +107,17 @@ def check_scope(
             f"maximum allowed is {max_modified_files}."
         )
 
-    # 2. File-level security checks
+    # 2. File-level security checks using PolicySet
     for file in planned_files:
         normalized = str(PurePosixPath(file))
 
-        if normalized in FORBIDDEN_FILES:
-            violations.append(
-                f"Modification of {normalized} is forbidden."
-            )
+        # Check write permissions using PolicyEvaluator
+        try:
+            policy_evaluator.assert_write_allowed(normalized)
+        except PermissionError as e:
+            violations.append(str(e))
 
-        if normalized.startswith(FORBIDDEN_PREFIXES):
-            violations.append(
-                f"CI/CD modification is forbidden: {normalized}"
-            )
-
+        # Check for database migration hints
         if any(
             hint in normalized
             for hint in DATABASE_MIGRATION_HINTS
@@ -131,13 +125,6 @@ def check_scope(
             violations.append(
                 f"Database migration requires manual handling: "
                 f"{normalized}"
-            )
-
-        # Reject test file modifications (Day 1 restriction)
-        if "tests" in normalized.split("/") or normalized.startswith("test_"):
-            violations.append(
-                f"Test file modification is forbidden: {normalized}. "
-                "Test files must remain read-only during Day 1 implementation."
             )
 
     # 3. Verify modified files are in relevant_files
@@ -165,28 +152,32 @@ def check_scope(
 def validate_actual_changes(
     plan: ChangePlan,
     actual_changes: list[WorkspaceChange],
+    policy_set: PolicySet,
 ) -> None:
     """Validate actual workspace changes against the approved plan.
 
     This function enforces runtime scope validation by comparing the actual
-    changes made by the agent against the approved change plan. It ensures that:
+    changes made by the agent against the approved change plan and PolicySet.
+    It ensures that:
 
-    1. Forbidden files (like .env) are never modified
-    2. CI/CD workflows are never modified
-    3. All changed files were in the approved plan
-    4. The action type matches what was approved
+    1. All security policies from PolicySet are enforced
+    2. All changed files were in the approved plan
+    3. The action type matches what was approved
 
     Args:
         plan: The approved ChangePlan containing planned changes
         actual_changes: List of WorkspaceChange objects representing actual changes
+        policy_set: The compiled PolicySet containing security policies
 
     Raises:
         RuntimeError: If any security violation is detected:
-            - .env modification attempt
-            - CI workflow modification attempt
+            - Policy violation (sensitive files, test files, etc.)
             - File modification outside approved plan
             - Action type mismatch between plan and actual change
     """
+    # Create policy evaluator for checking policies
+    policy_evaluator = PolicyEvaluator(policy_set)
+
     # Build a lookup of planned changes for quick validation
     planned = {
         change.path: change.action.value
@@ -198,24 +189,11 @@ def validate_actual_changes(
         if _should_ignore_file(actual.path):
             continue
 
-        # .env files are always forbidden
-        if actual.path == ".env":
-            raise RuntimeError(
-                "Modification of .env is forbidden."
-            )
-
-        # CI workflow modifications are always forbidden
-        if actual.path.startswith(".github/workflows/"):
-            raise RuntimeError(
-                "CI workflow modification is forbidden."
-            )
-
-        # Test file modifications are always forbidden (Day 1 restriction)
-        if "tests" in actual.path.split("/") or actual.path.startswith("test_"):
-            raise RuntimeError(
-                f"Test file modification is forbidden: {actual.path}. "
-                "Test files must remain read-only during Day 1 implementation."
-            )
+        # Check write permissions using PolicyEvaluator
+        try:
+            policy_evaluator.assert_write_allowed(actual.path)
+        except PermissionError as e:
+            raise RuntimeError(str(e))
 
         # Check if the file was in the approved plan
         expected_action = planned.get(actual.path)

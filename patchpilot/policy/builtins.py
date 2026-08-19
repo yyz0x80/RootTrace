@@ -114,6 +114,14 @@ def _get_builtin_write_policies() -> list[CompiledPathPolicy]:
             denied_paths={"tests"},
             is_allowlist=False,
         ),
+        CompiledPathPolicy(
+            id="builtin-write-5",
+            description="System constraint: Cannot modify test_*.py files (Day 1 restriction)",
+            kind="WRITE_SCOPE",
+            allowed_paths=set(),
+            denied_paths={"test_"},
+            is_allowlist=False,
+        ),
     ]
 
 

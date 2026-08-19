@@ -13,6 +13,7 @@ from patchpilot.planning.post_processor import post_process_plan
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_acceptance_coverage
+from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.repository.schema import RepositoryContext
 
 # Directories to ignore when scanning repository files
@@ -196,7 +197,8 @@ def _validate_generated_plan_coverage(
     """Validate recoverable acceptance coverage errors in a model plan."""
     # Security and scope violations are terminal decisions, not omissions the
     # model should be prompted to repair into a more detailed plan.
-    if plan.repository_match and check_scope(plan).allowed:
+    policy_set = get_builtin_policies()
+    if plan.repository_match and check_scope(plan, policy_set).allowed:
         validate_acceptance_coverage(plan, issue)
 
 

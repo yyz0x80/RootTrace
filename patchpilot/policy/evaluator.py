@@ -131,12 +131,11 @@ class PolicyEvaluator:
                     )
 
                 # If allowlist is configured, check if domain is allowed
-                if policy.allowed_domains:
-                    if not self._domain_matches(normalized_domain, policy.allowed_domains):
-                        raise PermissionError(
-                            f"Network access denied: Domain '{domain}' is not in the allowed list. "
-                            f"Policy: {policy.description}"
-                        )
+                if policy.allowed_domains and not self._domain_matches(normalized_domain, policy.allowed_domains):
+                    raise PermissionError(
+                        f"Network access denied: Domain '{domain}' is not in the allowed list. "
+                        f"Policy: {policy.description}"
+                    )
 
     def assert_dependency_installation_allowed(self, package_name: str) -> None:
         """Check if dependency installation is allowed according to dependency policies.
@@ -190,8 +189,7 @@ class PolicyEvaluator:
         normalized = str(Path(path).as_posix())
 
         # Remove leading ./ if present
-        if normalized.startswith("./"):
-            normalized = normalized[2:]
+        normalized = normalized.removeprefix("./")
 
         # Remove trailing slashes
         normalized = normalized.rstrip("/")
@@ -203,6 +201,7 @@ class PolicyEvaluator:
 
         Supports both exact matches and directory prefix matches.
         For example, "tests" pattern matches "tests/example.py" and "tests/subdir/file.py".
+        Also supports prefix patterns like "test_" to match files starting with "test_".
 
         Args:
             path: The normalized path to check
@@ -234,6 +233,13 @@ class PolicyEvaluator:
                     # Pattern is just a filename, check if path ends with it
                     if path.endswith("/" + normalized_pattern) or path == normalized_pattern:
                         return True
+
+            # Prefix pattern match (e.g., "test_" matches "test_example.py")
+            if not "/" in normalized_pattern and normalized_pattern.endswith("_"):
+                # Check if filename starts with the pattern
+                filename = path.split("/")[-1]
+                if filename.startswith(normalized_pattern):
+                    return True
 
         return False
 

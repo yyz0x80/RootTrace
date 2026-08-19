@@ -14,17 +14,18 @@ Compilation principles:
 
 import re
 from pathlib import Path
+from typing import ClassVar
 
 from patchpilot.issue.schema import TaskConstraint
 from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.policy.schema import (
+    CompilationError,
+    CompilationResult,
     CompiledCommandPolicy,
     CompiledConstraint,
     CompiledDependencyPolicy,
     CompiledNetworkPolicy,
     CompiledPathPolicy,
-    CompilationError,
-    CompilationResult,
     ConstraintStatus,
     PolicySet,
 )
@@ -37,17 +38,17 @@ class ConstraintCompiler:
     # These patterns match explicit file path mentions like:
     # "Only modify benchmark/users.py and benchmark/user_service.py"
     # "Do not modify tests/test_example.py"
-    EXPLICIT_PATH_PATTERN = re.compile(
+    EXPLICIT_PATH_PATTERN: ClassVar[re.Pattern] = re.compile(
         r'\b[\w./-]+\.(?:py|js|ts|json|yaml|yml|toml|txt|md|rst)\b'
     )
 
     # Patterns for command mentions
-    COMMAND_PATTERN = re.compile(
+    COMMAND_PATTERN: ClassVar[re.Pattern] = re.compile(
         r'\b(?:pytest|python|ruff|git|npm|pip|cargo|go|java)\b'
     )
 
     # Keywords that indicate allowlist vs denylist semantics
-    ALLOWLIST_KEYWORDS = {
+    ALLOWLIST_KEYWORDS: ClassVar[set[str]] = {
         "only modify",
         "only access",
         "only run",
@@ -55,7 +56,7 @@ class ConstraintCompiler:
         "limit to",
     }
 
-    DENYLIST_KEYWORDS = {
+    DENYLIST_KEYWORDS: ClassVar[set[str]] = {
         "do not modify",
         "must not modify",
         "do not access",
@@ -67,7 +68,7 @@ class ConstraintCompiler:
     }
 
     # Keywords indicating network restrictions
-    NETWORK_KEYWORDS = {
+    NETWORK_KEYWORDS: ClassVar[set[str]] = {
         "network",
         "download",
         "fetch",
@@ -78,7 +79,7 @@ class ConstraintCompiler:
     }
 
     # Keywords indicating dependency restrictions
-    DEPENDENCY_KEYWORDS = {
+    DEPENDENCY_KEYWORDS: ClassVar[set[str]] = {
         "dependency",
         "package",
         "install",
@@ -507,8 +508,7 @@ class ConstraintCompiler:
         normalized = str(Path(path).as_posix())
 
         # Remove leading ./ if present
-        if normalized.startswith("./"):
-            normalized = normalized[2:]
+        normalized = normalized.removeprefix("./")
 
         return normalized
 

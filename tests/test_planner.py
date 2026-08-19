@@ -16,11 +16,10 @@ from patchpilot.planning.planner import (
 from patchpilot.planning.schema import ChangePlan, PlannedChange
 from patchpilot.planning.scope_gate import (
     DATABASE_MIGRATION_HINTS,
-    FORBIDDEN_FILES,
-    FORBIDDEN_PREFIXES,
     ScopeGateResult,
     check_scope,
 )
+from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.repository.schema import RepositoryContext
 
 
@@ -354,7 +353,8 @@ def test_check_scope_allowed_plan():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is True
     assert len(result.violations) == 0
@@ -379,7 +379,8 @@ def test_check_scope_too_many_files():
         risk_level="low",
     )
 
-    result = check_scope(plan, max_modified_files=6)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set, max_modified_files=6)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -403,12 +404,13 @@ def test_check_scope_forbidden_env_file():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
     assert ".env" in result.violations[0]
-    assert "forbidden" in result.violations[0]
+    assert "denied" in result.violations[0]
 
 
 def test_check_scope_forbidden_cicd_files():
@@ -428,11 +430,12 @@ def test_check_scope_forbidden_cicd_files():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
-    assert "CI/CD modification is forbidden" in result.violations[0]
+    assert "CI/CD" in result.violations[0]
 
 
 def test_check_scope_database_migration():
@@ -452,7 +455,8 @@ def test_check_scope_database_migration():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -476,7 +480,8 @@ def test_check_scope_alembic_migration():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -506,7 +511,8 @@ def test_check_scope_file_not_in_relevant():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is True  # Warnings don't block execution
     assert len(result.violations) == 0
@@ -532,7 +538,8 @@ def test_check_scope_high_risk_blocked():
         risk_level="high",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 1
@@ -562,7 +569,8 @@ def test_check_scope_multiple_violations():
         risk_level="high",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is False
     assert len(result.violations) == 3  # .env, CI/CD, and high risk
@@ -592,7 +600,8 @@ def test_check_scope_duplicate_files():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is True
     assert len(result.violations) == 0
@@ -617,7 +626,8 @@ def test_check_scope_custom_max_files():
         risk_level="low",
     )
 
-    result = check_scope(plan, max_modified_files=2)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set, max_modified_files=2)
 
     assert result.allowed is False
     assert "maximum allowed is 2" in result.violations[0]
@@ -633,21 +643,33 @@ def test_check_scope_empty_plan():
         risk_level="low",
     )
 
-    result = check_scope(plan)
+    policy_set = get_builtin_policies()
+    result = check_scope(plan, policy_set)
 
     assert result.allowed is True
     assert len(result.violations) == 0
     assert len(result.warnings) == 0
 
 
-def test_forbidden_files_constant():
-    """Test that FORBIDDEN_FILES contains expected entries."""
-    assert ".env" in FORBIDDEN_FILES
+def test_builtin_policies_contain_expected_restrictions():
+    """Test that builtin policies contain expected security restrictions."""
+    policy_set = get_builtin_policies()
 
+    # Check that .env is forbidden for both read and write
+    write_denied = set()
+    for policy in policy_set.write_policies:
+        write_denied.update(policy.denied_paths)
+    assert ".env" in write_denied
 
-def test_forbidden_prefixes_constant():
-    """Test that FORBIDDEN_PREFIXES contains expected entries."""
-    assert ".github/workflows/" in FORBIDDEN_PREFIXES
+    # Check that .git is forbidden for both read and write
+    assert ".git" in write_denied
+
+    # Check that CI/CD workflows are forbidden
+    assert ".github/workflows" in write_denied
+
+    # Check that test files are forbidden
+    assert "tests" in write_denied
+    assert "test_" in write_denied
 
 
 def test_database_migration_hints_constant():

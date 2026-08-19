@@ -57,7 +57,7 @@ def test_rejects_env_file():
 
 
 def test_rejects_test_modification():
-    """Reject modifying tests directory"""
+    """Workspace no longer enforces test file restrictions - handled by PolicySet"""
     root = Path("/tmp/test_repo")
     workspace = Workspace(root)
 
@@ -65,12 +65,13 @@ def test_rejects_test_modification():
     resolved = workspace.assert_read_allowed("tests/test_main.py")
     assert resolved == (root / "tests/test_main.py").resolve()
 
-    # Reject writing to tests directory
-    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
-        workspace.assert_write_allowed("tests/test_main.py")
+    # Workspace no longer rejects writing to tests directory - handled by PolicySet
+    resolved = workspace.assert_write_allowed("tests/test_main.py")
+    assert resolved == (root / "tests/test_main.py").resolve()
 
-    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
-        workspace.assert_write_allowed("tests/unit/test_utils.py")
+    # Workspace no longer rejects writing to test files in subdirectories - handled by PolicySet
+    resolved = workspace.assert_write_allowed("tests/unit/test_utils.py")
+    assert resolved == (root / "tests/unit/test_utils.py").resolve()
 
 
 def test_rejects_git_directory():
@@ -89,7 +90,7 @@ def test_rejects_git_directory():
 
 
 def test_rejects_test_prefix_files():
-    """Reject modifying files starting with test_"""
+    """Workspace no longer enforces test_ prefix restrictions - handled by PolicySet"""
     root = Path("/tmp/test_repo")
     workspace = Workspace(root)
 
@@ -97,20 +98,20 @@ def test_rejects_test_prefix_files():
     resolved = workspace.assert_read_allowed("test_main.py")
     assert resolved == (root / "test_main.py").resolve()
 
-    # Reject writing to test_*.py files
-    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
-        workspace.assert_write_allowed("test_main.py")
+    # Workspace no longer rejects writing to test_*.py files - handled by PolicySet
+    resolved = workspace.assert_write_allowed("test_main.py")
+    assert resolved == (root / "test_main.py").resolve()
 
-    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
-        workspace.assert_write_allowed("test_utils.py")
+    resolved = workspace.assert_write_allowed("test_utils.py")
+    assert resolved == (root / "test_utils.py").resolve()
 
     # Test in subdirectory
-    with pytest.raises(PermissionError, match="Modifying test files is not allowed"):
-        workspace.assert_write_allowed("src/test_module.py")
+    resolved = workspace.assert_write_allowed("src/test_module.py")
+    assert resolved == (root / "src/test_module.py").resolve()
 
 
 def test_rejects_github_workflows():
-    """Reject modifying .github/workflows directory"""
+    """Workspace no longer enforces CI/CD restrictions - handled by PolicySet"""
     root = Path("/tmp/test_repo")
     workspace = Workspace(root)
 
@@ -118,9 +119,9 @@ def test_rejects_github_workflows():
     resolved = workspace.assert_read_allowed(".github/workflows/ci.yml")
     assert resolved == (root / ".github/workflows/ci.yml").resolve()
 
-    # Reject writing to .github/workflows
-    with pytest.raises(PermissionError, match="Modifying CI/CD workflows is not allowed"):
-        workspace.assert_write_allowed(".github/workflows/ci.yml")
+    # Workspace no longer rejects writing to .github/workflows - handled by PolicySet
+    resolved = workspace.assert_write_allowed(".github/workflows/ci.yml")
+    assert resolved == (root / ".github/workflows/ci.yml").resolve()
 
-    with pytest.raises(PermissionError, match="Modifying CI/CD workflows is not allowed"):
-        workspace.assert_write_allowed(".github/workflows/deploy.yml")
+    resolved = workspace.assert_write_allowed(".github/workflows/deploy.yml")
+    assert resolved == (root / ".github/workflows/deploy.yml").resolve()

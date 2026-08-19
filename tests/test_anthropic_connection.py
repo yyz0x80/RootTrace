@@ -14,9 +14,10 @@ from pathlib import Path
 # Add project root to path
 project_root = Path(__file__).parent.parent
 import sys
+
 sys.path.insert(0, str(project_root))
 
-from patchpilot.provider import LLMProvider, create_provider_from_config
+from patchpilot.provider import create_provider_from_config
 
 
 def test_provider():

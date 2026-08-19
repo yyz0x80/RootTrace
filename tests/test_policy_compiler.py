@@ -4,7 +4,6 @@ import pytest
 
 from patchpilot.issue.schema import TaskConstraint
 from patchpilot.policy import (
-    CompilationResult,
     ConstraintCompiler,
     PolicyEvaluator,
     PolicySet,
@@ -12,7 +11,6 @@ from patchpilot.policy import (
 )
 from patchpilot.policy.schema import (
     CompiledPathPolicy,
-    ConstraintStatus,
 )
 
 
@@ -283,8 +281,6 @@ def test_network_policy_compilation():
     assert result.total_constraints == 1
     assert result.supported_constraints == 1
 
-    # Network policies are added to the policy set
-    network_policies = result.policy_set.network_policies
     # The compiled policy should be in the all_constraints list
     compiled = next(
         (p for p in result.policy_set.all_constraints if p.id == "C-1"),

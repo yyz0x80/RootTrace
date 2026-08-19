@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolFailureType, ToolResult
+from patchpilot.policy.evaluator import PolicyEvaluator
+from patchpilot.policy.schema import PolicySet
 from patchpilot.validation import run_intermediate_validation
 from patchpilot.workspace import Workspace
 
@@ -599,25 +601,26 @@ def _python_type_to_json_type(python_type: type) -> tuple[str, bool]:
 class ToolRegistry:
     """Registry for available tools with dynamic schema registration"""
 
-    # Day 1 allowed commands
-    ALLOWED_COMMANDS: ClassVar[set[str]] = {
-        "pytest",
-        "python",
-        "ruff",
-        "git",
-    }
-
     # Maximum output size limits
     MAX_SEARCH_OUTPUT = 100_000  # characters
     MAX_FILE_LINES = 300
     COMMAND_TIMEOUT = 60
 
-    def __init__(self, workspace: Workspace, command_runner: CommandRunnerProtocol | None = None):
+    def __init__(
+        self,
+        workspace: Workspace,
+        policy_set: PolicySet | None = None,
+        command_runner: CommandRunnerProtocol | None = None,
+    ):
         self.workspace = workspace
+        self.policy_set = policy_set
         self.command_runner = command_runner
         # Dynamic tool registration storage
         self._tool_definitions: dict[str, ToolDefinition] = {}
         self._tool_handlers: dict[str, Any] = {}
+
+        # Initialize policy evaluator if policy_set is provided
+        self.policy_evaluator = PolicyEvaluator(policy_set) if policy_set else None
 
         # Register default tools
         self._register_default_tools()
@@ -628,6 +631,15 @@ class ToolRegistry:
     ) -> None:
         """Update the isolated runner used by the command tool."""
         self.command_runner = command_runner
+
+    def update_policy_set(self, policy_set: PolicySet) -> None:
+        """Update the policy set used for permission checking.
+
+        Args:
+            policy_set: New PolicySet to use for permission evaluation
+        """
+        self.policy_set = policy_set
+        self.policy_evaluator = PolicyEvaluator(policy_set) if policy_set else None
 
     def _register_default_tools(self) -> None:
         """Register the compact set of tools exposed to the coding model."""
@@ -953,6 +965,9 @@ class ToolRegistry:
 
         try:
             resolved_path = self.workspace.assert_write_allowed(input_data.path)
+            # Additional policy check if policy_evaluator is available
+            if self.policy_evaluator:
+                self.policy_evaluator.assert_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1317,10 +1332,10 @@ class ToolRegistry:
     def edit_file_by_line(self, arguments: dict[str, Any]) -> ToolResult:
         """
         Edit file by line number range with optional preview.
-        
+
         Args:
             arguments: Dict with 'path', 'start_line', 'end_line', 'new_text', and optional 'preview' (default False)
-        
+
         Returns:
             ToolResult with unified diff or error message. If preview=True, shows change without applying.
         """
@@ -1331,6 +1346,9 @@ class ToolRegistry:
 
         try:
             resolved_path = self.workspace.assert_write_allowed(input_data.path)
+            # Additional policy check if policy_evaluator is available
+            if self.policy_evaluator:
+                self.policy_evaluator.assert_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1436,6 +1454,9 @@ class ToolRegistry:
 
         try:
             resolved_path = self.workspace.assert_write_allowed(input_data.path)
+            # Additional policy check if policy_evaluator is available
+            if self.policy_evaluator:
+                self.policy_evaluator.assert_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1533,6 +1554,9 @@ class ToolRegistry:
 
         try:
             resolved_path = self.workspace.assert_write_allowed(input_data.path)
+            # Additional policy check if policy_evaluator is available
+            if self.policy_evaluator:
+                self.policy_evaluator.assert_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1664,10 +1688,10 @@ class ToolRegistry:
     def run_command(self, arguments: dict[str, Any]) -> ToolResult:
         """
         Run an allowed command in the workspace.
-        
+
         Args:
             arguments: Dict with 'command' string
-        
+
         Returns:
             ToolResult with command output or error
         """
@@ -1686,41 +1710,50 @@ class ToolRegistry:
         if not args:
             return ToolResult(ok=False, content="Empty command")
 
-        base_command = args[0]
-        if base_command not in self.ALLOWED_COMMANDS:
-            return ToolResult(
-                ok=False,
-                content=f"Command '{base_command}' is not allowed. Allowed: {', '.join(sorted(self.ALLOWED_COMMANDS))}"
-            )
+        # Use PolicyEvaluator if available, otherwise use basic validation
+        if self.policy_evaluator:
+            try:
+                self.policy_evaluator.assert_command_allowed(input_data.command)
+            except PermissionError as e:
+                return ToolResult(ok=False, content=str(e))
+        else:
+            # Fallback to basic validation for backward compatibility
+            base_command = args[0]
+            ALLOWED_COMMANDS = {"pytest", "python", "ruff", "git"}
+            if base_command not in ALLOWED_COMMANDS:
+                return ToolResult(
+                    ok=False,
+                    content=f"Command '{base_command}' is not allowed. Allowed: {', '.join(sorted(ALLOWED_COMMANDS))}"
+                )
 
-        # Additional validation for specific commands
-        if base_command == "python":
-            # Only allow python -m pytest
-            if len(args) >= 2 and args[1] == "-m":
-                if len(args) >= 3 and args[2] != "pytest":
+            # Additional validation for specific commands
+            if base_command == "python":
+                # Only allow python -m pytest
+                if len(args) >= 2 and args[1] == "-m":
+                    if len(args) >= 3 and args[2] != "pytest":
+                        return ToolResult(
+                            ok=False,
+                            content="Only 'python -m pytest' is allowed for python command"
+                        )
+                else:
                     return ToolResult(
                         ok=False,
                         content="Only 'python -m pytest' is allowed for python command"
                     )
-            else:
+
+            if base_command == "git" and len(args) >= 2 and args[1] not in {"diff", "status"}:
+                # Only allow git diff and git status
                 return ToolResult(
                     ok=False,
-                    content="Only 'python -m pytest' is allowed for python command"
+                    content="Only 'git diff' and 'git status' are allowed for git command"
                 )
 
-        if base_command == "git" and len(args) >= 2 and args[1] not in {"diff", "status"}:
-            # Only allow git diff and git status
-            return ToolResult(
-                ok=False,
-                content="Only 'git diff' and 'git status' are allowed for git command"
-            )
-
-        if base_command == "ruff" and len(args) >= 2 and args[1] != "check":
-            # Only allow ruff check
-            return ToolResult(
-                ok=False,
-                content="Only 'ruff check' is allowed for ruff command"
-            )
+            if base_command == "ruff" and len(args) >= 2 and args[1] != "check":
+                # Only allow ruff check
+                return ToolResult(
+                    ok=False,
+                    content="Only 'ruff check' is allowed for ruff command"
+                )
 
         execution_args = self._canonicalize_command(args)
 

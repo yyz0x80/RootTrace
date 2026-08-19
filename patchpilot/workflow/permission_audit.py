@@ -7,11 +7,9 @@ and provides structured decision records for trace events and audit logs.
 
 The system evaluates permissions across multiple dimensions:
 - Plan approval requirements
-- Workspace read/write operations
-- File path security (traversal, sensitive files, test files)
+- Workspace read/write operations using PolicySet
 - Change plan scope compliance
-- CI/CD configuration protection
-- Command execution allowlist
+- Command execution using PolicySet
 - Git operation restrictions
 
 Permission decisions are structured with clear rule identifiers and reasoning
@@ -22,6 +20,10 @@ from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel
+
+from patchpilot.policy.evaluator import PolicyEvaluator
+from patchpilot.policy.schema import PolicySet
+from patchpilot.policy.tracing import TraceDecision, record_permission_decision
 
 
 class PermissionResult(str, Enum):
@@ -44,11 +46,13 @@ class PermissionDecision(BaseModel):
         result: The permission decision (ALLOW, ASK, or DENY)
         reason: Human-readable explanation of the decision
         rule_id: Identifier of the security rule that triggered this decision
+        constraint_id: Optional constraint ID from the policy set
     """
 
     result: PermissionResult
     reason: str
     rule_id: str
+    constraint_id: str | None = None
 
 
 # Rule identifiers for permission decisions
@@ -69,11 +73,9 @@ class RuleID(str, Enum):
     # Path security rules
     PATH_TRAVERSAL_DENIED = "PATH_TRAVERSAL_DENIED"
     SENSITIVE_FILE_DENIED = "SENSITIVE_FILE_DENIED"
-    TEST_WRITE_DENIED = "TEST_WRITE_DENIED"
 
     # Scope compliance rules
     OUT_OF_PLAN_WRITE_DENIED = "OUT_OF_PLAN_WRITE_DENIED"
-    CI_WRITE_DENIED = "CI_WRITE_DENIED"
 
     # Command execution rules
     COMMAND_DENIED = "COMMAND_DENIED"
@@ -85,8 +87,7 @@ class PermissionAuditor:
 
     The PermissionAuditor evaluates permission requests against security
     policies and returns structured decisions. It integrates with the
-    workspace policy, change plan scope, and command allowlist to provide
-    consistent permission enforcement across the workflow.
+    PolicySet system for consistent permission enforcement across the workflow.
 
     The auditor maintains no internal state - all decisions are based
     on the provided context and configuration.
@@ -95,16 +96,20 @@ class PermissionAuditor:
     def __init__(
         self,
         workspace_root: Path,
+        policy_set: PolicySet,
         planned_files: set[str] | None = None,
     ) -> None:
         """Initialize the permission auditor.
 
         Args:
             workspace_root: Root path of the target repository workspace
+            policy_set: Compiled PolicySet containing all security policies
             planned_files: Set of file paths approved for modification in the change plan
         """
         self.workspace_root = workspace_root.resolve()
+        self.policy_set = policy_set
         self.planned_files = planned_files or set()
+        self.policy_evaluator = PolicyEvaluator(policy_set)
 
     def check_read_permission(self, relative_path: str) -> PermissionDecision:
         """Check if reading a file is allowed.
@@ -117,28 +122,52 @@ class PermissionAuditor:
         """
         # Resolve the path to check for traversal attempts
         try:
-            resolved = self._resolve_path(relative_path)
+            self._resolve_path(relative_path)
         except ValueError as e:
-            return PermissionDecision(
+            decision = PermissionDecision(
                 result=PermissionResult.DENY,
                 reason=str(e),
                 rule_id=RuleID.PATH_TRAVERSAL_DENIED,
             )
+            record_permission_decision(
+                operation="read",
+                target=relative_path,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.PATH_TRAVERSAL_DENIED,
+                reason=str(e),
+            )
+            return decision
 
-        # Check for sensitive files
-        if self._is_sensitive_file(resolved):
-            return PermissionDecision(
+        # Use PolicyEvaluator to check against policy set
+        try:
+            self.policy_evaluator.assert_read_allowed(relative_path)
+            decision = PermissionDecision(
+                result=PermissionResult.ALLOW,
+                reason=f"Read operation allowed for: {relative_path}",
+                rule_id=RuleID.WORKSPACE_READ_ALLOWED,
+            )
+            record_permission_decision(
+                operation="read",
+                target=relative_path,
+                decision=TraceDecision.ALLOW,
+                rule_id=RuleID.WORKSPACE_READ_ALLOWED,
+                reason=f"Read operation allowed for: {relative_path}",
+            )
+            return decision
+        except PermissionError as e:
+            decision = PermissionDecision(
                 result=PermissionResult.DENY,
-                reason=f"Reading sensitive file is not allowed: {relative_path}",
+                reason=str(e),
                 rule_id=RuleID.SENSITIVE_FILE_DENIED,
             )
-
-        # Read operations are generally allowed for non-sensitive files
-        return PermissionDecision(
-            result=PermissionResult.ALLOW,
-            reason=f"Read operation allowed for: {relative_path}",
-            rule_id=RuleID.WORKSPACE_READ_ALLOWED,
-        )
+            record_permission_decision(
+                operation="read",
+                target=relative_path,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.SENSITIVE_FILE_DENIED,
+                reason=str(e),
+            )
+            return decision
 
     def check_write_permission(
         self,
@@ -156,54 +185,75 @@ class PermissionAuditor:
         """
         # Resolve the path to check for traversal attempts
         try:
-            resolved = self._resolve_path(relative_path)
+            self._resolve_path(relative_path)
         except ValueError as e:
-            return PermissionDecision(
+            decision = PermissionDecision(
                 result=PermissionResult.DENY,
                 reason=str(e),
                 rule_id=RuleID.PATH_TRAVERSAL_DENIED,
             )
+            record_permission_decision(
+                operation="write",
+                target=relative_path,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.PATH_TRAVERSAL_DENIED,
+                reason=str(e),
+                metadata={"action": action},
+            )
+            return decision
 
-        # Check for sensitive files
-        if self._is_sensitive_file(resolved):
-            return PermissionDecision(
+        # Use PolicyEvaluator to check against policy set
+        try:
+            self.policy_evaluator.assert_write_allowed(relative_path)
+        except PermissionError as e:
+            decision = PermissionDecision(
                 result=PermissionResult.DENY,
-                reason=f"Writing sensitive file is not allowed: {relative_path}",
+                reason=str(e),
                 rule_id=RuleID.SENSITIVE_FILE_DENIED,
             )
-
-        # Check for test file modifications (Day 1 restriction)
-        if self._is_test_file(relative_path):
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason=f"Modifying test files is not allowed: {relative_path}. "
-                "Test files must remain read-only during Day 1 implementation.",
-                rule_id=RuleID.TEST_WRITE_DENIED,
+            record_permission_decision(
+                operation="write",
+                target=relative_path,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.SENSITIVE_FILE_DENIED,
+                reason=str(e),
+                metadata={"action": action},
             )
-
-        # Check for CI/CD configuration files
-        if self._is_ci_config(relative_path):
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason=f"CI/CD configuration modification is not allowed: {relative_path}",
-                rule_id=RuleID.CI_WRITE_DENIED,
-            )
+            return decision
 
         # Check if file is in the approved change plan
         if self.planned_files and relative_path not in self.planned_files:
-            return PermissionDecision(
+            decision = PermissionDecision(
                 result=PermissionResult.DENY,
                 reason=f"File modification outside approved plan: {relative_path}. "
                 f"Approved files: {', '.join(sorted(self.planned_files))}",
                 rule_id=RuleID.OUT_OF_PLAN_WRITE_DENIED,
             )
+            record_permission_decision(
+                operation="write",
+                target=relative_path,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.OUT_OF_PLAN_WRITE_DENIED,
+                reason=decision.reason,
+                metadata={"action": action, "planned_files": list(self.planned_files)},
+            )
+            return decision
 
         # Write operation is allowed for planned source files
-        return PermissionDecision(
+        decision = PermissionDecision(
             result=PermissionResult.ALLOW,
             reason=f"Write operation allowed for planned file: {relative_path}",
             rule_id=RuleID.PLANNED_SOURCE_WRITE_ALLOWED,
         )
+        record_permission_decision(
+            operation="write",
+            target=relative_path,
+            decision=TraceDecision.ALLOW,
+            rule_id=RuleID.PLANNED_SOURCE_WRITE_ALLOWED,
+            reason=decision.reason,
+            metadata={"action": action},
+        )
+        return decision
 
     def check_command_permission(self, command: str) -> PermissionDecision:
         """Check if executing a command is allowed.
@@ -216,91 +266,50 @@ class PermissionAuditor:
         """
         # Check for git push (always forbidden)
         if command.strip().startswith("git push"):
-            return PermissionDecision(
+            decision = PermissionDecision(
                 result=PermissionResult.DENY,
                 reason="Git push operations are not allowed",
                 rule_id=RuleID.GIT_PUSH_DENIED,
             )
-
-        # Parse the base command
-        parts = command.strip().split()
-        if not parts:
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason="Empty command is not allowed",
-                rule_id=RuleID.COMMAND_DENIED,
+            record_permission_decision(
+                operation="command",
+                target=command,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.GIT_PUSH_DENIED,
+                reason="Git push operations are not allowed",
             )
+            return decision
 
-        base_command = parts[0]
-
-        # Day 1 allowed commands
-        allowed_commands = {"pytest", "python", "ruff", "git"}
-
-        if base_command not in allowed_commands:
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason=f"Command '{base_command}' is not allowed. "
-                f"Allowed commands: {', '.join(sorted(allowed_commands))}",
-                rule_id=RuleID.COMMAND_DENIED,
-            )
-
-        # Additional restrictions for python command
-        if base_command == "python":
-            # Only allow python -m pytest
-            if len(parts) >= 2 and parts[1] == "-m" and len(parts) >= 3 and parts[2] == "pytest":
-                return PermissionDecision(
-                    result=PermissionResult.ALLOW,
-                    reason="Python pytest command is allowed",
-                    rule_id=RuleID.COMMAND_DENIED,
-                )
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason="Only 'python -m pytest' is allowed for python command",
-                rule_id=RuleID.COMMAND_DENIED,
-            )
-
-        # Additional restrictions for git command
-        if base_command == "git":
-            # Only allow git diff and git status
-            if len(parts) >= 2 and parts[1] in ("diff", "status"):
-                return PermissionDecision(
-                    result=PermissionResult.ALLOW,
-                    reason=f"Git {parts[1]} command is allowed",
-                    rule_id=RuleID.COMMAND_DENIED,
-                )
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason="Only 'git diff' and 'git status' are allowed for git command",
-                rule_id=RuleID.COMMAND_DENIED,
-            )
-
-        # Additional restrictions for ruff command
-        if base_command == "ruff":
-            if len(parts) >= 2 and parts[1] == "check":
-                return PermissionDecision(
-                    result=PermissionResult.ALLOW,
-                    reason="Ruff check command is allowed",
-                    rule_id=RuleID.COMMAND_DENIED,
-                )
-            return PermissionDecision(
-                result=PermissionResult.DENY,
-                reason="Only 'ruff check' is allowed for ruff command",
-                rule_id=RuleID.COMMAND_DENIED,
-            )
-
-        # Pytest is always allowed
-        if base_command == "pytest":
-            return PermissionDecision(
+        # Use PolicyEvaluator to check against policy set
+        try:
+            self.policy_evaluator.assert_command_allowed(command)
+            decision = PermissionDecision(
                 result=PermissionResult.ALLOW,
-                reason="Pytest command is allowed",
+                reason=f"Command '{command}' is allowed",
                 rule_id=RuleID.COMMAND_DENIED,
             )
-
-        return PermissionDecision(
-            result=PermissionResult.ALLOW,
-            reason=f"Command '{base_command}' is allowed",
-            rule_id=RuleID.COMMAND_DENIED,
-        )
+            record_permission_decision(
+                operation="command",
+                target=command,
+                decision=TraceDecision.ALLOW,
+                rule_id=RuleID.COMMAND_DENIED,
+                reason=f"Command '{command}' is allowed",
+            )
+            return decision
+        except PermissionError as e:
+            decision = PermissionDecision(
+                result=PermissionResult.DENY,
+                reason=str(e),
+                rule_id=RuleID.COMMAND_DENIED,
+            )
+            record_permission_decision(
+                operation="command",
+                target=command,
+                decision=TraceDecision.DENY,
+                rule_id=RuleID.COMMAND_DENIED,
+                reason=str(e),
+            )
+            return decision
 
     def check_plan_approval_required(self, has_plan: bool) -> PermissionDecision:
         """Check if plan approval is required for execution.
@@ -350,51 +359,6 @@ class PermissionAuditor:
             raise ValueError(f"Path escapes repository: {relative_path}")
 
         return resolved
-
-    def _is_sensitive_file(self, resolved_path: Path) -> bool:
-        """Check if a path refers to a sensitive file.
-
-        Args:
-            resolved_path: Resolved absolute path to check
-
-        Returns:
-            True if the file is sensitive, False otherwise
-        """
-        # Check for .env files
-        if resolved_path.name == ".env":
-            return True
-
-        # Check for .git directory
-        return resolved_path.name == ".git" or ".git" in resolved_path.parts
-
-    def _is_test_file(self, relative_path: str) -> bool:
-        """Check if a path refers to a test file.
-
-        Args:
-            relative_path: Relative path to check
-
-        Returns:
-            True if the path is a test file, False otherwise
-        """
-        # Check if path contains tests/ directory
-        if "tests" in relative_path.split("/"):
-            return True
-
-        # Check if filename starts with test_
-        parts = relative_path.split("/")
-        return bool(parts and parts[-1].startswith("test_"))
-
-    def _is_ci_config(self, relative_path: str) -> bool:
-        """Check if a path refers to a CI/CD configuration file.
-
-        Args:
-            relative_path: Relative path to check
-
-        Returns:
-            True if the path is a CI/CD configuration, False otherwise
-        """
-        # Check for GitHub workflows
-        return relative_path.startswith(".github/workflows/")
 
 
 def audit_tool_permission(
