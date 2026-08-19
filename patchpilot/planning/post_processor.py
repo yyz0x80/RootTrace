@@ -21,10 +21,9 @@ from pathlib import PurePosixPath
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.schema import (
     ChangePlan,
+    CriterionPlanDetail,
     PlannedChange,
     PlannedTest,
-    CriterionPlan,
-    CriterionPlanDetail,
 )
 from patchpilot.repository.schema import RepositoryContext
 
@@ -304,12 +303,13 @@ def _validate_criterion_plans(
     plan: ChangePlan,
     issue: NormalizedIssue,
 ) -> ChangePlan:
-    """Validate criterion plans according to the new requirements.
+    """Validate criterion plans according to the updated requirements.
 
     This function ensures that:
     - ALREADY_SATISFIED criteria have baseline_evidence
-    - Structural criteria have relevant_source_files
-    - Preservation criteria may not have planned changes
+    - Unknown criterion IDs are rejected (hard failure)
+    - Preservation criteria without source mapping are allowed (no longer hard failure)
+    - Multiple ACs sharing one source file are allowed (no longer hard failure)
 
     Args:
         plan: The change plan to process.
@@ -319,7 +319,7 @@ def _validate_criterion_plans(
         The original plan if validation passes.
 
     Raises:
-        PlanPostProcessError: If criterion plan validation fails.
+        PlanPostProcessError: If criterion plan validation fails with hard errors.
     """
     # Skip validation for issues without acceptance criteria
     if not issue.acceptance_criteria:
@@ -328,13 +328,13 @@ def _validate_criterion_plans(
     known_ids = {criterion.id for criterion in issue.acceptance_criteria}
 
     for criterion_plan in plan.criterion_plans:
-        # Check if criterion_id is valid
+        # Hard failure: Unknown criterion ID
         if criterion_plan.criterion_id not in known_ids:
             raise PlanPostProcessError(
                 f"Unknown criterion ID in criterion_plans: {criterion_plan.criterion_id}"
             )
 
-        # Check ALREADY_SATISFIED has baseline_evidence
+        # Hard failure: ALREADY_SATISFIED must have baseline_evidence
         if (
             criterion_plan.disposition == CriterionPlanDetail.ALREADY_SATISFIED
             and not criterion_plan.baseline_evidence
@@ -343,30 +343,9 @@ def _validate_criterion_plans(
                 f"ALREADY_SATISFIED criterion {criterion_plan.criterion_id} must have baseline_evidence"
             )
 
-        # Check if structural criteria have relevant_source_files
-        # This is a heuristic - we consider criteria that reference source files as structural
-        if (
-            criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT
-            and not criterion_plan.relevant_source_files
-        ):
-            # For to_implement, we require source files to be specified
-            raise PlanPostProcessError(
-                f"TO_IMPLEMENT criterion {criterion_plan.criterion_id} must specify relevant_source_files"
-            )
-
-    # Check that preservation criteria don't have planned changes
-    preservation_criteria = {
-        cp.criterion_id
-        for cp in plan.criterion_plans
-        if cp.disposition == CriterionPlanDetail.TO_PRESERVE
-    }
-
-    for change in plan.planned_changes:
-        for criterion_id in change.criterion_ids:
-            if criterion_id in preservation_criteria:
-                raise PlanPostProcessError(
-                    f"Preservation criterion {criterion_id} should not have planned changes"
-                )
+    # No longer hard failure: Allow preservation criteria without planned changes
+    # No longer hard failure: Allow multiple ACs to share one source file
+    # These are now handled as warnings or allowed by the validator
 
     return plan
 
@@ -377,9 +356,11 @@ def _complete_ac_mapping(
 ) -> ChangePlan:
     """Locally complete AC mapping errors instead of failing the entire task.
 
-    If the planner mapped ACs incorrectly (e.g., typos, missing mappings),
-    this function attempts to complete the mapping locally using deterministic
-    rules rather than failing the entire task.
+    Updated rules:
+    - Hard failure: AC ID typos (unknown references) are not auto-corrected
+    - Hard failure: Fabricated test references are rejected
+    - No longer hard failure: Missing test mappings (GLM median case)
+    - Warning: AC without direct verification (handled by validator)
 
     Args:
         plan: The change plan to process.
@@ -389,7 +370,7 @@ def _complete_ac_mapping(
         Plan with completed AC mappings.
 
     Raises:
-        PlanPostProcessError: If AC mapping cannot be completed locally.
+        PlanPostProcessError: If AC mapping has hard failures.
     """
     from patchpilot.planning.validator import validate_acceptance_coverage
 
@@ -399,122 +380,36 @@ def _complete_ac_mapping(
 
     try:
         validate_acceptance_coverage(plan, issue)
+        # Warnings are now handled by the validator, not as post-process errors
     except ValueError as e:
-        # Attempt local completion for specific error types
         error_msg = str(e)
 
-        if "unknown acceptance criterion" in error_msg:
-            # Try to correct typos in AC IDs
-            known_ids = {criterion.id for criterion in issue.acceptance_criteria}
-
-            corrected_changes = []
-            for change in plan.planned_changes:
-                corrected_criteria: list[str] = []
-                corrected_criterion_ids: list[str] = []
-                for ac_id in change.acceptance_criteria:
-                    if ac_id in known_ids:
-                        corrected_criteria.append(ac_id)
-                    else:
-                        # Try to find similar AC ID (simple typo correction)
-                        for known_id in known_ids:
-                            if (
-                                ac_id.lower() == known_id.lower()
-                                or ac_id.replace("-", "") == known_id.replace("-", "")
-                            ):
-                                corrected_criteria.append(known_id)
-                                break
-
-                for cid in change.criterion_ids:
-                    if cid in known_ids:
-                        corrected_criterion_ids.append(cid)
-                    else:
-                        for known_id in known_ids:
-                            if (
-                                cid.lower() == known_id.lower()
-                                or cid.replace("-", "") == known_id.replace("-", "")
-                            ):
-                                corrected_criterion_ids.append(known_id)
-                                break
-
-                if corrected_criteria != change.acceptance_criteria or corrected_criterion_ids != change.criterion_ids:
-                    # Create a new change with corrected AC IDs
-                    corrected_changes.append(
-                        change.model_copy(
-                            update={
-                                "acceptance_criteria": corrected_criteria,
-                                "criterion_ids": corrected_criterion_ids,
-                            }
-                        )
-                    )
-                else:
-                    corrected_changes.append(change)
-
-            corrected_tests = []
-            for test in plan.planned_tests:
-                corrected_criteria: list[str] = []
-                corrected_criterion_ids: list[str] = []
-                for ac_id in test.acceptance_criteria:
-                    if ac_id in known_ids:
-                        corrected_criteria.append(ac_id)
-                    else:
-                        for known_id in known_ids:
-                            if (
-                                ac_id.lower() == known_id.lower()
-                                or ac_id.replace("-", "") == known_id.replace("-", "")
-                            ):
-                                corrected_criteria.append(known_id)
-                                break
-
-                for cid in test.criterion_ids:
-                    if cid in known_ids:
-                        corrected_criterion_ids.append(cid)
-                    else:
-                        for known_id in known_ids:
-                            if (
-                                cid.lower() == known_id.lower()
-                                or cid.replace("-", "") == known_id.replace("-", "")
-                            ):
-                                corrected_criterion_ids.append(known_id)
-                                break
-
-                if corrected_criteria != test.acceptance_criteria or corrected_criterion_ids != test.criterion_ids:
-                    # Create a new test with corrected AC IDs
-                    corrected_tests.append(
-                        test.model_copy(
-                            update={
-                                "acceptance_criteria": corrected_criteria,
-                                "criterion_ids": corrected_criterion_ids,
-                            }
-                        )
-                    )
-                else:
-                    corrected_tests.append(test)
-
-            # Update plan with corrected changes and tests
-            plan = plan.model_copy(
-                update={
-                    "planned_changes": corrected_changes,
-                    "planned_tests": corrected_tests,
-                }
-            )
-
-            # Re-validate after correction
-            try:
-                validate_acceptance_coverage(plan, issue)
-            except ValueError:
-                # If still failing, raise the original error
-                raise PlanPostProcessError(
-                    f"AC mapping error cannot be completed locally: {e}"
-                ) from e
-
-        elif "missing planned source changes" in error_msg or "missing planned verification" in error_msg:
-            # For missing mappings, we cannot complete locally without LLM
+        # Hard failure: Unknown AC references (no auto-correction)
+        if "unknown acceptance criterion" in error_msg or "unknown acceptance criterion IDs" in error_msg:
             raise PlanPostProcessError(
-                f"AC mapping requires LLM intervention: {e}"
+                f"Plan references unknown acceptance criteria: {e}"
             ) from e
-        else:
-            # Other validation errors should fail
-            raise PlanPostProcessError(f"AC validation error: {e}") from e
+
+        # Hard failure: Behavior change claims IMPLEMENT but has no planned paths
+        if "claims IMPLEMENT but has no planned source paths" in error_msg:
+            raise PlanPostProcessError(
+                f"Behavior change validation failed: {e}"
+            ) from e
+
+        # Hard failure: Structural contract has no relevant planned paths
+        if "has no relevant planned paths" in error_msg:
+            raise PlanPostProcessError(
+                f"Structural contract validation failed: {e}"
+            ) from e
+
+        # Hard failure: Fabricated test references
+        if "not found in criterion_plans" in error_msg:
+            raise PlanPostProcessError(
+                f"Fabricated test reference detected: {e}"
+            ) from e
+
+        # Other validation errors should fail
+        raise PlanPostProcessError(f"AC validation error: {e}") from e
 
     return plan
 
@@ -531,20 +426,20 @@ def post_process_plan(
     ensuring that LLM non-compliance with prompt instructions does not
     compromise security or correctness.
 
-    Processing order:
+    Updated processing order:
     1. Migrate test files from planned_changes to planned_tests
     2. Merge duplicate file changes
     3. Validate pytest targets
     4. Check for ambiguous points
     5. Classify semantic ambiguities (currently no-op, relies on LLM)
     6. Validate criterion plans (if skip_ac_validation is False)
-    7. Complete AC mapping errors locally (if skip_ac_validation is False)
+    7. Complete AC mapping validation (if skip_ac_validation is False)
 
     Args:
         plan: The change plan generated by the LLM.
         issue: The normalized issue.
         repository_context: Repository context with tracked files.
-        skip_ac_validation: If True, skip AC mapping completion. This is used
+        skip_ac_validation: If True, skip AC mapping validation. This is used
             when the plan may have scope violations that should be checked first.
 
     Returns:
@@ -572,7 +467,7 @@ def post_process_plan(
     if not skip_ac_validation:
         plan = _validate_criterion_plans(plan, issue)
 
-    # Step 7: Complete AC mapping errors locally (skip if requested)
+    # Step 7: Complete AC mapping validation (skip if requested)
     if not skip_ac_validation:
         plan = _complete_ac_mapping(plan, issue)
 

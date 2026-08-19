@@ -19,6 +19,8 @@ from patchpilot.planning.post_processor import (
 from patchpilot.planning.schema import (
     ChangeAction,
     ChangePlan,
+    CriterionPlan,
+    CriterionPlanDetail,
     PlannedChange,
     PlannedTest,
 )
@@ -54,12 +56,14 @@ def test_migrate_test_files_to_tests() -> None:
                 action=ChangeAction.MODIFY,
                 description="Fix bug in main",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
             PlannedChange(
                 path="tests/test_main.py",
                 action=ChangeAction.MODIFY,
                 description="Update test",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         planned_tests=[],
@@ -91,6 +95,7 @@ def test_migrate_test_files_to_tests_with_test_prefix() -> None:
                 action=ChangeAction.MODIFY,
                 description="Update test",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         planned_tests=[],
@@ -117,12 +122,14 @@ def test_merge_duplicate_file_changes() -> None:
                 action=ChangeAction.MODIFY,
                 description="Fix bug",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
             PlannedChange(
                 path="src/main.py",
                 action=ChangeAction.MODIFY,
                 description="Add feature",
                 acceptance_criteria=["AC-2"],
+                criterion_ids=["AC-2"],
             ),
         ],
         planned_tests=[],
@@ -152,12 +159,14 @@ def test_merge_duplicate_file_changes_dedup_ac() -> None:
                 action=ChangeAction.MODIFY,
                 description="Fix bug",
                 acceptance_criteria=["AC-1", "AC-2"],
+                criterion_ids=["AC-1", "AC-2"],
             ),
             PlannedChange(
                 path="src/main.py",
                 action=ChangeAction.MODIFY,
                 description="Add feature",
                 acceptance_criteria=["AC-2", "AC-3"],
+                criterion_ids=["AC-2", "AC-3"],
             ),
         ],
         planned_tests=[],
@@ -187,6 +196,7 @@ def test_validate_pytest_targets_success() -> None:
                 command="pytest tests/test_main.py -q",
                 purpose="Verify main",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         out_of_scope=[],
@@ -219,6 +229,7 @@ def test_validate_pytest_targets_nonexistent() -> None:
                 command="pytest tests/nonexistent.py -q",
                 purpose="Verify nonexistent",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         out_of_scope=[],
@@ -250,6 +261,7 @@ def test_validate_pytest_targets_non_test_file() -> None:
                 command="pytest src/main.py -q",
                 purpose="Verify main",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         out_of_scope=[],
@@ -408,8 +420,8 @@ def test_classify_ambiguities_no_ordering() -> None:
     assert processed == plan
 
 
-def test_complete_ac_mapping_typo_correction() -> None:
-    """Test local AC mapping completion for typos."""
+def test_complete_ac_mapping_unknown_ac_failure() -> None:
+    """Test that unknown AC references now hard fail instead of auto-correction."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -420,6 +432,7 @@ def test_complete_ac_mapping_typo_correction() -> None:
                 action=ChangeAction.MODIFY,
                 description="Fix bug",
                 acceptance_criteria=["ac-1"],  # Typo: lowercase
+                criterion_ids=["ac-1"],
             ),
         ],
         planned_tests=[
@@ -427,6 +440,7 @@ def test_complete_ac_mapping_typo_correction() -> None:
                 command="pytest tests/test_main.py -q",
                 purpose="Verify",
                 acceptance_criteria=["ac-1"],  # Typo: lowercase
+                criterion_ids=["ac-1"],
             ),
         ],
         out_of_scope=[],
@@ -446,14 +460,13 @@ def test_complete_ac_mapping_typo_correction() -> None:
         implementation_notes=[],
     )
 
-    # Should correct the typo
-    processed = _complete_ac_mapping(plan, issue)
-    assert processed.planned_changes[0].acceptance_criteria == ["AC-1"]
-    assert processed.planned_tests[0].acceptance_criteria == ["AC-1"]
+    # Should now hard fail instead of auto-correcting
+    with pytest.raises(PlanPostProcessError, match="unknown acceptance criteria"):
+        _complete_ac_mapping(plan, issue)
 
 
-def test_complete_ac_mapping_missing_unrecoverable() -> None:
-    """Test that missing AC mappings cannot be completed locally."""
+def test_complete_ac_mapping_missing_test_allowed() -> None:
+    """Test that missing test mappings no longer hard fail (GLM median case)."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -464,11 +477,19 @@ def test_complete_ac_mapping_missing_unrecoverable() -> None:
                 action=ChangeAction.MODIFY,
                 description="Fix bug",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         planned_tests=[],  # Missing test for AC-1
         out_of_scope=[],
         risk_level="low",
+        criterion_plans=[
+            CriterionPlan(
+                criterion_id="AC-1",
+                disposition=CriterionPlanDetail.TO_IMPLEMENT,
+                relevant_source_files=["src/main.py"],
+            ),
+        ],
     )
 
     issue = NormalizedIssue(
@@ -484,8 +505,9 @@ def test_complete_ac_mapping_missing_unrecoverable() -> None:
         implementation_notes=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="requires LLM intervention"):
-        _complete_ac_mapping(plan, issue)
+    # Should now pass (validator will generate warning instead)
+    processed = _complete_ac_mapping(plan, issue)
+    assert processed == plan
 
 
 def test_post_process_plan_integration() -> None:
@@ -500,17 +522,26 @@ def test_post_process_plan_integration() -> None:
                 action=ChangeAction.MODIFY,
                 description="Fix bug",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
             PlannedChange(
                 path="tests/test_main.py",
                 action=ChangeAction.MODIFY,
                 description="Update test",
                 acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
             ),
         ],
         planned_tests=[],
         out_of_scope=[],
         risk_level="low",
+        criterion_plans=[
+            CriterionPlan(
+                criterion_id="AC-1",
+                disposition=CriterionPlanDetail.TO_IMPLEMENT,
+                relevant_source_files=["src/main.py"],
+            ),
+        ],
     )
 
     issue = NormalizedIssue(
