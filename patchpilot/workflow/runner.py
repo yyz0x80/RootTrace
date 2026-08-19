@@ -54,6 +54,7 @@ from patchpilot.tools import (
     _get_workspace_changes,
     generate_patch,
 )
+from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
 from patchpilot.verification.targets import select_target_tests
 from patchpilot.workflow.completion import determine_completion_state
@@ -403,6 +404,7 @@ class WorkflowRunner:
         workspace: Workspace,
         sandbox: DockerSandbox | None = None,
         max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
+        verification_timeouts: VerificationTimeouts | None = None,
     ) -> None:
         """Initialize the WorkflowRunner with required components.
 
@@ -413,6 +415,7 @@ class WorkflowRunner:
             workspace: Workspace instance for path resolution and security
             sandbox: Optional DockerSandbox instance (created if None)
             max_repair_attempts: Maximum number of repair attempts (default: MAX_REPAIR_ATTEMPTS)
+            verification_timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
         """
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be non-negative")
@@ -422,6 +425,7 @@ class WorkflowRunner:
         self.workspace = workspace
         self.sandbox = sandbox
         self.max_repair_attempts = max_repair_attempts
+        self.verification_timeouts = verification_timeouts or VerificationTimeouts()
         self._temp_dir: tempfile.TemporaryDirectory | None = None
         self._sandbox_verifier: Verifier | None = None
 
@@ -499,6 +503,7 @@ class WorkflowRunner:
             self._sandbox_verifier = Verifier(
                 self.sandbox,
                 workspace_root=self.workspace.root,
+                timeouts=self.verification_timeouts,
             )
 
         return self._sandbox_verifier

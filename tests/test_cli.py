@@ -1,6 +1,7 @@
 """Tests for the CLI module."""
 
 import json
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -1098,6 +1099,7 @@ def test_run_command_uses_canonical_verifier(
                     "passed": True,
                     "exit_code": 0,
                     "duration_seconds": 1.0,
+                    "timeout_seconds": 30,
                     "subject_ids": [],
                     "direct": False,
                 },
@@ -1109,6 +1111,7 @@ def test_run_command_uses_canonical_verifier(
                     "passed": True,
                     "exit_code": 0,
                     "duration_seconds": 2.0,
+                    "timeout_seconds": 300,
                     "subject_ids": [],
                     "direct": False,
                 },
@@ -1242,6 +1245,7 @@ def test_run_command_handles_ruff_failure(
                     "passed": False,
                     "exit_code": 1,
                     "duration_seconds": 1.0,
+                    "timeout_seconds": 30,
                     "failure_type": "LintError",
                     "summary": {"error_type": "SyntaxError", "relevant_output": "invalid syntax"},
                     "subject_ids": [],
@@ -1377,6 +1381,7 @@ def test_run_command_handles_pytest_failure(
                     "passed": True,
                     "exit_code": 0,
                     "duration_seconds": 1.0,
+                    "timeout_seconds": 30,
                     "subject_ids": [],
                     "direct": False,
                 },
@@ -1388,6 +1393,7 @@ def test_run_command_handles_pytest_failure(
                     "passed": False,
                     "exit_code": 1,
                     "duration_seconds": 2.0,
+                    "timeout_seconds": 300,
                     "failure_type": "AssertionError",
                     "summary": {
                         "error_type": "AssertionError",
@@ -1526,6 +1532,7 @@ def test_run_command_serializes_verification_report(
                     "passed": True,
                     "exit_code": 0,
                     "duration_seconds": 1.0,
+                    "timeout_seconds": 30,
                     "subject_ids": [],
                     "direct": False,
                 },
@@ -1537,6 +1544,7 @@ def test_run_command_serializes_verification_report(
                     "passed": True,
                     "exit_code": 0,
                     "duration_seconds": 2.0,
+                    "timeout_seconds": 300,
                     "subject_ids": [],
                     "direct": False,
                 },
@@ -1614,5 +1622,68 @@ def test_run_command_serializes_verification_report(
         assert "passed" in check
         assert "exit_code" in check
         assert "duration_seconds" in check
+        assert "timeout_seconds" in check
         assert "subject_ids" in check
         assert "direct" in check
+
+
+def test_create_verification_timeouts_with_defaults() -> None:
+    """Test that _create_verification_timeouts uses defaults when no args provided."""
+    from patchpilot.cli import _create_verification_timeouts
+
+    args = Namespace()
+    timeouts = _create_verification_timeouts(args)
+    
+    assert timeouts.ruff == 30
+    assert timeouts.target_tests == 60
+    assert timeouts.regression_tests == 300
+    assert timeouts.specialized == 60
+
+
+def test_create_verification_timeouts_with_custom_values() -> None:
+    """Test that _create_verification_timeouts uses custom values when provided."""
+    from patchpilot.cli import _create_verification_timeouts
+
+    args = Namespace(
+        timeout_ruff=15,
+        timeout_target_tests=90,
+        timeout_regression_tests=600,
+        timeout_specialized=120,
+    )
+    timeouts = _create_verification_timeouts(args)
+    
+    assert timeouts.ruff == 15
+    assert timeouts.target_tests == 90
+    assert timeouts.regression_tests == 600
+    assert timeouts.specialized == 120
+
+
+def test_create_verification_timeouts_with_partial_values() -> None:
+    """Test that _create_verification_timeouts uses defaults for missing values."""
+    from patchpilot.cli import _create_verification_timeouts
+
+    args = Namespace(
+        timeout_ruff=20,
+        timeout_regression_tests=450,
+    )
+    timeouts = _create_verification_timeouts(args)
+    
+    assert timeouts.ruff == 20
+    assert timeouts.target_tests == 60  # default
+    assert timeouts.regression_tests == 450
+    assert timeouts.specialized == 60  # default
+
+
+def test_create_verification_timeouts_validation() -> None:
+    """Test that _create_verification_timeouts validates timeout values."""
+    from patchpilot.cli import _create_verification_timeouts
+
+    # Test invalid value (should raise ValueError)
+    args = Namespace(timeout_ruff=0)
+    with pytest.raises(ValueError, match="must be positive"):
+        _create_verification_timeouts(args)
+
+    # Test value exceeding maximum
+    args = Namespace(timeout_ruff=200)
+    with pytest.raises(ValueError, match="must be at most 120"):
+        _create_verification_timeouts(args)

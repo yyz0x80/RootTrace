@@ -18,6 +18,7 @@ from patchpilot.planning.schema import (
 from patchpilot.planning.scope_gate import ScopeGateResult
 from patchpilot.prompts import REPAIR_SYSTEM_PROMPT
 from patchpilot.tools import WorkspaceChange
+from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.workflow.failure_classifier import FailureType
 from patchpilot.workflow.runner import (
@@ -70,6 +71,56 @@ class TestWorkflowRunnerInit:
         assert runner.verifier == mock_verifier
         assert runner.workspace == mock_workspace
         assert runner.sandbox is None
+
+    def test_init_with_custom_timeouts(self):
+        """Test initialization with custom verification timeouts."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        custom_timeouts = VerificationTimeouts(
+            ruff=15,
+            target_tests=90,
+            regression_tests=600,
+            specialized=120,
+        )
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+            verification_timeouts=custom_timeouts,
+        )
+
+        assert runner.verification_timeouts == custom_timeouts
+        assert runner.verification_timeouts.ruff == 15
+        assert runner.verification_timeouts.target_tests == 90
+        assert runner.verification_timeouts.regression_tests == 600
+        assert runner.verification_timeouts.specialized == 120
+
+    def test_init_with_default_timeouts(self):
+        """Test initialization uses default timeouts when not provided."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Should use default timeouts
+        assert runner.verification_timeouts.ruff == 30
+        assert runner.verification_timeouts.target_tests == 60
+        assert runner.verification_timeouts.regression_tests == 300
+        assert runner.verification_timeouts.specialized == 60
 
 
 class TestWorkflowRunnerExecute:

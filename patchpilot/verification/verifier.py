@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from patchpilot.sandbox.docker_runner import DockerSandbox
+from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.verification.error_parser import parse_failure
 from patchpilot.verification.report import (
     CheckReport,
@@ -56,15 +57,22 @@ class Verifier:
         sandbox: DockerSandbox instance for isolated command execution
     """
 
-    def __init__(self, sandbox: DockerSandbox, workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        sandbox: DockerSandbox,
+        workspace_root: Path | None = None,
+        timeouts: VerificationTimeouts | None = None,
+    ) -> None:
         """Initialize the Verifier with a Docker sandbox.
 
         Args:
             sandbox: DockerSandbox instance for running verification commands
             workspace_root: Optional workspace root path for specialized checks
+            timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
         """
         self.sandbox = sandbox
         self.workspace_root = workspace_root
+        self.timeouts = timeouts or VerificationTimeouts()
         self._specialized_verifier = None
 
     def _get_specialized_verifier(self):
@@ -79,7 +87,10 @@ class Verifier:
         if self._specialized_verifier is None:
             from patchpilot.verification.specialized import SpecializedVerifier
 
-            self._specialized_verifier = SpecializedVerifier(self.workspace_root)
+            self._specialized_verifier = SpecializedVerifier(
+                self.workspace_root,
+                timeouts=self.timeouts,
+            )
 
         return self._specialized_verifier
 
@@ -116,7 +127,7 @@ class Verifier:
         regression_command = "python -m pytest -q -p no:cacheprovider"
         result = self.sandbox.run(
             regression_command,
-            timeout_seconds=60,
+            timeout_seconds=self.timeouts.regression_tests,
         )
 
         regression_check = self._create_check_report(
@@ -125,6 +136,7 @@ class Verifier:
             level="BASELINE_REGRESSION",
             command=regression_command,
             result=result,
+            timeout_seconds=self.timeouts.regression_tests,
             subject_ids=subject_ids or [],
             direct=False,
         )
@@ -138,7 +150,7 @@ class Verifier:
             target_command = f"python -m pytest {targets} -q -p no:cacheprovider"
             result = self.sandbox.run(
                 target_command,
-                timeout_seconds=60,
+                timeout_seconds=self.timeouts.target_tests,
             )
 
             target_check = self._create_check_report(
@@ -147,6 +159,7 @@ class Verifier:
                 level="BASELINE_TARGET",
                 command=target_command,
                 result=result,
+                timeout_seconds=self.timeouts.target_tests,
                 subject_ids=subject_ids or [],
                 direct=True,
             )
@@ -218,7 +231,7 @@ class Verifier:
         ruff_command = "ruff check --no-cache ."
         ruff_result = self.sandbox.run(
             ruff_command,
-            timeout_seconds=60,
+            timeout_seconds=self.timeouts.ruff,
         )
 
         ruff_check = self._create_check_report(
@@ -227,6 +240,7 @@ class Verifier:
             level="LEVEL_1_LINT",
             command=ruff_command,
             result=ruff_result,
+            timeout_seconds=self.timeouts.ruff,
             subject_ids=[],
             direct=False,
         )
@@ -240,7 +254,7 @@ class Verifier:
             target_command = f"python -m pytest {targets} -q -p no:cacheprovider"
             target_result = self.sandbox.run(
                 target_command,
-                timeout_seconds=60,
+                timeout_seconds=self.timeouts.target_tests,
             )
 
             target_check = self._create_check_report(
@@ -249,6 +263,7 @@ class Verifier:
                 level="LEVEL_2_TARGET_TESTS",
                 command=target_command,
                 result=target_result,
+                timeout_seconds=self.timeouts.target_tests,
                 subject_ids=direct_subject_ids or subject_ids or [],
                 direct=bool(direct_subject_ids),
             )
@@ -267,7 +282,7 @@ class Verifier:
         regression_command = "python -m pytest -q -p no:cacheprovider"
         regression_result = self.sandbox.run(
             regression_command,
-            timeout_seconds=60,
+            timeout_seconds=self.timeouts.regression_tests,
         )
 
         regression_check = self._create_check_report(
@@ -276,6 +291,7 @@ class Verifier:
             level="LEVEL_3_REGRESSION",
             command=regression_command,
             result=regression_result,
+            timeout_seconds=self.timeouts.regression_tests,
             subject_ids=[],  # Regression tests don't map to specific ACs
             direct=False,
         )
@@ -347,6 +363,7 @@ class Verifier:
         level: str,
         command: str,
         result,
+        timeout_seconds: int,
         subject_ids: list[str],
         direct: bool,
     ) -> CheckReport:
@@ -358,6 +375,7 @@ class Verifier:
             level: Verification level identifier
             command: Command that was executed
             result: Command execution result from sandbox
+            timeout_seconds: Timeout budget that was configured for this check
             subject_ids: List of acceptance criteria IDs
             direct: Whether this provides direct evidence
 
@@ -373,6 +391,7 @@ class Verifier:
                 passed=True,
                 exit_code=result.exit_code,
                 duration_seconds=result.duration_seconds,
+                timeout_seconds=timeout_seconds,
                 subject_ids=subject_ids,
                 direct=direct,
             )
@@ -389,6 +408,7 @@ class Verifier:
             passed=False,
             exit_code=result.exit_code,
             duration_seconds=result.duration_seconds,
+            timeout_seconds=timeout_seconds,
             failure_type=failure_type.value,
             summary=asdict(summary),
             subject_ids=subject_ids,
@@ -454,6 +474,7 @@ class Verifier:
                     passed=False,
                     exit_code=1,
                     duration_seconds=0.0,
+                    timeout_seconds=0,  # Constraint audit doesn't use timeout
                     failure_type="audit_error",
                     summary={
                         "error": "Constraint audit execution failed",
@@ -475,6 +496,7 @@ class Verifier:
                     passed=True,
                     exit_code=0,
                     duration_seconds=0.0,
+                    timeout_seconds=0,  # Constraint audit doesn't use timeout
                     subject_ids=[],
                     direct=False,
                 )
@@ -494,6 +516,7 @@ class Verifier:
                     passed=False,
                     exit_code=1,
                     duration_seconds=0.0,
+                    timeout_seconds=0,  # Constraint audit doesn't use timeout
                     failure_type="policy_violation",
                     summary={
                         "violation_type": "hard_policy",

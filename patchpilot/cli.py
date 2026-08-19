@@ -35,6 +35,7 @@ from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
+from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.result import PrepareSummary, RunSummary
 from patchpilot.workflow.runner import (
@@ -75,6 +76,33 @@ def _create_provider(
         ValueError: If provider initialization fails
     """
     return create_provider_from_config(model_name=model_override, config_path=config_path)
+
+
+def _create_verification_timeouts(args: argparse.Namespace) -> VerificationTimeouts:
+    """Create VerificationTimeouts from CLI arguments.
+
+    Args:
+        args: Parsed CLI arguments with optional timeout values
+
+    Returns:
+        VerificationTimeouts instance with values from CLI or defaults
+
+    Raises:
+        ValueError: If any timeout value is invalid
+    """
+    timeout_dict = {}
+    if hasattr(args, 'timeout_ruff') and args.timeout_ruff is not None:
+        timeout_dict['ruff'] = args.timeout_ruff
+    if hasattr(args, 'timeout_target_tests') and args.timeout_target_tests is not None:
+        timeout_dict['target_tests'] = args.timeout_target_tests
+    if hasattr(args, 'timeout_regression_tests') and args.timeout_regression_tests is not None:
+        timeout_dict['regression_tests'] = args.timeout_regression_tests
+    if hasattr(args, 'timeout_specialized') and args.timeout_specialized is not None:
+        timeout_dict['specialized'] = args.timeout_specialized
+
+    if timeout_dict:
+        return VerificationTimeouts.from_dict(timeout_dict)
+    return VerificationTimeouts()
 
 
 @dataclass(frozen=True)
@@ -310,6 +338,30 @@ def main() -> None:
         default=None,
         help="Stable evaluation task identifier (optional for run command)",
     )
+    run_parser.add_argument(
+        "--timeout-ruff",
+        type=int,
+        default=None,
+        help="Timeout in seconds for Ruff linting (default: 30)"
+    )
+    run_parser.add_argument(
+        "--timeout-target-tests",
+        type=int,
+        default=None,
+        help="Timeout in seconds for target pytest runs (default: 60)"
+    )
+    run_parser.add_argument(
+        "--timeout-regression-tests",
+        type=int,
+        default=None,
+        help="Timeout in seconds for full regression test suites (default: 300)"
+    )
+    run_parser.add_argument(
+        "--timeout-specialized",
+        type=int,
+        default=None,
+        help="Timeout in seconds for specialized verification checks (default: 60)"
+    )
     
     # execute subcommand
     execute_parser = subparsers.add_parser("execute", help="Execute an approved change plan")
@@ -367,6 +419,30 @@ def main() -> None:
         required=True,
         help="Stable evaluation task identifier",
     )
+    execute_parser.add_argument(
+        "--timeout-ruff",
+        type=int,
+        default=None,
+        help="Timeout in seconds for Ruff linting (default: 30)"
+    )
+    execute_parser.add_argument(
+        "--timeout-target-tests",
+        type=int,
+        default=None,
+        help="Timeout in seconds for target pytest runs (default: 60)"
+    )
+    execute_parser.add_argument(
+        "--timeout-regression-tests",
+        type=int,
+        default=None,
+        help="Timeout in seconds for full regression test suites (default: 300)"
+    )
+    execute_parser.add_argument(
+        "--timeout-specialized",
+        type=int,
+        default=None,
+        help="Timeout in seconds for specialized verification checks (default: 60)"
+    )
 
     baseline_parser = subparsers.add_parser(
         "baseline",
@@ -380,6 +456,30 @@ def main() -> None:
     baseline_parser.add_argument("--max-repairs", type=int, default=0)
     baseline_parser.add_argument("--output-dir", required=True)
     baseline_parser.add_argument("--task-id", required=True)
+    baseline_parser.add_argument(
+        "--timeout-ruff",
+        type=int,
+        default=None,
+        help="Timeout in seconds for Ruff linting (default: 30)"
+    )
+    baseline_parser.add_argument(
+        "--timeout-target-tests",
+        type=int,
+        default=None,
+        help="Timeout in seconds for target pytest runs (default: 60)"
+    )
+    baseline_parser.add_argument(
+        "--timeout-regression-tests",
+        type=int,
+        default=None,
+        help="Timeout in seconds for full regression test suites (default: 300)"
+    )
+    baseline_parser.add_argument(
+        "--timeout-specialized",
+        type=int,
+        default=None,
+        help="Timeout in seconds for specialized verification checks (default: 60)"
+    )
     
     args = parser.parse_args()
     
@@ -715,11 +815,13 @@ def handle_run(args) -> None:
         )
         
         # Create workflow runner with canonical verifier
+        verification_timeouts = _create_verification_timeouts(args)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,  # Use built-in sandbox verifier
             workspace=workspace,
             max_repair_attempts=args.max_repairs,
+            verification_timeouts=verification_timeouts,
         )
 
         # Execute workflow
@@ -1036,11 +1138,13 @@ def handle_execute(args) -> None:
         )
         
         # Step 8: Create workflow runner
+        verification_timeouts = _create_verification_timeouts(args)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,
             workspace=workspace,
             max_repair_attempts=args.max_repairs,
+            verification_timeouts=verification_timeouts,
         )
 
         # Step 9: Execute workflow
@@ -1252,11 +1356,13 @@ def handle_baseline(args) -> None:
             tools=tools,
             max_rounds=args.max_rounds,
         )
+        verification_timeouts = _create_verification_timeouts(args)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,
             workspace=workspace,
             max_repair_attempts=0,
+            verification_timeouts=verification_timeouts,
         )
 
         output_dir = Path(args.output_dir)

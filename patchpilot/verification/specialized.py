@@ -22,6 +22,7 @@ from patchpilot.planning.schema import (
     ChangePlan,
     StructuralCheckSpec,
 )
+from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.verification.probes.runner import ProbeRunner
 from patchpilot.verification.probes.schema import AcceptanceProbe, ProbeStep
 from patchpilot.verification.report import CheckReport
@@ -45,17 +46,24 @@ class SpecializedVerifier:
         workspace_root: Root directory of the target workspace
         probe_runner: ProbeRunner instance for acceptance probe execution
         structural_runner: StructuralRunner instance for structural check execution
+        timeouts: VerificationTimeouts configuration for specialized checks
     """
 
-    def __init__(self, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        workspace_root: Path,
+        timeouts: VerificationTimeouts | None = None,
+    ) -> None:
         """Initialize the specialized verifier.
 
         Args:
             workspace_root: Root directory of the target workspace
+            timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
         """
         self.workspace_root = workspace_root
         self.probe_runner = ProbeRunner(workspace_root)
         self.structural_runner = StructuralRunner(workspace_root)
+        self.timeouts = timeouts or VerificationTimeouts()
 
     def has_specialized_checks(self, change_plan: ChangePlan) -> bool:
         """Check if the change plan contains any specialized verification specs.
@@ -315,6 +323,7 @@ class SpecializedVerifier:
             passed=result.passed,
             exit_code=0 if result.passed else 1,
             duration_seconds=result.execution_time_seconds,
+            timeout_seconds=self.timeouts.specialized,
             failure_type="probe_failure" if not result.passed else None,
             summary={
                 "probe_id": result.probe_id,
@@ -356,6 +365,7 @@ class SpecializedVerifier:
             passed=result.passed,
             exit_code=0 if result.passed else 1,
             duration_seconds=0.0,  # Structural checks are fast, no precise timing
+            timeout_seconds=self.timeouts.specialized,
             failure_type="structural_failure" if not result.passed else None,
             summary={
                 "check_type": result.check.check_type.value,

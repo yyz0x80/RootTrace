@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from patchpilot.sandbox.docker_runner import CommandResult
+from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.verification.verifier import Verifier
 
 
@@ -229,8 +230,72 @@ def test_verify_command_arguments() -> None:
 
     # Verify sandbox.run was called with timeout for each command
     assert sandbox_mock.run.call_count == 2
-    for call in sandbox_mock.run.call_args_list:
-        assert call[1]["timeout_seconds"] == 60
+    # First call should use ruff timeout (30s default)
+    assert sandbox_mock.run.call_args_list[0][1]["timeout_seconds"] == 30
+    # Second call should use regression timeout (300s default)
+    assert sandbox_mock.run.call_args_list[1][1]["timeout_seconds"] == 300
+
+
+def test_verify_with_custom_timeouts() -> None:
+    """Test verify uses custom timeout values."""
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=2.0,
+        ),
+    ]
+
+    custom_timeouts = VerificationTimeouts(
+        ruff=15,
+        regression_tests=600,
+    )
+    verifier = Verifier(sandbox=sandbox_mock, timeouts=custom_timeouts)
+    verifier.verify(run_id="test-run-7")
+
+    # Verify custom timeouts were used
+    assert sandbox_mock.run.call_count == 2
+    assert sandbox_mock.run.call_args_list[0][1]["timeout_seconds"] == 15
+    assert sandbox_mock.run.call_args_list[1][1]["timeout_seconds"] == 600
+
+
+def test_verify_timeout_in_check_report() -> None:
+    """Test that timeout values are recorded in check reports."""
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=2.0,
+        ),
+    ]
+
+    custom_timeouts = VerificationTimeouts(ruff=45, regression_tests=900)
+    verifier = Verifier(sandbox=sandbox_mock, timeouts=custom_timeouts)
+    report = verifier.verify(run_id="test-run-8")
+
+    # Verify timeout values are recorded in check reports
+    assert report.checks[0].timeout_seconds == 45
+    assert report.checks[1].timeout_seconds == 900
 
 
 def test_verify_baseline_all_checks_pass() -> None:

@@ -35,6 +35,7 @@ class CheckReport:
         passed: Whether the check passed (exit code 0)
         exit_code: The process exit code from command execution
         duration_seconds: Execution time in seconds
+        timeout_seconds: Timeout budget that was configured for this check
         failure_type: Categorized failure type if check failed (e.g., "AssertionError")
         summary: Additional structured summary data for the check result
         subject_ids: List of acceptance criteria or constraint IDs associated with this check
@@ -48,6 +49,7 @@ class CheckReport:
     passed: bool
     exit_code: int
     duration_seconds: float
+    timeout_seconds: int = 60
     verification_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     failure_type: str | None = None
     summary: dict[str, Any] | None = None
