@@ -762,7 +762,8 @@ class WorkflowRunner:
             if change_plan is not None:
                 logger.info("Running runtime scope validation")
                 try:
-                    validate_actual_changes(change_plan, actual_changes)
+                    policy_set = get_builtin_policies()
+                    validate_actual_changes(change_plan, actual_changes, policy_set)
                     logger.info("Runtime scope validation passed")
                     ExecuteLogger.log_scope_validation(allowed=True)
                 except RuntimeError as e:
