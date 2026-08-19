@@ -96,12 +96,10 @@ class VerificationReport:
         """Populate phase-specific lists from checks after initialization."""
         # Ensure phase-specific lists are populated from checks
         for check in self.checks:
-            if check.phase == "baseline":
-                if check not in self.baseline_checks:
-                    self.baseline_checks.append(check)
-            elif check.phase == "post_patch":
-                if check not in self.post_patch_checks:
-                    self.post_patch_checks.append(check)
+            if check.phase == "baseline" and check not in self.baseline_checks:
+                self.baseline_checks.append(check)
+            elif check.phase == "post_patch" and check not in self.post_patch_checks:
+                self.post_patch_checks.append(check)
 
     def add_check(self, check: CheckReport) -> None:
         """Add a check report to the verification report.
@@ -177,6 +175,46 @@ class VerificationReport:
             List of CheckReport objects from the post-patch phase
         """
         return self.post_patch_checks
+
+    def merge_baseline(self, baseline_report: VerificationReport) -> None:
+        """Merge baseline checks into this report for comparison.
+
+        This method integrates baseline verification checks into the current
+        (typically post-patch) report to enable behavior change analysis.
+        The merged report contains both baseline and post-patch checks while
+        maintaining internal consistency across all check lists.
+
+        Args:
+            baseline_report: VerificationReport containing baseline checks to merge
+
+        Notes:
+            - Baseline checks are added to the master `checks` list
+            - `baseline_checks` is populated from the baseline report
+            - `post_patch_checks` remains unchanged (contains only post-patch checks)
+            - The overall `passed` status is NOT affected by baseline failures
+              (baseline failures are for comparison, not for determining final success)
+            - Duplicate checks are avoided by checking verification_id
+        """
+        # Get baseline checks from the baseline report
+        baseline_checks_to_merge = baseline_report.get_baseline_checks()
+
+        # Add each baseline check to this report if not already present
+        for baseline_check in baseline_checks_to_merge:
+            # Check if this check is already in our baseline_checks (avoid duplicates)
+            if not any(
+                existing.verification_id == baseline_check.verification_id
+                for existing in self.baseline_checks
+            ):
+                # Add to master checks list
+                self.checks.insert(0, baseline_check)  # Insert at beginning for chronological order
+                # Add to baseline_checks list
+                self.baseline_checks.append(baseline_check)
+
+        # Ensure post_patch_checks is correctly populated from existing checks
+        # (in case it wasn't already)
+        self.post_patch_checks = [
+            check for check in self.checks if check.phase == "post_patch"
+        ]
 
     def total_duration(self) -> float:
         """Calculate total execution time across all checks.

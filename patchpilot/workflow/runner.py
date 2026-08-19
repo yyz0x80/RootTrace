@@ -629,6 +629,7 @@ class WorkflowRunner:
         self._start_sandbox(workspace_path)
 
         report: VerificationReport | None = None
+        baseline_report: VerificationReport | None = None
         try:
             # Step 7: Verify the sandbox baseline before model execution.
             # The injected callback is retained as a legacy test/custom seam.
@@ -785,6 +786,10 @@ class WorkflowRunner:
                 retry_count=retry_count,
             )
 
+            # Merge baseline checks into the post-patch report for behavior comparison
+            if baseline_report is not None:
+                report.merge_baseline(baseline_report)
+
             # Log verification results
             verification_results = {}
             for check in report.checks:
@@ -931,6 +936,10 @@ class WorkflowRunner:
                     change_plan=change_plan,
                     retry_count=retry_count,
                 )
+
+                # Merge baseline checks into the repair report for behavior comparison
+                if baseline_report is not None:
+                    report.merge_baseline(baseline_report)
 
             # Step 14: Generate patch with all changes
             logger.info("Generating patch with all changes")

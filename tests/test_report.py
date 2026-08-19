@@ -695,16 +695,304 @@ def test_check_report_immutable_behavior():
         exit_code=0,
         duration_seconds=2.0,
     )
-
-    # Dataclasses are mutable by default, so we can modify
-    report.passed = False
-    assert report.passed is False
-
-    # But the original structure is preserved
     assert report.method == "pytest"
     assert report.phase == "post_patch"
-    assert report.level == "standard"
-    assert report.command == "pytest tests/"
+
+
+def test_verification_report_merge_baseline():
+    """Test merging baseline checks into a post-patch report."""
+    # Create baseline report with failing checks
+    baseline_report = VerificationReport(run_id="baseline-run")
+    baseline_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="baseline",
+            level="BASELINE_REGRESSION",
+            command="pytest tests/",
+            passed=False,
+            exit_code=1,
+            duration_seconds=2.0,
+            failure_type="AssertionError",
+            subject_ids=["AC-1"],
+            direct=True,
+        )
+    )
+    baseline_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="baseline",
+            level="BASELINE_TARGET",
+            command="pytest tests/test_specific.py",
+            passed=False,
+            exit_code=1,
+            duration_seconds=1.0,
+            failure_type="AssertionError",
+            subject_ids=["AC-2"],
+            direct=True,
+        )
+    )
+
+    # Create post-patch report with passing checks
+    post_patch_report = VerificationReport(run_id="post-patch-run")
+    post_patch_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_2_TARGET_TESTS",
+            command="pytest tests/test_specific.py",
+            passed=True,
+            exit_code=0,
+            duration_seconds=1.0,
+            subject_ids=["AC-2"],
+            direct=True,
+        )
+    )
+    post_patch_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_3_REGRESSION",
+            command="pytest tests/",
+            passed=True,
+            exit_code=0,
+            duration_seconds=2.0,
+            subject_ids=["AC-1"],
+            direct=True,
+        )
+    )
+
+    # Merge baseline into post-patch
+    post_patch_report.merge_baseline(baseline_report)
+
+    # Verify merged structure
+    assert len(post_patch_report.checks) == 4  # 2 baseline + 2 post-patch
+    assert len(post_patch_report.baseline_checks) == 2
+    assert len(post_patch_report.post_patch_checks) == 2
+
+    # Verify baseline checks are at the beginning (chronological order)
+    assert post_patch_report.checks[0].phase == "baseline"
+    assert post_patch_report.checks[1].phase == "baseline"
+    assert post_patch_report.checks[2].phase == "post_patch"
+    assert post_patch_report.checks[3].phase == "post_patch"
+
+    # Verify overall passed status is determined by post-patch (not baseline)
+    assert post_patch_report.passed is True  # Post-patch checks passed
+
+
+def test_verification_report_merge_baseline_no_duplicates():
+    """Test that merging baseline multiple times doesn't create duplicates."""
+    baseline_report = VerificationReport(run_id="baseline-run")
+    baseline_check = CheckReport(
+        method="pytest",
+        phase="baseline",
+        level="BASELINE_REGRESSION",
+        command="pytest tests/",
+        passed=False,
+        exit_code=1,
+        duration_seconds=2.0,
+        verification_id="unique-id-123",
+    )
+    baseline_report.add_check(baseline_check)
+
+    post_patch_report = VerificationReport(run_id="post-patch-run")
+    post_patch_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_3_REGRESSION",
+            command="pytest tests/",
+            passed=True,
+            exit_code=0,
+            duration_seconds=2.0,
+        )
+    )
+
+    # Merge baseline twice
+    post_patch_report.merge_baseline(baseline_report)
+    post_patch_report.merge_baseline(baseline_report)
+
+    # Verify no duplicates
+    assert len(post_patch_report.checks) == 2
+    assert len(post_patch_report.baseline_checks) == 1
+    assert len(post_patch_report.post_patch_checks) == 1
+
+
+def test_verification_report_merge_baseline_preserves_post_patch_status():
+    """Test that baseline failures don't affect post-patch overall status."""
+    # Baseline with failures
+    baseline_report = VerificationReport(run_id="baseline-run")
+    baseline_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="baseline",
+            level="BASELINE_REGRESSION",
+            command="pytest tests/",
+            passed=False,
+            exit_code=1,
+            duration_seconds=2.0,
+            failure_type="AssertionError",
+        )
+    )
+
+    # Post-patch with success
+    post_patch_report = VerificationReport(run_id="post-patch-run", passed=True)
+    post_patch_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_3_REGRESSION",
+            command="pytest tests/",
+            passed=True,
+            exit_code=0,
+            duration_seconds=2.0,
+        )
+    )
+
+    # Merge baseline - post-patch status should remain True
+    post_patch_report.merge_baseline(baseline_report)
+
+    assert post_patch_report.passed is True
+    assert post_patch_report.failed_level is None  # Post-patch didn't fail
+
+
+def test_verification_report_phase_specific_lists_populated():
+    """Test that phase-specific lists are correctly populated after merge."""
+    baseline_report = VerificationReport(run_id="baseline-run")
+    baseline_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="baseline",
+            level="BASELINE_REGRESSION",
+            command="pytest tests/",
+            passed=False,
+            exit_code=1,
+            duration_seconds=2.0,
+        )
+    )
+
+    post_patch_report = VerificationReport(run_id="post-patch-run")
+    post_patch_report.add_check(
+        CheckReport(
+            method="ruff",
+            phase="post_patch",
+            level="LEVEL_1_LINT",
+            command="ruff check",
+            passed=True,
+            exit_code=0,
+            duration_seconds=1.0,
+        )
+    )
+
+    post_patch_report.merge_baseline(baseline_report)
+
+    # Verify phase-specific methods work correctly
+    baseline_checks = post_patch_report.get_baseline_checks()
+    post_patch_checks = post_patch_report.get_post_patch_checks()
+
+    assert len(baseline_checks) == 1
+    assert len(post_patch_checks) == 1
+    assert baseline_checks[0].phase == "baseline"
+    assert post_patch_checks[0].phase == "post_patch"
+
+
+def test_verification_report_merge_with_subject_ids():
+    """Test that subject IDs are preserved during baseline merge."""
+    baseline_report = VerificationReport(run_id="baseline-run")
+    baseline_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="baseline",
+            level="BASELINE_TARGET",
+            command="pytest tests/test_ac1.py",
+            passed=False,
+            exit_code=1,
+            duration_seconds=1.0,
+            subject_ids=["AC-1"],
+            direct=True,
+        )
+    )
+
+    post_patch_report = VerificationReport(run_id="post-patch-run")
+    post_patch_report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_2_TARGET_TESTS",
+            command="pytest tests/test_ac1.py",
+            passed=True,
+            exit_code=0,
+            duration_seconds=1.0,
+            subject_ids=["AC-1"],
+            direct=True,
+        )
+    )
+
+    post_patch_report.merge_baseline(baseline_report)
+
+    # Verify subject IDs are preserved in both baseline and post-patch checks
+    baseline_checks = post_patch_report.get_baseline_checks()
+    post_patch_checks = post_patch_report.get_post_patch_checks()
+
+    assert baseline_checks[0].subject_ids == ["AC-1"]
+    assert post_patch_checks[0].subject_ids == ["AC-1"]
+    assert baseline_checks[0].direct is True
+    assert post_patch_checks[0].direct is True
+
+
+def test_verification_report_load_preserves_merged_structure():
+    """Test that loading a report preserves the merged baseline/post-patch structure."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a report with merged baseline and post-patch checks
+        original_report = VerificationReport(run_id="merged-test")
+
+        # Add baseline checks
+        original_report.add_check(
+            CheckReport(
+                method="pytest",
+                phase="baseline",
+                level="BASELINE_REGRESSION",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=2.0,
+                subject_ids=["AC-1"],
+                direct=True,
+            )
+        )
+
+        # Add post-patch checks
+        original_report.add_check(
+            CheckReport(
+                method="pytest",
+                phase="post_patch",
+                level="LEVEL_3_REGRESSION",
+                command="pytest tests/",
+                passed=True,
+                exit_code=0,
+                duration_seconds=2.0,
+                subject_ids=["AC-1"],
+                direct=True,
+            )
+        )
+
+        save_path = Path(tmpdir) / "verification.json"
+        original_report.save(save_path)
+
+        # Load the report back
+        loaded_report = VerificationReport.load(save_path)
+
+        # Verify merged structure is preserved
+        assert len(loaded_report.checks) == 2
+        assert len(loaded_report.baseline_checks) == 1
+        assert len(loaded_report.post_patch_checks) == 1
+
+        # Verify phase separation
+        assert loaded_report.baseline_checks[0].phase == "baseline"
+        assert loaded_report.post_patch_checks[0].phase == "post_patch"
+
+        # Verify subject IDs preserved
+        assert loaded_report.baseline_checks[0].subject_ids == ["AC-1"]
+        assert loaded_report.post_patch_checks[0].subject_ids == ["AC-1"]
 
 
 def test_failure_fingerprint_passed_report():

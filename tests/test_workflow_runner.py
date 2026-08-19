@@ -248,6 +248,82 @@ class TestWorkflowRunnerExecute:
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1
 
+    def test_repair_attempt_preserves_baseline_checks(self):
+        """Test that repair attempt reports preserve baseline checks for comparison."""
+        # Test the VerificationReport.merge_baseline method directly
+        baseline_report = VerificationReport(passed=False)
+        baseline_report.add_check(
+            CheckReport(
+                method="pytest",
+                phase="baseline",
+                level="BASELINE_REGRESSION",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=2.0,
+                failure_type="AssertionError",
+                subject_ids=["AC-1"],
+                direct=True,
+            )
+        )
+
+        # First post-patch report fails
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                method="pytest",
+                phase="post_patch",
+                level="LEVEL_2_TARGET_TESTS",
+                command="pytest tests/test_module.py",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="TypeError",
+                subject_ids=["AC-1"],
+                direct=True,
+            )
+        )
+
+        # Merge baseline into failed report
+        failed_report.merge_baseline(baseline_report)
+
+        # Verify merged structure
+        assert len(failed_report.checks) == 2  # baseline + post-patch
+        assert len(failed_report.baseline_checks) == 1
+        assert len(failed_report.post_patch_checks) == 1
+
+        # Second post-patch report (after repair) passes
+        success_report = VerificationReport(passed=True)
+        success_report.add_check(
+            CheckReport(
+                method="pytest",
+                phase="post_patch",
+                level="LEVEL_2_TARGET_TESTS",
+                command="pytest tests/test_module.py",
+                passed=True,
+                exit_code=0,
+                duration_seconds=1.0,
+                subject_ids=["AC-1"],
+                direct=True,
+            )
+        )
+
+        # Merge baseline into success report (simulating repair completion)
+        success_report.merge_baseline(baseline_report)
+
+        # Verify merged structure in final report
+        assert len(success_report.checks) == 2  # baseline + post-patch
+        assert len(success_report.baseline_checks) == 1
+        assert len(success_report.post_patch_checks) == 1
+
+        # Verify evidence mapping can compare baseline vs post-patch
+        baseline_checks = success_report.get_baseline_checks()
+        post_patch_checks = success_report.get_post_patch_checks()
+        
+        assert baseline_checks[0].passed is False
+        assert post_patch_checks[0].passed is True
+
     def test_initial_agent_error_with_partial_patch_enters_repair(self):
         """Verify and repair a partial patch left by an AgentLoop error."""
         mock_agent_loop = Mock(spec=AgentLoop)
