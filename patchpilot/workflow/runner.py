@@ -54,7 +54,10 @@ from patchpilot.tools import (
     _get_workspace_changes,
     generate_patch,
 )
-from patchpilot.verification.config import VerificationTimeouts
+from patchpilot.verification.config import (
+    VerificationStrategy,
+    VerificationTimeouts,
+)
 from patchpilot.verification.report import VerificationReport, failure_fingerprint
 from patchpilot.verification.targets import select_target_tests
 from patchpilot.workflow.completion import determine_completion_state
@@ -405,6 +408,7 @@ class WorkflowRunner:
         sandbox: DockerSandbox | None = None,
         max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
         verification_timeouts: VerificationTimeouts | None = None,
+        verification_strategy: VerificationStrategy = VerificationStrategy.BALANCED,
     ) -> None:
         """Initialize the WorkflowRunner with required components.
 
@@ -416,6 +420,7 @@ class WorkflowRunner:
             sandbox: Optional DockerSandbox instance (created if None)
             max_repair_attempts: Maximum number of repair attempts (default: MAX_REPAIR_ATTEMPTS)
             verification_timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
+            verification_strategy: Verification strategy (strict, balanced, focused)
         """
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be non-negative")
@@ -424,6 +429,7 @@ class WorkflowRunner:
         self.verifier = verifier
         self.workspace = workspace
         self.sandbox = sandbox
+        self.verification_strategy = verification_strategy
         self.max_repair_attempts = max_repair_attempts
         self.verification_timeouts = verification_timeouts or VerificationTimeouts()
         self._temp_dir: tempfile.TemporaryDirectory | None = None
@@ -526,6 +532,7 @@ class WorkflowRunner:
                 self.sandbox,
                 workspace_root=self.workspace.root,
                 timeouts=self.verification_timeouts,
+                strategy=self.verification_strategy,
             )
 
         return self._sandbox_verifier

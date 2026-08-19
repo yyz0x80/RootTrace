@@ -35,7 +35,10 @@ from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
-from patchpilot.verification.config import VerificationTimeouts
+from patchpilot.verification.config import (
+    VerificationStrategy,
+    VerificationTimeouts,
+)
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.result import PrepareSummary, RunSummary
 from patchpilot.workflow.runner import (
@@ -103,6 +106,23 @@ def _create_verification_timeouts(args: argparse.Namespace) -> VerificationTimeo
     if timeout_dict:
         return VerificationTimeouts.from_dict(timeout_dict)
     return VerificationTimeouts()
+
+
+def _create_verification_strategy(args: argparse.Namespace) -> VerificationStrategy:
+    """Create VerificationStrategy from CLI arguments.
+
+    Args:
+        args: Parsed CLI arguments with optional strategy value
+
+    Returns:
+        VerificationStrategy instance with value from CLI or default (balanced)
+
+    Raises:
+        ValueError: If the strategy value is invalid
+    """
+    if hasattr(args, 'verification_strategy') and args.verification_strategy is not None:
+        return VerificationStrategy.from_string(args.verification_strategy)
+    return VerificationStrategy.BALANCED
 
 
 @dataclass(frozen=True)
@@ -362,6 +382,13 @@ def main() -> None:
         default=None,
         help="Timeout in seconds for specialized verification checks (default: 60)"
     )
+    run_parser.add_argument(
+        "--verification-strategy",
+        type=str,
+        default=None,
+        choices=["strict", "balanced", "focused"],
+        help="Verification strategy: strict (all tests must pass), balanced (required+affected must pass, optional failures warn), focused (only required must pass) (default: balanced)"
+    )
     
     # execute subcommand
     execute_parser = subparsers.add_parser("execute", help="Execute an approved change plan")
@@ -443,6 +470,13 @@ def main() -> None:
         default=None,
         help="Timeout in seconds for specialized verification checks (default: 60)"
     )
+    execute_parser.add_argument(
+        "--verification-strategy",
+        type=str,
+        default=None,
+        choices=["strict", "balanced", "focused"],
+        help="Verification strategy: strict (all tests must pass), balanced (required+affected must pass, optional failures warn), focused (only required must pass) (default: balanced)"
+    )
 
     baseline_parser = subparsers.add_parser(
         "baseline",
@@ -479,6 +513,13 @@ def main() -> None:
         type=int,
         default=None,
         help="Timeout in seconds for specialized verification checks (default: 60)"
+    )
+    baseline_parser.add_argument(
+        "--verification-strategy",
+        type=str,
+        default=None,
+        choices=["strict", "balanced", "focused"],
+        help="Verification strategy: strict (all tests must pass), balanced (required+affected must pass, optional failures warn), focused (only required must pass) (default: balanced)"
     )
     
     args = parser.parse_args()
@@ -816,12 +857,14 @@ def handle_run(args) -> None:
         
         # Create workflow runner with canonical verifier
         verification_timeouts = _create_verification_timeouts(args)
+        verification_strategy = _create_verification_strategy(args)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,  # Use built-in sandbox verifier
             workspace=workspace,
             max_repair_attempts=args.max_repairs,
             verification_timeouts=verification_timeouts,
+            verification_strategy=verification_strategy,
         )
 
         # Execute workflow
@@ -1139,12 +1182,14 @@ def handle_execute(args) -> None:
         
         # Step 8: Create workflow runner
         verification_timeouts = _create_verification_timeouts(args)
+        verification_strategy = _create_verification_strategy(args)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,
             workspace=workspace,
             max_repair_attempts=args.max_repairs,
             verification_timeouts=verification_timeouts,
+            verification_strategy=verification_strategy,
         )
 
         # Step 9: Execute workflow
@@ -1357,12 +1402,14 @@ def handle_baseline(args) -> None:
             max_rounds=args.max_rounds,
         )
         verification_timeouts = _create_verification_timeouts(args)
+        verification_strategy = _create_verification_strategy(args)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,
             workspace=workspace,
             max_repair_attempts=0,
             verification_timeouts=verification_timeouts,
+            verification_strategy=verification_strategy,
         )
 
         output_dir = Path(args.output_dir)

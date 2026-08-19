@@ -1,20 +1,19 @@
-"""Verification timeout configuration.
+"""Verification timeout and strategy configuration.
 
-This module provides the VerificationTimeouts dataclass which configures
-time budgets for different verification levels. This allows users to customize
-timeout values based on their repository's characteristics while maintaining
-safe defaults.
+This module provides configuration for verification timeouts and tiered
+verification strategies. It allows users to customize verification behavior
+based on their repository's characteristics and confidence requirements.
 
 The configuration supports:
-- Ruff linting (fast, default 30s)
-- Target tests (focused, default 60s)
-- Full regression tests (comprehensive, default 300s)
-- Specialized checks (optional, default 60s)
+- VerificationTimeouts: Time budgets for different verification levels
+- VerificationStrategy: Tiered verification policy (strict, balanced, focused)
+- VerificationTier: Test classification (REQUIRED, AFFECTED, OPTIONAL)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -122,3 +121,53 @@ class VerificationTimeouts:
             "regression_tests": self.regression_tests,
             "specialized": self.specialized,
         }
+
+
+class VerificationTier(str, Enum):
+    """Classification of verification test tiers.
+
+    Tiers represent the confidence level and relationship of tests to the changes:
+    - REQUIRED: Direct target tests, explicit acceptance tests, exact pytest node IDs
+    - AFFECTED: Tests connected to changed files through deterministic dependency analysis
+    - OPTIONAL: Remaining full-suite regression tests
+    """
+
+    REQUIRED = "required"
+    AFFECTED = "affected"
+    OPTIONAL = "optional"
+
+
+class VerificationStrategy(str, Enum):
+    """Tiered verification policy strategies.
+
+    Strategies define how verification results across tiers determine overall success:
+    - strict: Any new post-patch failure blocks VERIFIED
+    - balanced: REQUIRED and AFFECTED must pass; OPTIONAL failure results in PARTIALLY_VERIFIED
+    - focused: REQUIRED tests must pass; missing broader tests prevent full-confidence VERIFIED
+    """
+
+    STRICT = "strict"
+    BALANCED = "balanced"
+    FOCUSED = "focused"
+
+    @classmethod
+    def from_string(cls, value: str) -> VerificationStrategy:
+        """Convert string to VerificationStrategy with validation.
+
+        Args:
+            value: String representation of the strategy
+
+        Returns:
+            VerificationStrategy enum value
+
+        Raises:
+            ValueError: If the string is not a valid strategy
+        """
+        try:
+            return cls(value.lower())
+        except ValueError:
+            valid_strategies = [s.value for s in cls]
+            raise ValueError(
+                f"Invalid verification strategy '{value}'. "
+                f"Valid strategies are: {', '.join(valid_strategies)}"
+            )

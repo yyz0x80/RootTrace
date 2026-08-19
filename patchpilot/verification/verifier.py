@@ -28,14 +28,21 @@ import shlex
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from patchpilot.sandbox.docker_runner import DockerSandbox
-from patchpilot.verification.config import VerificationTimeouts
+from patchpilot.verification.config import (
+    VerificationStrategy,
+    VerificationTimeouts,
+)
 from patchpilot.verification.error_parser import parse_failure
 from patchpilot.verification.report import (
     CheckReport,
     VerificationReport,
+)
+from patchpilot.verification.targets import (
+    SelectionReasonType,
+    TargetTestSelection,
 )
 from patchpilot.workflow.failure_classifier import classify_failure
 
@@ -62,6 +69,7 @@ class Verifier:
         sandbox: DockerSandbox,
         workspace_root: Path | None = None,
         timeouts: VerificationTimeouts | None = None,
+        strategy: VerificationStrategy = VerificationStrategy.BALANCED,
     ) -> None:
         """Initialize the Verifier with a Docker sandbox.
 
@@ -69,10 +77,12 @@ class Verifier:
             sandbox: DockerSandbox instance for running verification commands
             workspace_root: Optional workspace root path for specialized checks
             timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
+            strategy: Verification strategy (strict, balanced, focused)
         """
         self.sandbox = sandbox
         self.workspace_root = workspace_root
         self.timeouts = timeouts or VerificationTimeouts()
+        self.strategy = strategy
         self._specialized_verifier = None
 
     def _get_specialized_verifier(self):
@@ -320,6 +330,313 @@ class Verifier:
             report.failure_type = failed_checks[0].failure_type
 
         return report
+
+    def verify_post_patch_tiered(
+        self,
+        run_id: str,
+        target_selection: TargetTestSelection,
+        changed_files: list[str] | None = None,
+        subject_ids: list[str] | None = None,
+        direct_subject_ids: list[str] | None = None,
+        retry_count: int = 0,
+        change_plan: ChangePlan | None = None,
+        repo_root: Path | None = None,
+        python_files: list[str] | None = None,
+    ) -> VerificationReport:
+        """Run post-patch verification with tiered test classification.
+
+        Executes verification checks in tier order (REQUIRED, AFFECTED, OPTIONAL)
+        and applies the configured verification strategy to determine final status.
+
+        Args:
+            run_id: Unique identifier for this verification run
+            target_selection: TargetTestSelection with classified test selection
+            changed_files: List of actually changed source file paths
+            subject_ids: Optional list of acceptance criteria IDs
+            direct_subject_ids: Optional list of directly exercised acceptance criteria IDs
+            retry_count: Number of retry attempts for failed checks
+            change_plan: Optional ChangePlan with specialized verification specs
+            repo_root: Path to repository root for dependency analysis
+            python_files: List of all Python files in repository
+
+        Returns:
+            VerificationReport containing tiered check results and strategy-based status
+        """
+        checks: list[CheckReport] = []
+        tier_results: dict[str, dict[str, Any]] = {
+            "required": {"total": 0, "passed": 0, "failed": 0, "skipped": 0},
+            "affected": {"total": 0, "passed": 0, "failed": 0, "skipped": 0},
+            "optional": {"total": 0, "passed": 0, "failed": 0, "skipped": 0},
+        }
+
+        # Level 1: Ruff linting (always runs, not tiered)
+        ruff_command = "ruff check --no-cache ."
+        ruff_result = self.sandbox.run(
+            ruff_command,
+            timeout_seconds=self.timeouts.ruff,
+        )
+
+        ruff_check = self._create_check_report(
+            method="ruff",
+            phase="post_patch",
+            level="LEVEL_1_LINT",
+            command=ruff_command,
+            result=ruff_result,
+            timeout_seconds=self.timeouts.ruff,
+            subject_ids=[],
+            direct=False,
+        )
+        checks.append(ruff_check)
+
+        # Classify tests into tiers based on target selection
+        required_tests: list[str] = []
+        affected_tests: list[str] = []
+        optional_tests: list[str] = []
+
+        for selected_test in target_selection.selected_tests:
+            if selected_test.reason.classification == SelectionReasonType.DIRECT:
+                required_tests.append(selected_test.test_id)
+            elif selected_test.reason.classification == SelectionReasonType.AFFECTED:
+                affected_tests.append(selected_test.test_id)
+            else:  # UNRELATED
+                optional_tests.append(selected_test.test_id)
+
+        # Tier 1: REQUIRED tests (direct target tests, explicit acceptance tests)
+        if required_tests:
+            required_checks = self._execute_tier(
+                "required",
+                required_tests,
+                target_selection,
+                tier_results,
+                subject_ids=direct_subject_ids or subject_ids or [],
+                direct=True,
+            )
+            checks.extend(required_checks)
+
+        # Tier 2: AFFECTED tests (dependency analysis)
+        if affected_tests:
+            affected_checks = self._execute_tier(
+                "affected",
+                affected_tests,
+                target_selection,
+                tier_results,
+                subject_ids=subject_ids or [],
+                direct=False,
+            )
+            checks.extend(affected_checks)
+
+        # Tier 2.5: Specialized checks (if change plan provides them)
+        specialized_verifier = self._get_specialized_verifier()
+        if specialized_verifier and change_plan and specialized_verifier.has_specialized_checks(change_plan):
+            specialized_checks = specialized_verifier.execute_specialized_checks(
+                change_plan,
+                phase="post_patch",
+            )
+            # Mark specialized checks as required (they provide direct evidence)
+            for check in specialized_checks:
+                check.tier = "required"
+                check.selection_reason = "Specialized verification check from ChangePlan"
+            checks.extend(specialized_checks)
+            tier_results["required"]["total"] += len(specialized_checks)
+            tier_results["required"]["passed"] += sum(1 for c in specialized_checks if c.passed)
+            tier_results["required"]["failed"] += sum(1 for c in specialized_checks if not c.passed)
+
+        # Tier 3: OPTIONAL tests (remaining regression tests)
+        if optional_tests:
+            optional_checks = self._execute_tier(
+                "optional",
+                optional_tests,
+                target_selection,
+                tier_results,
+                subject_ids=[],
+                direct=False,
+            )
+            checks.extend(optional_checks)
+
+        # If no classified tests, fall back to full regression suite
+        if not required_tests and not affected_tests and not optional_tests:
+            regression_command = "python -m pytest -q -p no:cacheprovider"
+            regression_result = self.sandbox.run(
+                regression_command,
+                timeout_seconds=self.timeouts.regression_tests,
+            )
+
+            regression_check = self._create_check_report(
+                method="pytest",
+                phase="post_patch",
+                level="LEVEL_3_REGRESSION",
+                command=regression_command,
+                result=regression_result,
+                timeout_seconds=self.timeouts.regression_tests,
+                subject_ids=[],
+                direct=False,
+            )
+            regression_check.tier = "optional"
+            regression_check.selection_reason = "Fallback full regression suite (no classified tests)"
+            checks.append(regression_check)
+            tier_results["optional"]["total"] += 1
+            if regression_check.passed:
+                tier_results["optional"]["passed"] += 1
+            else:
+                tier_results["optional"]["failed"] += 1
+
+        # Level 4: Constraint audit (if policy information available)
+        if change_plan:
+            constraint_checks = self._create_constraint_audit_checks(
+                run_id,
+                change_plan,
+            )
+            checks.extend(constraint_checks)
+
+        # Apply verification strategy to determine final status
+        verification_status, passed = self._apply_strategy(
+            tier_results,
+            checks,
+        )
+
+        # Create post-patch report with tier information
+        report = VerificationReport(
+            run_id=run_id,
+            passed=passed,
+            checks=checks,
+            retry_count=retry_count,
+            strategy=self.strategy.value,
+            verification_status=verification_status,
+            tier_summary=tier_results,
+        )
+
+        # Set failure info if any check failed
+        failed_checks = [check for check in checks if not check.passed]
+        if failed_checks:
+            report.failed_level = failed_checks[0].level
+            report.failure_type = failed_checks[0].failure_type
+
+        return report
+
+    def _execute_tier(
+        self,
+        tier: str,
+        test_paths: list[str],
+        target_selection: TargetTestSelection,
+        tier_results: dict[str, dict[str, Any]],
+        subject_ids: list[str],
+        direct: bool,
+    ) -> list[CheckReport]:
+        """Execute tests for a specific tier.
+
+        Args:
+            tier: Tier name (required, affected, optional)
+            test_paths: List of test paths to execute
+            target_selection: TargetTestSelection with classification metadata
+            tier_results: Dictionary to track tier statistics
+            subject_ids: Acceptance criteria IDs for these tests
+            direct: Whether these tests provide direct evidence
+
+        Returns:
+            List of CheckReport objects for this tier
+        """
+        checks: list[CheckReport] = []
+
+        for test_path in test_paths:
+            # Find the selection reason for this test
+            selection_reason = ""
+            for selected_test in target_selection.selected_tests:
+                if selected_test.test_id == test_path:
+                    selection_reason = selected_test.reason.description
+                    break
+
+            # Execute the test
+            targets = " ".join(shlex.quote(test) for test in [test_path])
+            command = f"python -m pytest {targets} -q -p no:cacheprovider"
+            result = self.sandbox.run(
+                command,
+                timeout_seconds=self.timeouts.target_tests,
+            )
+
+            check = self._create_check_report(
+                method="pytest",
+                phase="post_patch",
+                level=f"TIER_{tier.upper()}",
+                command=command,
+                result=result,
+                timeout_seconds=self.timeouts.target_tests,
+                subject_ids=subject_ids,
+                direct=direct,
+            )
+            check.tier = tier
+            check.selection_reason = selection_reason
+            checks.append(check)
+
+            # Update tier statistics
+            tier_results[tier]["total"] += 1
+            if check.passed:
+                tier_results[tier]["passed"] += 1
+            else:
+                tier_results[tier]["failed"] += 1
+
+        return checks
+
+    def _apply_strategy(
+        self,
+        tier_results: dict[str, dict[str, Any]],
+        checks: list[CheckReport],
+    ) -> tuple[str, bool]:
+        """Apply verification strategy to determine final status.
+
+        Args:
+            tier_results: Summary of check results by tier
+            checks: All executed checks
+
+        Returns:
+            Tuple of (verification_status, passed) based on strategy
+        """
+        # Check for Ruff or constraint audit failures (always blocking)
+        non_pytest_failures = [
+            check for check in checks
+            if not check.passed and check.method in ("ruff", "constraint_audit")
+        ]
+        if non_pytest_failures:
+            return "FAILED", False
+
+        required_passed = tier_results["required"]["failed"] == 0
+        affected_passed = tier_results["affected"]["failed"] == 0
+        optional_passed = tier_results["optional"]["failed"] == 0
+
+        has_affected = tier_results["affected"]["total"] > 0
+        has_optional = tier_results["optional"]["total"] > 0
+
+        if self.strategy == VerificationStrategy.STRICT:
+            # Any new post-patch failure blocks VERIFIED
+            if required_passed and affected_passed and optional_passed:
+                return "VERIFIED", True
+            else:
+                return "FAILED", False
+
+        elif self.strategy == VerificationStrategy.BALANCED:
+            # REQUIRED and AFFECTED must pass
+            # OPTIONAL failure results in PARTIALLY_VERIFIED
+            if not required_passed or not affected_passed:
+                return "FAILED", False
+            elif not optional_passed:
+                return "PARTIALLY_VERIFIED", True
+            else:
+                return "VERIFIED", True
+
+        elif self.strategy == VerificationStrategy.FOCUSED:
+            # REQUIRED tests must pass
+            # Missing or failed broader tests prevent full-confidence VERIFIED
+            if not required_passed:
+                return "FAILED", False
+            elif not has_affected and not has_optional:
+                # No broader tests available, but REQUIRED passed
+                return "VERIFIED", True
+            elif not affected_passed or not optional_passed:
+                # Broader tests exist but failed
+                return "PARTIALLY_VERIFIED", True
+            else:
+                return "VERIFIED", True
+
+        return "FAILED", False
 
     def verify(
         self,

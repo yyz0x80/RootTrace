@@ -31,6 +31,7 @@ class CheckReport:
         method: Verification method (e.g., "ruff", "pytest", "acceptance_probe", "structural_check")
         phase: Verification phase (e.g., "baseline", "post_patch", "constraint_audit")
         level: Verification level (e.g., "quick", "standard", "comprehensive")
+        tier: Verification tier (e.g., "required", "affected", "optional")
         command: The command string that was executed
         passed: Whether the check passed (exit code 0)
         exit_code: The process exit code from command execution
@@ -40,6 +41,7 @@ class CheckReport:
         summary: Additional structured summary data for the check result
         subject_ids: List of acceptance criteria or constraint IDs associated with this check
         direct: Whether this check provides direct evidence for the subject_ids
+        selection_reason: Reason why this test was selected (for tiered verification)
     """
 
     method: str
@@ -55,6 +57,8 @@ class CheckReport:
     summary: dict[str, Any] | None = None
     subject_ids: list[str] = field(default_factory=list)
     direct: bool = False
+    tier: str = ""
+    selection_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the check report to a dictionary for serialization.
@@ -82,6 +86,9 @@ class VerificationReport:
         failed_level: The verification level at which failure occurred
         failure_type: Primary failure type classification from workflow
         patch: Git diff patch containing all changes made
+        strategy: Verification strategy used (strict, balanced, focused)
+        verification_status: Detailed verification status (VERIFIED, PARTIALLY_VERIFIED, FAILED)
+        tier_summary: Summary of check results by tier
     """
 
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -93,6 +100,9 @@ class VerificationReport:
     failed_level: str | None = None
     failure_type: str | None = None
     patch: str = ""
+    strategy: str = ""
+    verification_status: str = ""
+    tier_summary: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Populate phase-specific lists from checks after initialization."""
@@ -273,9 +283,14 @@ class VerificationReport:
         data = json.loads(path.read_text(encoding="utf-8"))
 
         # Convert check dicts back to CheckReport objects
-        checks = [
-            CheckReport(**check_data) for check_data in data.get("checks", [])
-        ]
+        checks = []
+        for check_data in data.get("checks", []):
+            # Handle backward compatibility for missing tier and selection_reason fields
+            if "tier" not in check_data:
+                check_data["tier"] = ""
+            if "selection_reason" not in check_data:
+                check_data["selection_reason"] = ""
+            checks.append(CheckReport(**check_data))
         
         # Handle backward compatibility for reports without phase-specific lists
         baseline_checks = [
@@ -303,6 +318,9 @@ class VerificationReport:
             failed_level=data.get("failed_level"),
             failure_type=data.get("failure_type"),
             patch=data.get("patch", ""),
+            strategy=data.get("strategy", ""),
+            verification_status=data.get("verification_status", ""),
+            tier_summary=data.get("tier_summary", {}),
         )
 
 

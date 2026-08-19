@@ -11,7 +11,11 @@ This module provides tools for verifying code changes through:
 - Structural Checkers for AST-based validation
 """
 
-from patchpilot.verification.config import VerificationTimeouts
+from patchpilot.verification.config import (
+    VerificationStrategy,
+    VerificationTier,
+    VerificationTimeouts,
+)
 from patchpilot.verification.error_parser import (
     FailureSummary,
     parse_failure,
@@ -63,6 +67,8 @@ __all__ = [
     "StructuralReport",
     "StructuralRunner",
     "VerificationReport",
+    "VerificationStrategy",
+    "VerificationTier",
     "VerificationTimeouts",
     "Verifier",
     "failure_fingerprint",

@@ -5,7 +5,16 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from patchpilot.sandbox.docker_runner import CommandResult
-from patchpilot.verification.config import VerificationTimeouts
+from patchpilot.verification.config import (
+    VerificationStrategy,
+    VerificationTimeouts,
+)
+from patchpilot.verification.targets import (
+    SelectedTest,
+    SelectionReasonType,
+    TargetTestSelection,
+)
+from patchpilot.verification.targets import TestSelectionReason as SelectionReason
 from patchpilot.verification.verifier import Verifier
 
 
@@ -436,3 +445,499 @@ def test_verify_post_patch_collects_all_evidence() -> None:
 
     # Verify all checks were called (complete evidence collection)
     assert sandbox_mock.run.call_count == 3
+
+
+def test_tiered_verification_strict_policy_with_optional_failure() -> None:
+    """Test strict policy: any new post-patch failure blocks VERIFIED."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, required passes, affected passes, optional fails
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.5,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_optional.py -q -p no:cacheprovider",
+            exit_code=1,
+            stdout="FAILED tests/test_optional.py::test_example",
+            stderr="AssertionError",
+            duration_seconds=1.5,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=["tests/test_required.py", "tests/test_optional.py"],
+        acceptance_criteria=["AC-1"],
+        direct_acceptance_criteria=["AC-1"],
+        selected_tests=[
+            SelectedTest(
+                test_id="tests/test_required.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=["AC-1"],
+                is_direct_evidence=True,
+            ),
+            SelectedTest(
+                test_id="tests/test_optional.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.UNRELATED,
+                    description="No dependency relationship found",
+                ),
+                acceptance_criteria=[],
+                is_direct_evidence=False,
+            ),
+        ],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.STRICT,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-strict-1",
+        target_selection=target_selection,
+    )
+
+    assert report.verification_status == "FAILED"
+    assert report.passed is False
+    assert report.strategy == "strict"
+    assert report.tier_summary["required"]["failed"] == 0
+    assert report.tier_summary["optional"]["failed"] == 1
+
+
+def test_tiered_verification_balanced_policy_with_required_failure() -> None:
+    """Test balanced policy: REQUIRED failure blocks VERIFIED."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, required fails
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+            exit_code=1,
+            stdout="FAILED tests/test_required.py::test_example",
+            stderr="AssertionError",
+            duration_seconds=1.5,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=["tests/test_required.py"],
+        acceptance_criteria=["AC-1"],
+        direct_acceptance_criteria=["AC-1"],
+        selected_tests=[
+            SelectedTest(
+                test_id="tests/test_required.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=["AC-1"],
+                is_direct_evidence=True,
+            ),
+        ],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.BALANCED,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-balanced-1",
+        target_selection=target_selection,
+    )
+
+    assert report.verification_status == "FAILED"
+    assert report.passed is False
+    assert report.strategy == "balanced"
+    assert report.tier_summary["required"]["failed"] == 1
+
+
+def test_tiered_verification_balanced_policy_with_affected_failure() -> None:
+    """Test balanced policy: AFFECTED failure blocks VERIFIED."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, required passes, affected fails
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.5,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_affected.py -q -p no:cacheprovider",
+            exit_code=1,
+            stdout="FAILED tests/test_affected.py::test_example",
+            stderr="AssertionError",
+            duration_seconds=1.5,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=["tests/test_required.py", "tests/test_affected.py"],
+        acceptance_criteria=["AC-1"],
+        direct_acceptance_criteria=["AC-1"],
+        selected_tests=[
+            SelectedTest(
+                test_id="tests/test_required.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=["AC-1"],
+                is_direct_evidence=True,
+            ),
+            SelectedTest(
+                test_id="tests/test_affected.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.AFFECTED,
+                    description="Test imports changed modules: myapp.models",
+                ),
+                acceptance_criteria=[],
+                is_direct_evidence=False,
+            ),
+        ],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.BALANCED,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-balanced-2",
+        target_selection=target_selection,
+    )
+
+    assert report.verification_status == "FAILED"
+    assert report.passed is False
+    assert report.strategy == "balanced"
+    assert report.tier_summary["required"]["failed"] == 0
+    assert report.tier_summary["affected"]["failed"] == 1
+
+
+def test_tiered_verification_balanced_policy_with_optional_failure() -> None:
+    """Test balanced policy: OPTIONAL failure results in PARTIALLY_VERIFIED."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, required passes, affected passes, optional fails
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.5,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_optional.py -q -p no:cacheprovider",
+            exit_code=1,
+            stdout="FAILED tests/test_optional.py::test_example",
+            stderr="AssertionError",
+            duration_seconds=1.5,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=["tests/test_required.py", "tests/test_optional.py"],
+        acceptance_criteria=["AC-1"],
+        direct_acceptance_criteria=["AC-1"],
+        selected_tests=[
+            SelectedTest(
+                test_id="tests/test_required.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=["AC-1"],
+                is_direct_evidence=True,
+            ),
+            SelectedTest(
+                test_id="tests/test_optional.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.UNRELATED,
+                    description="No dependency relationship found",
+                ),
+                acceptance_criteria=[],
+                is_direct_evidence=False,
+            ),
+        ],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.BALANCED,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-balanced-3",
+        target_selection=target_selection,
+    )
+
+    assert report.verification_status == "PARTIALLY_VERIFIED"
+    assert report.passed is True  # PARTIALLY_VERIFIED still returns passed=True
+    assert report.strategy == "balanced"
+    assert report.tier_summary["required"]["failed"] == 0
+    assert report.tier_summary["optional"]["failed"] == 1
+
+
+def test_tiered_verification_focused_policy_with_direct_tests_only() -> None:
+    """Test focused policy: REQUIRED tests must pass for VERIFIED."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, required passes
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.5,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=["tests/test_required.py"],
+        acceptance_criteria=["AC-1"],
+        direct_acceptance_criteria=["AC-1"],
+        selected_tests=[
+            SelectedTest(
+                test_id="tests/test_required.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=["AC-1"],
+                is_direct_evidence=True,
+            ),
+        ],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.FOCUSED,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-focused-1",
+        target_selection=target_selection,
+    )
+
+    assert report.verification_status == "VERIFIED"
+    assert report.passed is True
+    assert report.strategy == "focused"
+    assert report.tier_summary["required"]["failed"] == 0
+
+
+def test_tiered_verification_no_directly_mapped_tests() -> None:
+    """Test tiered verification when no directly mapped tests exist."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, fallback to full regression
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=2.0,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=[],
+        acceptance_criteria=[],
+        direct_acceptance_criteria=[],
+        selected_tests=[],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.BALANCED,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-no-direct-1",
+        target_selection=target_selection,
+    )
+
+    assert report.verification_status == "VERIFIED"
+    assert report.passed is True
+    assert report.tier_summary["optional"]["total"] == 1  # Fallback regression suite
+    assert report.tier_summary["optional"]["passed"] == 1
+
+
+def test_verification_strategy_from_string_valid() -> None:
+    """Test VerificationStrategy.from_string with valid values."""
+    assert VerificationStrategy.from_string("strict") == VerificationStrategy.STRICT
+    assert VerificationStrategy.from_string("balanced") == VerificationStrategy.BALANCED
+    assert VerificationStrategy.from_string("focused") == VerificationStrategy.FOCUSED
+    assert VerificationStrategy.from_string("STRICT") == VerificationStrategy.STRICT  # Case insensitive
+
+
+def test_verification_strategy_from_string_invalid() -> None:
+    """Test VerificationStrategy.from_string with invalid value raises ValueError."""
+    try:
+        VerificationStrategy.from_string("invalid")
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "Invalid verification strategy" in str(e)
+        assert "strict" in str(e)
+        assert "balanced" in str(e)
+        assert "focused" in str(e)
+
+
+def test_tiered_verification_report_serialization() -> None:
+    """Test that tiered verification reports serialize correctly."""
+    sandbox_mock = MagicMock()
+    
+    # Setup: ruff passes, required passes
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+        ),
+        CommandResult(
+            command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.5,
+        ),
+    ]
+
+    target_selection = TargetTestSelection(
+        tests=["tests/test_required.py"],
+        acceptance_criteria=["AC-1"],
+        direct_acceptance_criteria=["AC-1"],
+        selected_tests=[
+            SelectedTest(
+                test_id="tests/test_required.py",
+                reason=SelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=["AC-1"],
+                is_direct_evidence=True,
+            ),
+        ],
+    )
+
+    verifier = Verifier(
+        sandbox=sandbox_mock,
+        strategy=VerificationStrategy.BALANCED,
+    )
+    report = verifier.verify_post_patch_tiered(
+        run_id="test-serialization-1",
+        target_selection=target_selection,
+    )
+
+    # Test serialization
+    report_dict = report.to_dict()
+    assert "strategy" in report_dict
+    assert "verification_status" in report_dict
+    assert "tier_summary" in report_dict
+    assert report_dict["strategy"] == "balanced"
+    assert report_dict["verification_status"] == "VERIFIED"
+    assert "required" in report_dict["tier_summary"]
+    assert "affected" in report_dict["tier_summary"]
+    assert "optional" in report_dict["tier_summary"]
+
+    # Test that checks have tier and selection_reason
+    for check_dict in report_dict["checks"]:
+        assert "tier" in check_dict
+        assert "selection_reason" in check_dict
+
+
+def test_tiered_verification_ruff_failure_blocks_all_strategies() -> None:
+    """Test that Ruff failures block verification regardless of strategy."""
+    target_selection = TargetTestSelection(
+        tests=[],
+        acceptance_criteria=[],
+        direct_acceptance_criteria=[],
+        selected_tests=[],
+    )
+
+    for strategy in [VerificationStrategy.STRICT, VerificationStrategy.BALANCED, VerificationStrategy.FOCUSED]:
+        sandbox_mock = MagicMock()
+        
+        # Setup: ruff fails, fallback regression (for no classified tests case)
+        sandbox_mock.run.side_effect = [
+            CommandResult(
+                command="ruff check --no-cache .",
+                exit_code=1,
+                stdout="",
+                stderr="E501 line too long",
+                duration_seconds=0.5,
+            ),
+            CommandResult(
+                command="python -m pytest -q -p no:cacheprovider",
+                exit_code=0,
+                stdout="",
+                stderr="",
+                duration_seconds=2.0,
+            ),
+        ]
+
+        verifier = Verifier(
+            sandbox=sandbox_mock,
+            strategy=strategy,
+        )
+        report = verifier.verify_post_patch_tiered(
+            run_id=f"test-ruff-block-{strategy.value}",
+            target_selection=target_selection,
+        )
+
+        assert report.verification_status == "FAILED"
+        assert report.passed is False
+        
+        # Reset mock for next iteration
+        sandbox_mock.reset_mock()
