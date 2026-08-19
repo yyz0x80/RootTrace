@@ -136,6 +136,8 @@ class TestWorkflowRunnerExecute:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -204,6 +206,8 @@ class TestWorkflowRunnerExecute:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="python -m pytest tests/test_example.py",
                 passed=False,
@@ -256,6 +260,8 @@ class TestWorkflowRunnerExecute:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="python -m pytest tests/test_example.py",
                 passed=False,
@@ -323,6 +329,8 @@ class TestWorkflowRunnerExecute:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="python -m pytest tests/test_example.py",
                 passed=False,
@@ -382,6 +390,8 @@ class TestWorkflowRunnerExecute:
         first_report.failure_type = FailureType.CODE_FAILURE
         first_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -397,6 +407,8 @@ class TestWorkflowRunnerExecute:
         unrecoverable_report.failure_type = FailureType.ENVIRONMENT_FAILURE
         unrecoverable_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -465,6 +477,8 @@ class TestWorkflowRunnerExecute:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -535,6 +549,8 @@ class TestWorkflowRunnerExecute:
         report1.failure_type = FailureType.CODE_FAILURE
         report1.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -549,6 +565,8 @@ class TestWorkflowRunnerExecute:
         report2.failure_type = FailureType.CODE_FAILURE
         report2.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -563,6 +581,8 @@ class TestWorkflowRunnerExecute:
         report3.failure_type = FailureType.CODE_FAILURE
         report3.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -925,6 +945,8 @@ class TestWorkflowRunnerBuildRepairPrompt:
         failure_report = VerificationReport(passed=False)
         failure_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -1033,6 +1055,8 @@ class TestWorkflowRunnerBuildRepairPrompt:
         failure_report = VerificationReport(passed=False)
         failure_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="python -m pytest tests/test_statistics.py -q",
                 passed=False,
@@ -1043,7 +1067,7 @@ class TestWorkflowRunnerBuildRepairPrompt:
                     "failed_tests": ["test_median_for_odd_length_input"],
                     "relevant_output": "assert 3.0 == 5.0",
                 },
-                acceptance_criteria=["AC-2"],
+                subject_ids=["AC-2"],
             ),
         )
 
@@ -1168,6 +1192,8 @@ class TestWorkflowRunnerScopeGate:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -1235,6 +1261,8 @@ class TestWorkflowRunnerScopeGate:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -1404,6 +1432,8 @@ class TestWorkflowRunnerScopeGate:
         failed_report.failure_type = FailureType.CODE_FAILURE
         failed_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -1498,6 +1528,8 @@ class TestWorkflowRunnerConfigurableRepairLimit:
             report.failure_type = FailureType.CODE_FAILURE
             report.add_check(
                 CheckReport(
+                    method="pytest",
+                    phase="post_patch",
                     level="standard",
                     command="pytest tests/",
                     passed=False,
@@ -1569,6 +1601,8 @@ class TestWorkflowRunnerConfigurableRepairLimit:
             report.failure_type = FailureType.CODE_FAILURE
             report.add_check(
                 CheckReport(
+                    method="pytest",
+                    phase="post_patch",
                     level="standard",
                     command="pytest tests/",
                     passed=False,

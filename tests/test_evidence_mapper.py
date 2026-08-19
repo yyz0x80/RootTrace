@@ -47,22 +47,26 @@ def test_map_acceptance_evidence_pass_case():
         passed=True,
         checks=[
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="pytest tests/test_module.py",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=["AC-1"],
-                direct_acceptance_criteria=["AC-1"],
+                subject_ids=["AC-1"],
+                direct=True,
             ),
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="pytest tests/test_other.py",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=["AC-2"],
-                direct_acceptance_criteria=["AC-2"],
+                subject_ids=["AC-2"],
+                direct=True,
             ),
         ],
     )
@@ -106,12 +110,15 @@ def test_broad_mapped_test_remains_unverified_without_direct_evidence():
         passed=True,
         checks=[
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="pytest tests/test_statistics.py",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=["AC-1"],
+                subject_ids=["AC-1"],
+                direct=False,
             )
         ],
     )
@@ -159,13 +166,16 @@ def test_map_acceptance_evidence_fail_case():
         passed=False,
         checks=[
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="pytest tests/test_module.py",
                 passed=False,
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
-                acceptance_criteria=["AC-1"],
+                subject_ids=["AC-1"],
+                direct=False,
             ),
         ],
     )
@@ -208,12 +218,15 @@ def test_map_acceptance_evidence_unverified_case():
         passed=True,
         checks=[
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_2_TARGET_TESTS",
                 command="pytest tests/test_module.py",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=["AC-1"],
+                subject_ids=["AC-1"],
+                direct=False,
             ),
         ],
     )
@@ -258,12 +271,15 @@ def test_map_acceptance_evidence_no_mapped_checks():
         passed=True,
         checks=[
             CheckReport(
+                method="ruff",
+                phase="post_patch",
                 level="LEVEL_1_LINT",
                 command="ruff check",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=[],  # No AC mapping
+                subject_ids=[],  # No AC mapping
+                direct=False,
             ),
         ],
     )
@@ -313,20 +329,26 @@ def test_map_acceptance_evidence_unrelated_regression_tests_pass():
         checks=[
             # Unrelated regression tests that pass but are not mapped to AC-1
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="LEVEL_3_REGRESSION",
                 command="pytest tests/test_regression.py",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=[],  # Not mapped to AC-1
+                subject_ids=[],  # Not mapped to AC-1
+                direct=False,
             ),
             CheckReport(
+                method="ruff",
+                phase="post_patch",
                 level="LEVEL_1_LINT",
                 command="ruff check",
                 passed=True,
                 exit_code=0,
                 duration_seconds=1.0,
-                acceptance_criteria=[],  # Not mapped to AC-1
+                subject_ids=[],  # Not mapped to AC-1
+                direct=False,
             ),
         ],
     )

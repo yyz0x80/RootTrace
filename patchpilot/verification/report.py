@@ -27,6 +27,9 @@ class CheckReport:
     """Report for a single verification check execution.
 
     Attributes:
+        verification_id: Unique identifier for this verification check
+        method: Verification method (e.g., "ruff", "pytest", "acceptance_probe", "structural_check")
+        phase: Verification phase (e.g., "baseline", "post_patch", "constraint_audit")
         level: Verification level (e.g., "quick", "standard", "comprehensive")
         command: The command string that was executed
         passed: Whether the check passed (exit code 0)
@@ -34,20 +37,22 @@ class CheckReport:
         duration_seconds: Execution time in seconds
         failure_type: Categorized failure type if check failed (e.g., "AssertionError")
         summary: Additional structured summary data for the check result
-        acceptance_criteria: List of acceptance criteria associated with this check
-        direct_acceptance_criteria: Criteria directly exercised by a precise
-            test target rather than broadly associated by the plan.
+        subject_ids: List of acceptance criteria or constraint IDs associated with this check
+        direct: Whether this check provides direct evidence for the subject_ids
     """
 
+    method: str
+    phase: str
     level: str
     command: str
     passed: bool
     exit_code: int
     duration_seconds: float
+    verification_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     failure_type: str | None = None
     summary: dict[str, Any] | None = None
-    acceptance_criteria: list[str] = field(default_factory=list)
-    direct_acceptance_criteria: list[str] = field(default_factory=list)
+    subject_ids: list[str] = field(default_factory=list)
+    direct: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the check report to a dictionary for serialization.
@@ -69,6 +74,8 @@ class VerificationReport:
         run_id: Unique identifier for this verification run
         passed: Overall verification status (True if all checks passed)
         checks: List of individual check reports
+        baseline_checks: List of baseline verification checks (before changes)
+        post_patch_checks: List of post-patch verification checks (after changes)
         retry_count: Number of retry attempts for failed checks
         failed_level: The verification level at which failure occurred
         failure_type: Primary failure type classification from workflow
@@ -78,6 +85,8 @@ class VerificationReport:
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     passed: bool = True
     checks: list[CheckReport] = field(default_factory=list)
+    baseline_checks: list[CheckReport] = field(default_factory=list)
+    post_patch_checks: list[CheckReport] = field(default_factory=list)
     retry_count: int = 0
     failed_level: str | None = None
     failure_type: str | None = None
@@ -92,6 +101,13 @@ class VerificationReport:
             check: CheckReport to add to the verification report
         """
         self.checks.append(check)
+        
+        # Also add to phase-specific lists
+        if check.phase == "baseline":
+            self.baseline_checks.append(check)
+        elif check.phase == "post_patch":
+            self.post_patch_checks.append(check)
+        
         if not check.passed:
             self.passed = False
             self.failed_level = check.level
@@ -123,6 +139,33 @@ class VerificationReport:
             List of CheckReport objects matching the specified level
         """
         return [check for check in self.checks if check.level == level]
+
+    def get_checks_by_phase(self, phase: str) -> list[CheckReport]:
+        """Retrieve all checks for a specific verification phase.
+
+        Args:
+            phase: The verification phase to filter by (e.g., "baseline", "post_patch")
+
+        Returns:
+            List of CheckReport objects matching the specified phase
+        """
+        return [check for check in self.checks if check.phase == phase]
+
+    def get_baseline_checks(self) -> list[CheckReport]:
+        """Retrieve all baseline verification checks.
+
+        Returns:
+            List of CheckReport objects from the baseline phase
+        """
+        return self.baseline_checks
+
+    def get_post_patch_checks(self) -> list[CheckReport]:
+        """Retrieve all post-patch verification checks.
+
+        Returns:
+            List of CheckReport objects from the post-patch phase
+        """
+        return self.post_patch_checks
 
     def total_duration(self) -> float:
         """Calculate total execution time across all checks.
@@ -182,11 +225,29 @@ class VerificationReport:
         checks = [
             CheckReport(**check_data) for check_data in data.get("checks", [])
         ]
+        
+        # Handle backward compatibility for reports without phase-specific lists
+        baseline_checks = [
+            CheckReport(**check_data) for check_data in data.get("baseline_checks", [])
+        ]
+        post_patch_checks = [
+            CheckReport(**check_data) for check_data in data.get("post_patch_checks", [])
+        ]
+        
+        # If phase-specific lists are empty but checks exist, populate them
+        if not baseline_checks and not post_patch_checks and checks:
+            for check in checks:
+                if check.phase == "baseline":
+                    baseline_checks.append(check)
+                elif check.phase == "post_patch":
+                    post_patch_checks.append(check)
 
         return cls(
             run_id=data.get("run_id", str(uuid.uuid4())),
             passed=data.get("passed", True),
             checks=checks,
+            baseline_checks=baseline_checks,
+            post_patch_checks=post_patch_checks,
             retry_count=data.get("retry_count", 0),
             failed_level=data.get("failed_level"),
             failure_type=data.get("failure_type"),

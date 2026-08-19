@@ -438,6 +438,7 @@ class WorkflowRunner:
         run_id: str,
         change_plan: ChangePlan | None,
         retry_count: int,
+        phase: str = "post_patch",
     ) -> VerificationReport:
         """Run an injected verifier or the built-in sandbox verifier.
 
@@ -445,6 +446,7 @@ class WorkflowRunner:
             run_id: Unique identifier for this workflow run
             change_plan: Optional ChangePlan for target test selection
             retry_count: Current retry attempt number
+            phase: Verification phase ("baseline" or "post_patch")
 
         Returns:
             VerificationReport containing verification results
@@ -465,17 +467,21 @@ class WorkflowRunner:
         selection = select_target_tests(change_plan)
 
         verifier = self._get_sandbox_verifier()
-        return verifier.verify(
-            run_id=run_id,
-            target_tests=selection.tests,
-            target_acceptance_criteria=(
-                selection.acceptance_criteria
-            ),
-            target_direct_acceptance_criteria=(
-                selection.direct_acceptance_criteria
-            ),
-            retry_count=retry_count,
-        )
+        
+        if phase == "baseline":
+            return verifier.verify_baseline(
+                run_id=run_id,
+                target_tests=selection.tests,
+                subject_ids=selection.acceptance_criteria,
+            )
+        else:
+            return verifier.verify_post_patch(
+                run_id=run_id,
+                target_tests=selection.tests,
+                subject_ids=selection.acceptance_criteria,
+                direct_subject_ids=selection.direct_acceptance_criteria,
+                retry_count=retry_count,
+            )
 
     def _get_sandbox_verifier(self) -> Verifier:
         """Return the Verifier shared by all sandbox verification phases."""
@@ -500,12 +506,14 @@ class WorkflowRunner:
         run_id: str,
         change_plan: ChangePlan | None,
         retry_count: int,
+        phase: str = "post_patch",
     ) -> VerificationReport:
         """Run verification and append its complete report to the trace."""
         report = self._run_verification(
             run_id=run_id,
             change_plan=change_plan,
             retry_count=retry_count,
+            phase=phase,
         )
         trace_writer.write(
             TraceEvent(
@@ -633,6 +641,7 @@ class WorkflowRunner:
                     run_id=run_id,
                     change_plan=change_plan,
                     retry_count=0,
+                    phase="baseline",
                 )
                 baseline_results = {
                     check.command or check.level: check.passed
@@ -1290,7 +1299,7 @@ class WorkflowRunner:
             relevant_criterion_ids: list[str] = []
         else:
             latest_failure = failed_checks[-1]
-            relevant_criterion_ids = latest_failure.acceptance_criteria
+            relevant_criterion_ids = latest_failure.subject_ids
             failure_summary = (
                 f"Command: {latest_failure.command}\n"
                 f"Failure Type: {latest_failure.failure_type}\n"

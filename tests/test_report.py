@@ -14,6 +14,8 @@ from patchpilot.verification.report import (
 def test_check_report_creation():
     """Test creating a basic CheckReport."""
     report = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="standard",
         command="pytest tests/",
         passed=True,
@@ -21,6 +23,8 @@ def test_check_report_creation():
         duration_seconds=5.2,
     )
 
+    assert report.method == "pytest"
+    assert report.phase == "post_patch"
     assert report.level == "standard"
     assert report.command == "pytest tests/"
     assert report.passed is True
@@ -33,6 +37,8 @@ def test_check_report_creation():
 def test_check_report_with_failure():
     """Test creating a CheckReport with failure information."""
     report = CheckReport(
+        method="ruff",
+        phase="post_patch",
         level="quick",
         command="ruff check patchpilot/",
         passed=False,
@@ -42,34 +48,42 @@ def test_check_report_with_failure():
         summary={"errors": 5, "warnings": 2},
     )
 
+    assert report.method == "ruff"
+    assert report.phase == "post_patch"
     assert report.level == "quick"
     assert report.passed is False
     assert report.exit_code == 1
     assert report.failure_type == "LintError"
     assert report.summary == {"errors": 5, "warnings": 2}
-    assert report.acceptance_criteria == []
+    assert report.subject_ids == []
 
 
-def test_check_report_with_acceptance_criteria():
-    """Test creating a CheckReport with acceptance criteria."""
+def test_check_report_with_subject_ids():
+    """Test creating a CheckReport with subject IDs."""
     report = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="standard",
         command="pytest tests/",
         passed=True,
         exit_code=0,
         duration_seconds=3.0,
-        acceptance_criteria=["AC1: User can create task", "AC2: Task priority validation"],
+        subject_ids=["AC1: User can create task", "AC2: Task priority validation"],
     )
 
+    assert report.method == "pytest"
+    assert report.phase == "post_patch"
     assert report.level == "standard"
     assert report.passed is True
     assert report.exit_code == 0
-    assert report.acceptance_criteria == ["AC1: User can create task", "AC2: Task priority validation"]
+    assert report.subject_ids == ["AC1: User can create task", "AC2: Task priority validation"]
 
 
-def test_check_report_default_acceptance_criteria():
-    """Test that acceptance_criteria defaults to empty list."""
+def test_check_report_default_subject_ids():
+    """Test that subject_ids defaults to empty list."""
     report = CheckReport(
+        method="ruff",
+        phase="post_patch",
         level="quick",
         command="ruff check",
         passed=True,
@@ -77,13 +91,15 @@ def test_check_report_default_acceptance_criteria():
         duration_seconds=1.0,
     )
 
-    assert report.acceptance_criteria == []
-    assert isinstance(report.acceptance_criteria, list)
+    assert report.subject_ids == []
+    assert isinstance(report.subject_ids, list)
 
 
 def test_check_report_to_dict():
     """Test converting CheckReport to dictionary."""
     report = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="comprehensive",
         command="pytest tests/ -v",
         passed=True,
@@ -95,6 +111,8 @@ def test_check_report_to_dict():
 
     data = report.to_dict()
 
+    assert data["method"] == "pytest"
+    assert data["phase"] == "post_patch"
     assert data["level"] == "comprehensive"
     assert data["command"] == "pytest tests/ -v"
     assert data["passed"] is True
@@ -102,23 +120,25 @@ def test_check_report_to_dict():
     assert data["duration_seconds"] == 10.0
     assert data["failure_type"] is None
     assert data["summary"] == {"tests_run": 42}
-    assert data["acceptance_criteria"] == []
+    assert data["subject_ids"] == []
 
 
-def test_check_report_to_dict_with_acceptance_criteria():
-    """Test converting CheckReport with acceptance criteria to dictionary."""
+def test_check_report_to_dict_with_subject_ids():
+    """Test converting CheckReport with subject IDs to dictionary."""
     report = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="standard",
         command="pytest tests/",
         passed=True,
         exit_code=0,
         duration_seconds=5.0,
-        acceptance_criteria=["AC1: Task creation", "AC2: Validation"],
+        subject_ids=["AC1: Task creation", "AC2: Validation"],
     )
 
     data = report.to_dict()
 
-    assert data["acceptance_criteria"] == ["AC1: Task creation", "AC2: Validation"]
+    assert data["subject_ids"] == ["AC1: Task creation", "AC2: Validation"]
 
 
 def test_verification_report_creation():
@@ -151,6 +171,8 @@ def test_verification_report_add_check_passed():
     """Test adding a passed check to VerificationReport."""
     report = VerificationReport()
     check = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="quick",
         command="pytest tests/",
         passed=True,
@@ -170,6 +192,8 @@ def test_verification_report_add_check_failed():
     """Test adding a failed check to VerificationReport."""
     report = VerificationReport()
     check = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="standard",
         command="pytest tests/",
         passed=False,
@@ -191,6 +215,8 @@ def test_verification_report_multiple_checks():
     report = VerificationReport()
 
     check1 = CheckReport(
+        method="ruff",
+        phase="post_patch",
         level="quick",
         command="ruff check patchpilot/",
         passed=True,
@@ -199,6 +225,8 @@ def test_verification_report_multiple_checks():
     )
 
     check2 = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="standard",
         command="pytest tests/",
         passed=False,
@@ -222,6 +250,8 @@ def test_verification_report_get_failed_checks():
 
     report.add_check(
         CheckReport(
+            method="ruff",
+            phase="post_patch",
             level="quick",
             command="ruff check",
             passed=True,
@@ -232,6 +262,8 @@ def test_verification_report_get_failed_checks():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -243,6 +275,8 @@ def test_verification_report_get_failed_checks():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="comprehensive",
             command="pytest tests/ -v",
             passed=False,
@@ -266,6 +300,8 @@ def test_verification_report_get_passed_checks():
 
     report.add_check(
         CheckReport(
+            method="ruff",
+            phase="post_patch",
             level="quick",
             command="ruff check",
             passed=True,
@@ -276,6 +312,8 @@ def test_verification_report_get_passed_checks():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -297,6 +335,8 @@ def test_verification_report_get_checks_by_level():
 
     report.add_check(
         CheckReport(
+            method="ruff",
+            phase="post_patch",
             level="quick",
             command="ruff check",
             passed=True,
@@ -307,6 +347,8 @@ def test_verification_report_get_checks_by_level():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=True,
@@ -317,6 +359,8 @@ def test_verification_report_get_checks_by_level():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="quick",
             command="python -m pytest tests/unit/",
             passed=True,
@@ -340,6 +384,8 @@ def test_verification_report_total_duration():
 
     report.add_check(
         CheckReport(
+            method="ruff",
+            phase="post_patch",
             level="quick",
             command="ruff check",
             passed=True,
@@ -350,6 +396,8 @@ def test_verification_report_total_duration():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=True,
@@ -360,6 +408,8 @@ def test_verification_report_total_duration():
 
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="comprehensive",
             command="pytest tests/ -v",
             passed=True,
@@ -379,6 +429,8 @@ def test_verification_report_to_dict():
 
     report.add_check(
         CheckReport(
+            method="ruff",
+            phase="post_patch",
             level="quick",
             command="ruff check",
             passed=True,
@@ -393,6 +445,8 @@ def test_verification_report_to_dict():
     assert data["passed"] is True
     assert data["retry_count"] == 0
     assert len(data["checks"]) == 1
+    assert data["checks"][0]["method"] == "ruff"
+    assert data["checks"][0]["phase"] == "post_patch"
     assert data["checks"][0]["level"] == "quick"
     assert data["checks"][0]["command"] == "ruff check"
 
@@ -404,6 +458,8 @@ def test_verification_report_save():
 
         report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -437,6 +493,8 @@ def test_verification_report_load():
 
         original_report.add_check(
             CheckReport(
+                method="ruff",
+                phase="post_patch",
                 level="quick",
                 command="ruff check",
                 passed=True,
@@ -447,6 +505,8 @@ def test_verification_report_load():
 
         original_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -478,20 +538,22 @@ def test_verification_report_load():
         assert loaded_report.checks[1].summary == {"failed": 2}
 
 
-def test_verification_report_load_with_acceptance_criteria():
-    """Test loading VerificationReport with acceptance criteria from JSON file."""
+def test_verification_report_load_with_subject_ids():
+    """Test loading VerificationReport with subject IDs from JSON file."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # First create and save a report with acceptance criteria
+        # First create and save a report with subject IDs
         original_report = VerificationReport(run_id="ac-test-123")
 
         original_report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=True,
                 exit_code=0,
                 duration_seconds=2.0,
-                acceptance_criteria=["AC1: User can create task", "AC2: Priority validation"],
+                subject_ids=["AC1: User can create task", "AC2: Priority validation"],
             )
         )
 
@@ -501,7 +563,7 @@ def test_verification_report_load_with_acceptance_criteria():
         # Load the report back
         loaded_report = VerificationReport.load(save_path)
 
-        assert loaded_report.checks[0].acceptance_criteria == ["AC1: User can create task", "AC2: Priority validation"]
+        assert loaded_report.checks[0].subject_ids == ["AC1: User can create task", "AC2: Priority validation"]
 
 
 def test_verification_report_load_creates_directories():
@@ -511,6 +573,8 @@ def test_verification_report_load_creates_directories():
 
         report.add_check(
             CheckReport(
+                method="ruff",
+                phase="post_patch",
                 level="quick",
                 command="ruff check",
                 passed=True,
@@ -536,6 +600,8 @@ def test_verification_report_save_utf8_encoding():
 
         report.add_check(
             CheckReport(
+                method="pytest",
+                phase="post_patch",
                 level="standard",
                 command="pytest tests/",
                 passed=False,
@@ -621,6 +687,8 @@ def test_verification_report_id_generation():
 def test_check_report_immutable_behavior():
     """Test that CheckReport fields can be accessed but dataclass pattern is maintained."""
     report = CheckReport(
+        method="pytest",
+        phase="post_patch",
         level="standard",
         command="pytest tests/",
         passed=True,
@@ -633,6 +701,8 @@ def test_check_report_immutable_behavior():
     assert report.passed is False
 
     # But the original structure is preserved
+    assert report.method == "pytest"
+    assert report.phase == "post_patch"
     assert report.level == "standard"
     assert report.command == "pytest tests/"
 
@@ -642,6 +712,8 @@ def test_failure_fingerprint_passed_report():
     report = VerificationReport(passed=True)
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=True,
@@ -666,6 +738,8 @@ def test_failure_fingerprint_with_failure():
     report = VerificationReport(passed=False)
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -695,6 +769,8 @@ def test_failure_fingerprint_relevant_output_truncation():
     report = VerificationReport(passed=False)
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -718,6 +794,8 @@ def test_failure_fingerprint_missing_summary_fields():
     report = VerificationReport(passed=False)
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -739,6 +817,8 @@ def test_failure_fingerprint_uses_latest_failure():
     # First failure
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -756,6 +836,8 @@ def test_failure_fingerprint_uses_latest_failure():
     # Second failure (more recent)
     report.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -784,6 +866,8 @@ def test_failure_fingerprint_consistency():
     report1 = VerificationReport(passed=False)
     report1.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,
@@ -801,6 +885,8 @@ def test_failure_fingerprint_consistency():
     report2 = VerificationReport(passed=False)
     report2.add_check(
         CheckReport(
+            method="pytest",
+            phase="post_patch",
             level="standard",
             command="pytest tests/",
             passed=False,

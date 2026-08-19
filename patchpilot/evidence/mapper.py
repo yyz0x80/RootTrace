@@ -74,12 +74,12 @@ def map_acceptance_evidence(
         mapped_checks = [
             check
             for check in report.checks
-            if criterion.id in check.acceptance_criteria
+            if criterion.id in check.subject_ids
         ]
         direct_checks = [
             check
             for check in mapped_checks
-            if criterion.id in check.direct_acceptance_criteria
+            if criterion.id in check.subject_ids and check.direct
         ]
 
         # Step 5.4: Determine status based on fixed rules
