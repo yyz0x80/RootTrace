@@ -123,7 +123,7 @@ def test_main_with_ambiguous_points_stops(
 
             assert exc_info.value.code == 1
 
-    # Verify normalization was called but agent was not
+    # Verify normalization was called but workflow runner was not
     mock_normalize.assert_called_once()
     mock_agent_loop.assert_not_called()
 
@@ -138,9 +138,9 @@ def test_main_with_ambiguous_points_stops(
 @patch("patchpilot.cli.create_plan")
 @patch("patchpilot.cli.check_scope")
 @patch("patchpilot.cli.validate_repository")
-@patch("patchpilot.cli.run_repair_loop")
+@patch("patchpilot.cli.WorkflowRunner")
 def test_main_without_ambiguous_points_proceeds(
-    mock_run_repair_loop,
+    mock_workflow_runner,
     mock_validate_repository,
     mock_check_scope,
     mock_create_plan,
@@ -154,6 +154,8 @@ def test_main_without_ambiguous_points_proceeds(
 ):
     """Test that CLI proceeds when normalized issue has no ambiguous points."""
     from patchpilot.cli import main
+    from patchpilot.evidence.schema import CompletionState
+    from patchpilot.workflow.result import WorkflowResult
 
     # Setup mocks
     mock_load.return_value = Mock(
@@ -192,29 +194,63 @@ def test_main_without_ambiguous_points_proceeds(
         head_sha="abc123def456",
     )
 
-    # Mock run_repair_loop to return successful result
-    from patchpilot.verification.report import VerificationReport
-    mock_verification_report = Mock(spec=VerificationReport)
-    mock_verification_report.passed = True
-    mock_run_repair_loop.return_value = ("Success", mock_verification_report)
+    # Mock workflow runner to return successful result
+    mock_runner_instance = Mock()
+    mock_workflow_result = Mock(spec=WorkflowResult)
+    mock_workflow_result.final_status = CompletionState.VERIFIED
+    mock_workflow_result.acceptance_evidence = []
+    mock_workflow_result.patch = ""
+    mock_workflow_result.verification_report = {"passed": True}
+    mock_workflow_result.run_id = "test-run-id"
+    mock_workflow_result.duration_seconds = 10.0
+    mock_workflow_result.retry_count = 0
+    mock_workflow_result.max_repairs = 3
+    
+    from patchpilot.workflow.result import RunSummary
+    mock_run_summary = RunSummary(
+        run_id="test-run-id",
+        task_id="run",
+        phase="execute",
+        base_commit="abc123def456",
+        model="test-model",
+        max_rounds=16,
+        max_repairs=3,
+        retry_count=0,
+        final_status="VERIFIED",
+        exit_code=0,
+        duration_seconds=10.0,
+        artifacts={
+            "patch": "artifacts/patch.diff",
+            "verification_report": "artifacts/verification_report.json",
+        },
+    )
+    mock_workflow_result.to_run_summary.return_value = mock_run_summary
+    mock_runner_instance.execute.return_value = mock_workflow_result
+    mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
+    mock_runner_instance._cleanup = Mock()
+    mock_workflow_runner.return_value = mock_runner_instance
 
     mock_agent_loop_instance = Mock()
     mock_agent_loop.return_value = mock_agent_loop_instance
 
     # Mock Path operations - use real Path for output_dir operations
-    with patch("pathlib.Path.mkdir") as mock_mkdir:
+    with patch("pathlib.Path.mkdir") as mock_mkdir, \
+         patch("pathlib.Path.write_text") as mock_write_text:
         mock_mkdir.side_effect = lambda *args, **kwargs: None
+        mock_write_text.side_effect = lambda *args, **kwargs: None
         # Mock sys.argv to simulate CLI call
         with patch("sys.argv", ["patchpilot", "run", "--repo", "/fake/repo", "--issue", "test.md", "--output-dir", "artifacts"]):
-            main()
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
 
     # Verify repository validation was called
     mock_validate_repository.assert_called_once()
-    # Verify repair loop was called
-    mock_run_repair_loop.assert_called_once()
-    repair_call = mock_run_repair_loop.call_args
-    assert repair_call.kwargs["max_attempts"] == 4
-    assert "repair_prompt_builder" not in repair_call.kwargs
+    # Verify workflow runner was called
+    mock_workflow_runner.assert_called_once()
+    runner_kwargs = mock_workflow_runner.call_args.kwargs
+    assert runner_kwargs["verifier"] is None
+    assert runner_kwargs["max_repair_attempts"] == 3
 
 
 @patch("patchpilot.cli.load_issue")
@@ -266,7 +302,7 @@ def test_main_with_multiple_ambiguous_points_shows_all(
 
             assert exc_info.value.code == 1
 
-    # Verify agent was not called
+    # Verify workflow runner was not called
     mock_agent_loop.assert_not_called()
 
 
@@ -985,3 +1021,598 @@ def test_cli_model_overrides_environment_model(
     # Verify provider was created successfully
     assert provider is not None
     mock_provider_class.assert_called_once()
+
+
+@patch("patchpilot.cli.validate_repository")
+@patch("patchpilot.cli.WorkflowRunner")
+def test_run_command_uses_canonical_verifier(
+    mock_workflow_runner,
+    mock_validate_repository,
+):
+    """Test that run command uses canonical WorkflowRunner with built-in verifier."""
+    from argparse import Namespace
+
+    from patchpilot.cli import handle_run
+    from patchpilot.evidence.schema import CompletionState
+    from patchpilot.issue.schema import NormalizedIssue
+    from patchpilot.planning.schema import ChangePlan
+    from patchpilot.repository.schema import RepositoryPreflightResult
+    from patchpilot.workflow.result import WorkflowResult
+
+    # Create mock args
+    args = Namespace(
+        repo="/fake/repo",
+        issue="test.md",
+        model=None,
+        config=None,
+        max_rounds=16,
+        max_repairs=3,
+        output_dir="artifacts",
+        task_id=None,
+    )
+
+    # Create normalized issue and plan
+    normalized_issue = NormalizedIssue(
+        title="Test Issue",
+        task_type="feature",
+        problem_statement="Test problem",
+        ambiguous_points=[],
+        acceptance_criteria=[],
+        constraints=[],
+        expected_test_areas=[],
+        implementation_notes=[],
+    )
+
+    plan = ChangePlan(
+        base_commit="abc123",
+        repository_match=True,
+        relevant_files=[],
+        planned_changes=[],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    # Mock validate_repository
+    mock_validate_repository.return_value = RepositoryPreflightResult(
+        repo_path=Path("/fake/repo"),
+        head_sha="abc123",
+    )
+
+    # Mock workflow runner with successful verification
+    mock_runner_instance = Mock()
+    mock_workflow_result = WorkflowResult(
+        run_id="test-run-123",
+        final_status=CompletionState.VERIFIED,
+        changed_files=["src/file.py"],
+        acceptance_evidence=[],
+        verification_report={
+            "passed": True,
+            "retry_count": 0,
+            "checks": [
+                {
+                    "method": "ruff",
+                    "phase": "post_patch",
+                    "level": "LEVEL_1_LINT",
+                    "command": "ruff check --no-cache .",
+                    "passed": True,
+                    "exit_code": 0,
+                    "duration_seconds": 1.0,
+                    "subject_ids": [],
+                    "direct": False,
+                },
+                {
+                    "method": "pytest",
+                    "phase": "post_patch",
+                    "level": "LEVEL_3_REGRESSION",
+                    "command": "python -m pytest -q -p no:cacheprovider",
+                    "passed": True,
+                    "exit_code": 0,
+                    "duration_seconds": 2.0,
+                    "subject_ids": [],
+                    "direct": False,
+                },
+            ],
+        },
+        patch="diff content",
+        duration_seconds=10.0,
+        retry_count=0,
+        max_rounds=16,
+        max_repairs=3,
+    )
+    mock_runner_instance.execute.return_value = mock_workflow_result
+    mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
+    mock_runner_instance._cleanup = Mock()
+    mock_workflow_runner.return_value = mock_runner_instance
+
+    # Mock file operations and other dependencies
+    with (
+        patch("patchpilot.cli.load_issue") as mock_load,
+        patch("patchpilot.cli.normalize_issue") as mock_normalize,
+        patch("patchpilot.cli._create_provider") as mock_provider_class,
+        patch("patchpilot.cli.Workspace"),
+        patch("patchpilot.cli.ToolRegistry"),
+        patch("patchpilot.cli.AgentLoop"),
+        patch("patchpilot.cli.create_plan") as mock_create_plan,
+        patch("patchpilot.cli.check_scope") as mock_check_scope,
+        patch("patchpilot.cli.save_json"),
+        patch("patchpilot.cli.render_acceptance_coverage") as mock_render_coverage,
+        patch("pathlib.Path.mkdir") as mock_mkdir,
+        patch("pathlib.Path.write_text") as mock_write_text,
+    ):
+        mock_load.return_value = Mock(title="Test", body="Test body")
+        mock_provider_instance = Mock()
+        mock_provider_instance.generate_text = Mock(return_value="normalized")
+        mock_provider_class.return_value = mock_provider_instance
+        mock_normalize.return_value = normalized_issue
+        mock_create_plan.return_value = plan
+        mock_check_scope.return_value = Mock(allowed=True, violations=[], warnings=[])
+        mock_render_coverage.return_value = "# Coverage"
+        mock_mkdir.side_effect = lambda *args, **kwargs: None
+        mock_write_text.side_effect = lambda *args, **kwargs: None
+
+        # Handle the SystemExit that occurs at the end of handle_run
+        with pytest.raises(SystemExit) as exc_info:
+            handle_run(args)
+        
+        # Verify exit code is 0 for VERIFIED status
+        assert exc_info.value.code == 0
+
+    # Verify WorkflowRunner was called with verifier=None (built-in verifier)
+    mock_workflow_runner.assert_called_once()
+    runner_kwargs = mock_workflow_runner.call_args.kwargs
+    assert runner_kwargs["verifier"] is None
+    assert runner_kwargs["max_repair_attempts"] == 3
+
+
+@patch("patchpilot.cli.validate_repository")
+@patch("patchpilot.cli.WorkflowRunner")
+def test_run_command_handles_ruff_failure(
+    mock_workflow_runner,
+    mock_validate_repository,
+):
+    """Test that run command properly handles Ruff verification failures."""
+    from argparse import Namespace
+
+    from patchpilot.cli import handle_run
+    from patchpilot.evidence.schema import CompletionState
+    from patchpilot.issue.schema import NormalizedIssue
+    from patchpilot.planning.schema import ChangePlan
+    from patchpilot.repository.schema import RepositoryPreflightResult
+    from patchpilot.workflow.result import WorkflowResult
+
+    # Create mock args
+    args = Namespace(
+        repo="/fake/repo",
+        issue="test.md",
+        model=None,
+        config=None,
+        max_rounds=16,
+        max_repairs=3,
+        output_dir="artifacts",
+        task_id=None,
+    )
+
+    # Create normalized issue and plan
+    normalized_issue = NormalizedIssue(
+        title="Test Issue",
+        task_type="feature",
+        problem_statement="Test problem",
+        ambiguous_points=[],
+        acceptance_criteria=[],
+        constraints=[],
+        expected_test_areas=[],
+        implementation_notes=[],
+    )
+
+    plan = ChangePlan(
+        base_commit="abc123",
+        repository_match=True,
+        relevant_files=[],
+        planned_changes=[],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    # Mock validate_repository
+    mock_validate_repository.return_value = RepositoryPreflightResult(
+        repo_path=Path("/fake/repo"),
+        head_sha="abc123",
+    )
+
+    # Mock workflow runner with Ruff failure
+    mock_runner_instance = Mock()
+    mock_workflow_result = WorkflowResult(
+        run_id="test-run-123",
+        final_status=CompletionState.FAILED,
+        changed_files=["src/file.py"],
+        acceptance_evidence=[],
+        verification_report={
+            "passed": False,
+            "retry_count": 0,
+            "failed_level": "LEVEL_1_LINT",
+            "failure_type": "LintError",
+            "checks": [
+                {
+                    "method": "ruff",
+                    "phase": "post_patch",
+                    "level": "LEVEL_1_LINT",
+                    "command": "ruff check --no-cache .",
+                    "passed": False,
+                    "exit_code": 1,
+                    "duration_seconds": 1.0,
+                    "failure_type": "LintError",
+                    "summary": {"error_type": "SyntaxError", "relevant_output": "invalid syntax"},
+                    "subject_ids": [],
+                    "direct": False,
+                },
+            ],
+        },
+        patch="diff content",
+        duration_seconds=10.0,
+        retry_count=0,
+        max_rounds=16,
+        max_repairs=3,
+    )
+    mock_runner_instance.execute.return_value = mock_workflow_result
+    mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
+    mock_runner_instance._cleanup = Mock()
+    mock_workflow_runner.return_value = mock_runner_instance
+
+    # Mock file operations and other dependencies
+    with (
+        patch("patchpilot.cli.load_issue") as mock_load,
+        patch("patchpilot.cli.normalize_issue") as mock_normalize,
+        patch("patchpilot.cli._create_provider") as mock_provider_class,
+        patch("patchpilot.cli.Workspace"),
+        patch("patchpilot.cli.ToolRegistry"),
+        patch("patchpilot.cli.AgentLoop"),
+        patch("patchpilot.cli.create_plan") as mock_create_plan,
+        patch("patchpilot.cli.check_scope") as mock_check_scope,
+        patch("patchpilot.cli.save_json"),
+        patch("patchpilot.cli.render_acceptance_coverage") as mock_render_coverage,
+        patch("pathlib.Path.mkdir") as mock_mkdir,
+        patch("pathlib.Path.write_text") as mock_write_text,
+    ):
+        mock_load.return_value = Mock(title="Test", body="Test body")
+        mock_provider_instance = Mock()
+        mock_provider_instance.generate_text = Mock(return_value="normalized")
+        mock_provider_class.return_value = mock_provider_instance
+        mock_normalize.return_value = normalized_issue
+        mock_create_plan.return_value = plan
+        mock_check_scope.return_value = Mock(allowed=True, violations=[], warnings=[])
+        mock_render_coverage.return_value = "# Coverage"
+        mock_mkdir.side_effect = lambda *args, **kwargs: None
+        mock_write_text.side_effect = lambda *args, **kwargs: None
+
+        # Handle the SystemExit that occurs at the end of handle_run
+        with pytest.raises(SystemExit) as exc_info:
+            handle_run(args)
+        
+        # Verify exit code is 1 for FAILED status
+        assert exc_info.value.code == 1
+
+    # Verify verification report contains proper failure classification
+    verification_report = mock_workflow_result.verification_report
+    assert verification_report["passed"] is False
+    assert verification_report["failure_type"] == "LintError"
+    assert verification_report["failed_level"] == "LEVEL_1_LINT"
+
+
+@patch("patchpilot.cli.validate_repository")
+@patch("patchpilot.cli.WorkflowRunner")
+def test_run_command_handles_pytest_failure(
+    mock_workflow_runner,
+    mock_validate_repository,
+):
+    """Test that run command properly handles pytest verification failures."""
+    from argparse import Namespace
+
+    from patchpilot.cli import handle_run
+    from patchpilot.evidence.schema import CompletionState
+    from patchpilot.issue.schema import NormalizedIssue
+    from patchpilot.planning.schema import ChangePlan
+    from patchpilot.repository.schema import RepositoryPreflightResult
+    from patchpilot.workflow.result import WorkflowResult
+
+    # Create mock args
+    args = Namespace(
+        repo="/fake/repo",
+        issue="test.md",
+        model=None,
+        config=None,
+        max_rounds=16,
+        max_repairs=3,
+        output_dir="artifacts",
+        task_id=None,
+    )
+
+    # Create normalized issue and plan
+    normalized_issue = NormalizedIssue(
+        title="Test Issue",
+        task_type="feature",
+        problem_statement="Test problem",
+        ambiguous_points=[],
+        acceptance_criteria=[],
+        constraints=[],
+        expected_test_areas=[],
+        implementation_notes=[],
+    )
+
+    plan = ChangePlan(
+        base_commit="abc123",
+        repository_match=True,
+        relevant_files=[],
+        planned_changes=[],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    # Mock validate_repository
+    mock_validate_repository.return_value = RepositoryPreflightResult(
+        repo_path=Path("/fake/repo"),
+        head_sha="abc123",
+    )
+
+    # Mock workflow runner with pytest failure
+    mock_runner_instance = Mock()
+    mock_workflow_result = WorkflowResult(
+        run_id="test-run-123",
+        final_status=CompletionState.FAILED,
+        changed_files=["src/file.py"],
+        acceptance_evidence=[],
+        verification_report={
+            "passed": False,
+            "retry_count": 0,
+            "failed_level": "LEVEL_3_REGRESSION",
+            "failure_type": "AssertionError",
+            "checks": [
+                {
+                    "method": "ruff",
+                    "phase": "post_patch",
+                    "level": "LEVEL_1_LINT",
+                    "command": "ruff check --no-cache .",
+                    "passed": True,
+                    "exit_code": 0,
+                    "duration_seconds": 1.0,
+                    "subject_ids": [],
+                    "direct": False,
+                },
+                {
+                    "method": "pytest",
+                    "phase": "post_patch",
+                    "level": "LEVEL_3_REGRESSION",
+                    "command": "python -m pytest -q -p no:cacheprovider",
+                    "passed": False,
+                    "exit_code": 1,
+                    "duration_seconds": 2.0,
+                    "failure_type": "AssertionError",
+                    "summary": {
+                        "error_type": "AssertionError",
+                        "failed_tests": ["test_file.py::test_function"],
+                        "relevant_output": "assert False",
+                    },
+                    "subject_ids": [],
+                    "direct": False,
+                },
+            ],
+        },
+        patch="diff content",
+        duration_seconds=10.0,
+        retry_count=0,
+        max_rounds=16,
+        max_repairs=3,
+    )
+    mock_runner_instance.execute.return_value = mock_workflow_result
+    mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
+    mock_runner_instance._cleanup = Mock()
+    mock_workflow_runner.return_value = mock_runner_instance
+
+    # Mock file operations and other dependencies
+    with (
+        patch("patchpilot.cli.load_issue") as mock_load,
+        patch("patchpilot.cli.normalize_issue") as mock_normalize,
+        patch("patchpilot.cli._create_provider") as mock_provider_class,
+        patch("patchpilot.cli.Workspace"),
+        patch("patchpilot.cli.ToolRegistry"),
+        patch("patchpilot.cli.AgentLoop"),
+        patch("patchpilot.cli.create_plan") as mock_create_plan,
+        patch("patchpilot.cli.check_scope") as mock_check_scope,
+        patch("patchpilot.cli.save_json"),
+        patch("patchpilot.cli.render_acceptance_coverage") as mock_render_coverage,
+        patch("pathlib.Path.mkdir") as mock_mkdir,
+        patch("pathlib.Path.write_text") as mock_write_text,
+    ):
+        mock_load.return_value = Mock(title="Test", body="Test body")
+        mock_provider_instance = Mock()
+        mock_provider_instance.generate_text = Mock(return_value="normalized")
+        mock_provider_class.return_value = mock_provider_instance
+        mock_normalize.return_value = normalized_issue
+        mock_create_plan.return_value = plan
+        mock_check_scope.return_value = Mock(allowed=True, violations=[], warnings=[])
+        mock_render_coverage.return_value = "# Coverage"
+        mock_mkdir.side_effect = lambda *args, **kwargs: None
+        mock_write_text.side_effect = lambda *args, **kwargs: None
+
+        # Handle the SystemExit that occurs at the end of handle_run
+        with pytest.raises(SystemExit) as exc_info:
+            handle_run(args)
+        
+        # Verify exit code is 1 for FAILED status
+        assert exc_info.value.code == 1
+
+    # Verify verification report contains proper failure classification
+    verification_report = mock_workflow_result.verification_report
+    assert verification_report["passed"] is False
+    assert verification_report["failure_type"] == "AssertionError"
+    assert verification_report["failed_level"] == "LEVEL_3_REGRESSION"
+
+
+@patch("patchpilot.cli.validate_repository")
+@patch("patchpilot.cli.WorkflowRunner")
+def test_run_command_serializes_verification_report(
+    mock_workflow_runner,
+    mock_validate_repository,
+):
+    """Test that run command properly serializes verification report."""
+    from argparse import Namespace
+
+    from patchpilot.cli import handle_run
+    from patchpilot.evidence.schema import CompletionState
+    from patchpilot.issue.schema import NormalizedIssue
+    from patchpilot.planning.schema import ChangePlan
+    from patchpilot.repository.schema import RepositoryPreflightResult
+    from patchpilot.workflow.result import WorkflowResult
+
+    # Create mock args
+    args = Namespace(
+        repo="/fake/repo",
+        issue="test.md",
+        model=None,
+        config=None,
+        max_rounds=16,
+        max_repairs=3,
+        output_dir="artifacts",
+        task_id=None,
+    )
+
+    # Create normalized issue and plan
+    normalized_issue = NormalizedIssue(
+        title="Test Issue",
+        task_type="feature",
+        problem_statement="Test problem",
+        ambiguous_points=[],
+        acceptance_criteria=[],
+        constraints=[],
+        expected_test_areas=[],
+        implementation_notes=[],
+    )
+
+    plan = ChangePlan(
+        base_commit="abc123",
+        repository_match=True,
+        relevant_files=[],
+        planned_changes=[],
+        planned_tests=[],
+        out_of_scope=[],
+        risk_level="low",
+    )
+
+    # Mock validate_repository
+    mock_validate_repository.return_value = RepositoryPreflightResult(
+        repo_path=Path("/fake/repo"),
+        head_sha="abc123",
+    )
+
+    # Mock workflow runner with complete verification report
+    mock_runner_instance = Mock()
+    mock_workflow_result = WorkflowResult(
+        run_id="test-run-123",
+        final_status=CompletionState.VERIFIED,
+        changed_files=["src/file.py"],
+        acceptance_evidence=[],
+        verification_report={
+            "run_id": "test-run-123",
+            "passed": True,
+            "retry_count": 0,
+            "checks": [
+                {
+                    "method": "ruff",
+                    "phase": "post_patch",
+                    "level": "LEVEL_1_LINT",
+                    "command": "ruff check --no-cache .",
+                    "passed": True,
+                    "exit_code": 0,
+                    "duration_seconds": 1.0,
+                    "subject_ids": [],
+                    "direct": False,
+                },
+                {
+                    "method": "pytest",
+                    "phase": "post_patch",
+                    "level": "LEVEL_3_REGRESSION",
+                    "command": "python -m pytest -q -p no:cacheprovider",
+                    "passed": True,
+                    "exit_code": 0,
+                    "duration_seconds": 2.0,
+                    "subject_ids": [],
+                    "direct": False,
+                },
+            ],
+        },
+        patch="diff content",
+        duration_seconds=10.0,
+        retry_count=0,
+        max_rounds=16,
+        max_repairs=3,
+    )
+    mock_runner_instance.execute.return_value = mock_workflow_result
+    mock_runner_instance.workspace = Mock(root=Path("/fake/repo"))
+    mock_runner_instance._cleanup = Mock()
+    mock_workflow_runner.return_value = mock_runner_instance
+
+    # Mock file operations and other dependencies
+    with (
+        patch("patchpilot.cli.load_issue") as mock_load,
+        patch("patchpilot.cli.normalize_issue") as mock_normalize,
+        patch("patchpilot.cli._create_provider") as mock_provider_class,
+        patch("patchpilot.cli.Workspace"),
+        patch("patchpilot.cli.ToolRegistry"),
+        patch("patchpilot.cli.AgentLoop"),
+        patch("patchpilot.cli.create_plan") as mock_create_plan,
+        patch("patchpilot.cli.check_scope") as mock_check_scope,
+        patch("patchpilot.cli.save_json") as mock_save_json,
+        patch("patchpilot.cli.render_acceptance_coverage") as mock_render_coverage,
+        patch("pathlib.Path.mkdir") as mock_mkdir,
+        patch("pathlib.Path.write_text") as mock_write_text,
+    ):
+        mock_load.return_value = Mock(title="Test", body="Test body")
+        mock_provider_instance = Mock()
+        mock_provider_instance.generate_text = Mock(return_value="normalized")
+        mock_provider_class.return_value = mock_provider_instance
+        mock_normalize.return_value = normalized_issue
+        mock_create_plan.return_value = plan
+        mock_check_scope.return_value = Mock(allowed=True, violations=[], warnings=[])
+        mock_render_coverage.return_value = "# Coverage"
+        mock_mkdir.side_effect = lambda *args, **kwargs: None
+        mock_write_text.side_effect = lambda *args, **kwargs: None
+
+        # Handle the SystemExit that occurs at the end of handle_run
+        with pytest.raises(SystemExit) as exc_info:
+            handle_run(args)
+        
+        # Verify exit code is 0 for VERIFIED status
+        assert exc_info.value.code == 0
+
+    # Verify verification report was saved with proper structure
+    verification_report_call = None
+    for call in mock_save_json.call_args_list:
+        if "verification_report.json" in call[0][0]:
+            verification_report_call = call
+            break
+
+    assert verification_report_call is not None, "verification_report.json was not saved"
+
+    # Parse the saved JSON
+    report_data = json.loads(verification_report_call[0][1])
+
+    # Verify required fields are present
+    assert "run_id" in report_data
+    assert "passed" in report_data
+    assert "checks" in report_data
+    assert "retry_count" in report_data
+    assert len(report_data["checks"]) == 2
+    
+    # Verify check reports have all required fields
+    for check in report_data["checks"]:
+        assert "method" in check
+        assert "phase" in check
+        assert "level" in check
+        assert "command" in check
+        assert "passed" in check
+        assert "exit_code" in check
+        assert "duration_seconds" in check
+        assert "subject_ids" in check
+        assert "direct" in check

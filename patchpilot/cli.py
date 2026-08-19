@@ -7,7 +7,6 @@ on local repositories with issue descriptions.
 import argparse
 import json
 import logging
-import subprocess  # noqa: F401
 import sys
 import time
 import uuid
@@ -34,16 +33,8 @@ from patchpilot.provider import (
 )
 from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
-from patchpilot.sandbox.docker_runner import CommandResult
 from patchpilot.tools import ToolRegistry
 from patchpilot.utils import save_json
-from patchpilot.verification.error_parser import parse_failure
-from patchpilot.verification.report import CheckReport, VerificationReport
-from patchpilot.workflow import (
-    RepairLoopError,
-    RepairLoopStalledError,
-    run_repair_loop,
-)
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.result import PrepareSummary, RunSummary
 from patchpilot.workflow.runner import (
@@ -312,6 +303,12 @@ def main() -> None:
         type=str,
         required=True,
         help="Directory for artifacts from this run",
+    )
+    run_parser.add_argument(
+        "--task-id",
+        type=str,
+        default=None,
+        help="Stable evaluation task identifier (optional for run command)",
     )
     
     # execute subcommand
@@ -608,10 +605,15 @@ def handle_prepare(args) -> None:
 
 
 def handle_run(args) -> None:
-    """Handle the run subcommand workflow.
+    """Handle the run subcommand workflow using canonical WorkflowRunner.
     
-    This function implements the full run workflow that executes the agent loop.
+    This function implements the full run workflow that executes the agent loop
+    using the canonical WorkflowRunner and Verifier with Docker sandbox.
     """
+    started = time.monotonic()
+    provider: LLMProvider | None = None
+    base_commit = ""
+
     try:
         # Setup output directory
         output_dir = Path(args.output_dir)
@@ -662,6 +664,8 @@ def handle_run(args) -> None:
             print(f"Repository validation failed: {e}", file=sys.stderr)
             sys.exit(1)
         
+        base_commit = preflight_result.head_sha
+        
         workspace = Workspace(root=repo_path)
         
         # Create change plan
@@ -710,172 +714,185 @@ def handle_run(args) -> None:
             max_rounds=args.max_rounds,
         )
         
-        # Define verifier function for repair loop
-        def run_verification() -> VerificationReport:
-            """Run verification commands and return a VerificationReport."""
-            import subprocess
-            import time
+        # Create workflow runner with canonical verifier
+        runner = WorkflowRunner(
+            agent_loop=agent_loop,
+            verifier=None,  # Use built-in sandbox verifier
+            workspace=workspace,
+            max_repair_attempts=args.max_repairs,
+        )
 
-            report = VerificationReport()
+        # Execute workflow
+        trace_path = output_dir / "execution_trace.jsonl"
+        result = runner.execute(
+            issue=normalized_issue.model_dump_json(indent=2),
+            plan=plan.model_dump_json(indent=2),
+            change_plan=plan,
+            normalized_issue=normalized_issue,
+            trace_path=trace_path,
+        )
 
-            # Use the current workspace root (which will be the temporary workspace)
-            # The workspace will be updated by the runner during execution
-            current_workspace_root = workspace.root
+        # Calculate duration and update result
+        duration_seconds = time.monotonic() - started
+        result.duration_seconds = duration_seconds
 
-            # Run quick verification (ruff)
-            try:
-                start_time = time.time()
-                result = subprocess.run(
-                    ["ruff", "check"],
-                    cwd=current_workspace_root,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    check=False,
-                )
-                duration = time.time() - start_time
-                
-                if result.returncode == 0:
-                    ruff_check = CheckReport(
-                        level="quick",
-                        command="ruff check",
-                        passed=True,
-                        exit_code=0,
-                        duration_seconds=duration,
-                    )
-                else:
-                    # Parse the failure
-                    mock_result = CommandResult(
-                        command="ruff check",
-                        exit_code=result.returncode,
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        duration_seconds=duration,
-                        timed_out=False,
-                    )
-                    failure_summary = parse_failure(mock_result)
-                    
-                    ruff_check = CheckReport(
-                        level="quick",
-                        command="ruff check",
-                        passed=False,
-                        exit_code=result.returncode,
-                        duration_seconds=duration,
-                        failure_type=failure_summary.error_type,
-                        summary=failure_summary.__dict__,
-                    )
-                report.add_check(ruff_check)
-            except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
-                # If ruff check fails, create a failed check
-                ruff_check = CheckReport(
-                    level="quick",
-                    command="ruff check",
-                    passed=False,
-                    exit_code=1,
-                    duration_seconds=0.0,
-                    failure_type="LintError",
-                    summary={"error": str(e)},
-                )
-                report.add_check(ruff_check)
-            
-            # Only run pytest if ruff passed
-            if report.passed:
-                try:
-                    start_time = time.time()
-                    result = subprocess.run(
-                        ["python", "-m", "pytest", "tests/", "-q"],
-                        cwd=current_workspace_root,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                        check=False,
-                    )
-                    duration = time.time() - start_time
-                    
-                    if result.returncode == 0:
-                        pytest_check = CheckReport(
-                            level="standard",
-                            command="python -m pytest tests/ -q",
-                            passed=True,
-                            exit_code=0,
-                            duration_seconds=duration,
-                        )
-                    else:
-                        # Parse the failure
-                        mock_result = CommandResult(
-                            command="python -m pytest tests/ -q",
-                            exit_code=result.returncode,
-                            stdout=result.stdout,
-                            stderr=result.stderr,
-                            duration_seconds=duration,
-                            timed_out=False,
-                        )
-                        failure_summary = parse_failure(mock_result)
-                        
-                        pytest_check = CheckReport(
-                            level="standard",
-                            command="python -m pytest tests/ -q",
-                            passed=False,
-                            exit_code=result.returncode,
-                            duration_seconds=duration,
-                            failure_type=failure_summary.error_type,
-                            summary=failure_summary.__dict__,
-                        )
-                    report.add_check(pytest_check)
-                except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
-                    # If pytest fails, create a failed check
-                    pytest_check = CheckReport(
-                        level="standard",
-                        command="python -m pytest tests/ -q",
-                        passed=False,
-                        exit_code=1,
-                        duration_seconds=0.0,
-                        failure_type="TestError",
-                        summary={"error": str(e)},
-                    )
-                    report.add_check(pytest_check)
-            
-            return report
-        
-        # Run the repair loop with the plan
-        try:
-            result, verification_report = run_repair_loop(
-                agent_loop=agent_loop,
-                issue=plan.model_dump_json(indent=2),
-                # RepairLoop counts the initial implementation as an attempt.
-                max_attempts=args.max_repairs + 1,
-                verifier=run_verification,
-            )
-            
-            # Print result
-            print(result)
-            
-            # Print verification status
-            if verification_report and verification_report.passed:
-                print("\n✓ Verification passed")
-            elif verification_report:
-                print(f"\n✗ Verification failed after {args.max_repairs} repair attempt(s)")
-                failed_checks = verification_report.get_failed_checks()
-                if failed_checks:
-                    latest_failure = failed_checks[-1]
-                    print(f"  Failure type: {latest_failure.failure_type}")
-        
-        except RepairLoopStalledError as e:
-            print(f"\n⚠ Repair stopped early: {e}", file=sys.stderr)
-            print("The same failure repeated across repair attempts.", file=sys.stderr)
-            sys.exit(1)
+        # Extract retry count from verification report
+        result.retry_count = int(
+            result.verification_report.get("retry_count", 0)
+        )
+
+        # Preserve exact run-phase model usage without estimating tokens.
+        usage = _provider_usage(provider)
+        result.llm_call_count = usage.llm_call_count
+        result.prompt_tokens = usage.prompt_tokens
+        result.completion_tokens = usage.completion_tokens
+
+        # Save verification report
+        verification_report_path = output_dir / "verification_report.json"
+        save_json(
+            str(verification_report_path),
+            json.dumps(result.verification_report, indent=2),
+        )
+
+        # Save patch
+        if result.patch:
+            patch_path = output_dir / "patch.diff"
+            patch_path.write_text(result.patch, encoding="utf-8")
+
+        # Save acceptance coverage report
+        coverage_path = output_dir / "acceptance_coverage.md"
+        coverage_path.write_text(
+            render_acceptance_coverage(
+                result.acceptance_evidence,
+                result.final_status.value,
+            ),
+            encoding="utf-8",
+        )
+
+        # Save machine-readable acceptance evidence for deterministic metrics.
+        evidence_report = AcceptanceCoverageReport(
+            acceptance_evidence=result.acceptance_evidence,
+            completion_state=result.final_status,
+            summary="Acceptance evidence generated by the workflow.",
+        )
+        save_json(
+            str(output_dir / "acceptance_evidence.json"),
+            evidence_report.model_dump_json(indent=2),
+        )
+
+        # Save run summary
+        run_summary = result.to_run_summary(
+            task_id=args.task_id if args.task_id else str(uuid.uuid4()),
+            base_commit=base_commit,
+            model=usage.model,
+            output_dir=str(output_dir),
+        )
+        save_json(
+            str(output_dir / "run_summary.json"),
+            run_summary.model_dump_json(indent=2),
+        )
+
+        # Print results
+        print("\nEXECUTION_COMPLETE\n")
+
+        # Count acceptance criteria by status
+        pass_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "PASS")
+        fail_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "FAIL")
+        unverified_count = sum(1 for evidence in result.acceptance_evidence if evidence.status.value == "UNVERIFIED")
+
+        print(f"Final status: {result.final_status.value}")
+        print("Acceptance criteria:")
+        print(f"  PASS: {pass_count}")
+        print(f"  FAIL: {fail_count}")
+        print(f"  UNVERIFIED: {unverified_count}")
+
+        # Exit with code from run summary (ensures summary is saved before exit)
+        sys.exit(run_summary.exit_code)
         
     except ValueError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="INPUT_ERROR",
+            error_message=str(e),
+        )
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except (AgentLoopError, AgentLoopLimitError) as e:
+    except AgentLoopLimitError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="AGENT_ROUND_LIMIT",
+            error_message=str(e),
+        )
         print(f"Agent error: {e}", file=sys.stderr)
         sys.exit(1)
-    except RepairLoopError as e:
-        print(f"Repair loop error: {e}", file=sys.stderr)
+    except AgentLoopError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="AGENT_ERROR",
+            error_message=str(e),
+        )
+        print(f"Agent error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except WorkflowRunnerExecutionError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type=e.failure_type,
+            error_message=str(e),
+            verification_report=e.verification_report,
+        )
+        print(f"Workflow execution error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except WorkflowRunnerError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="WORKFLOW_ERROR",
+            error_message=str(e),
+        )
+        print(f"Workflow error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="BLOCKED",
+            failure_type="FILE_SYSTEM_ERROR",
+            error_message=str(e),
+        )
         print(f"File system error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (OpenAIError, ToolCallParseError) as e:
+        _save_failed_run_summary(
+            args=args,
+            started=started,
+            provider=provider,
+            base_commit=base_commit,
+            final_status="FAILED",
+            failure_type="PROVIDER_ERROR",
+            error_message=str(e),
+        )
+        print(f"Provider execution error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
