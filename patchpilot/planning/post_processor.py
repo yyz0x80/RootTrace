@@ -16,6 +16,7 @@ ensuring that security boundaries are enforced regardless of model behavior.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import PurePosixPath
 
 from patchpilot.issue.schema import NormalizedIssue
@@ -194,37 +195,54 @@ def _validate_pytest_targets(
 
     for test in plan.planned_tests:
         command = test.command.strip()
-        if not command.startswith("pytest") and not command.startswith(
-            "python -m pytest"
-        ):
-            continue
-
-        # Extract target from pytest command
-        parts = command.split()
-        if len(parts) < 2:
-            continue
-
-        target = parts[1]
-        # Remove pytest flags
-        if target.startswith("-"):
-            continue
-
-        # Check if target exists
-        if target not in tracked_files and target not in tracked_dirs:
-            # For new files in planned_changes, allow the target
-            is_planned_file = any(
-                change.path == target for change in plan.planned_changes
-            )
-            if not is_planned_file:
-                raise PlanPostProcessError(
-                    f"Pytest target does not exist in repository: {target}"
-                )
-
-        # Check if target is a test file or directory
-        if target in tracked_files and not _is_test_file(target):
+        
+        # Use shlex.split for proper argument parsing
+        try:
+            parts = shlex.split(command)
+        except ValueError as e:
             raise PlanPostProcessError(
-                f"Pytest target must be a test file or test directory: {target}"
-            )
+                f"Invalid pytest command syntax: {command}"
+            ) from e
+
+        if not parts:
+            continue
+
+        # Check if this is a pytest command
+        is_pytest = (
+            parts[0] == "pytest" or
+            (len(parts) >= 3 and parts[:3] == ["python", "-m", "pytest"])
+        )
+        
+        if not is_pytest:
+            continue
+
+        # Extract pytest arguments (skip command prefix)
+        pytest_args = parts[1:] if parts[0] == "pytest" else parts[3:]
+        
+        # Find actual test targets (skip flags and options)
+        for arg in pytest_args:
+            if arg.startswith("-"):
+                continue
+            
+            # Extract file path from :: syntax (e.g., tests/test_x.py::TestClass::test_y)
+            file_path = arg.split("::", maxsplit=1)[0]
+            
+            # Check if target exists
+            if file_path not in tracked_files and file_path not in tracked_dirs:
+                # For new files in planned_changes, allow the target
+                is_planned_file = any(
+                    change.path == file_path for change in plan.planned_changes
+                )
+                if not is_planned_file:
+                    raise PlanPostProcessError(
+                        f"Pytest target does not exist in repository: {file_path}"
+                    )
+
+            # Check if target is a test file or directory
+            if file_path in tracked_files and not _is_test_file(file_path):
+                raise PlanPostProcessError(
+                    f"Pytest target must be a test file or test directory: {file_path}"
+                )
 
     return plan
 

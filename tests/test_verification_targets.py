@@ -57,13 +57,51 @@ def test_select_python_module_pytest_command() -> None:
     assert selection.direct_acceptance_criteria == []
 
 
-def test_file_level_test_with_single_ac_is_direct() -> None:
-    """File-level test mapped to a single AC should be considered direct evidence."""
+def test_file_level_test_with_single_ac_is_indirect() -> None:
+    """File-level test mapped to a single AC should be considered indirect evidence by default."""
     plan = make_plan(
         [
             PlannedTest(
                 command="python -m pytest tests/test_task.py -q",
                 purpose="Verify task behavior",
+                acceptance_criteria=["AC-1"],
+            )
+        ]
+    )
+
+    selection = select_target_tests(plan)
+
+    assert selection.tests == ["tests/test_task.py"]
+    assert selection.acceptance_criteria == ["AC-1"]
+    assert selection.direct_acceptance_criteria == []
+
+
+def test_exact_node_test_with_single_ac_is_direct() -> None:
+    """Exact node test (with ::) mapped to a single AC should be considered direct evidence."""
+    plan = make_plan(
+        [
+            PlannedTest(
+                command="pytest tests/test_task.py::test_priority -q",
+                purpose="Verify priority",
+                acceptance_criteria=["AC-1"],
+            )
+        ]
+    )
+
+    selection = select_target_tests(plan)
+
+    assert selection.tests == ["tests/test_task.py::test_priority"]
+    assert selection.acceptance_criteria == ["AC-1"]
+    assert selection.direct_acceptance_criteria == ["AC-1"]
+
+
+def test_acceptance_probe_is_direct() -> None:
+    """Acceptance probe should be considered direct evidence."""
+    plan = make_plan(
+        [
+            PlannedTest(
+                command="pytest tests/test_task.py -q",
+                purpose="Acceptance probe for task behavior",
                 acceptance_criteria=["AC-1"],
             )
         ]
