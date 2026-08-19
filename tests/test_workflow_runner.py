@@ -1336,8 +1336,8 @@ class TestWorkflowRunnerScopeGate:
 
             assert "without modifying any repository files" in str(exc_info.value)
 
-    def test_execute_no_changes_without_change_plan_allowed(self):
-        """Test that agent without change plan can complete without file changes."""
+    def test_execute_no_changes_without_change_plan_blocked(self):
+        """Test that agent without change plan is blocked when no file changes are made."""
         from patchpilot.workflow.result import WorkflowResult
 
         mock_agent_loop = Mock(spec=AgentLoop)
@@ -1375,8 +1375,9 @@ class TestWorkflowRunnerScopeGate:
             )
 
         assert isinstance(result, WorkflowResult)
-        assert result.final_status == CompletionState.VERIFIED
-        assert result.verification_report["passed"] is True
+        # Should be BLOCKED due to NO_SOURCE_CHANGES
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.verification_report["failure_type"] == "NO_SOURCE_CHANGES"
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
 
@@ -1726,6 +1727,49 @@ class TestWorkflowRunnerExitCodes:
         # FAILED should result in exit code 1
         assert summary.exit_code == 1
         assert summary.final_status == "FAILED"
+
+    def test_no_source_changes_rejects_final_completion(self):
+        """Test that final completion is rejected when no source changes are made."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Mock a passing verification report
+        passed_report = VerificationReport(passed=True)
+        mock_verifier.return_value = passed_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock empty changes (no source modifications)
+        with (
+            patch.object(runner, "_create_temporary_workspace"),
+            patch.object(runner, "_start_sandbox"),
+            patch.object(runner, "_cleanup"),
+            patch(
+                "patchpilot.workflow.runner._get_workspace_changes",
+                return_value=[],  # No changes
+            ),
+            patch(
+                "patchpilot.workflow.runner.generate_patch",
+                return_value="",
+            ),
+        ):
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        # Should be BLOCKED due to NO_SOURCE_CHANGES
+        assert result.final_status == CompletionState.BLOCKED
+        assert result.verification_report["failure_type"] == "NO_SOURCE_CHANGES"
 
     def test_blocked_returns_nonzero_exit_code(self):
         """Test that BLOCKED status results in non-zero exit code."""

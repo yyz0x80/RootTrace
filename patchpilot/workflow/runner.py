@@ -228,12 +228,14 @@ UNRECOVERABLE_FAILURE_TYPES = {
     FailureType.TIMEOUT,
     FailureType.REQUIREMENT_AMBIGUITY,
     FailureType.SCOPE_VIOLATION,
+    FailureType.NO_SOURCE_CHANGES,
 }
 
 BASELINE_BLOCKING_FAILURE_TYPES = {
     FailureType.ENVIRONMENT_FAILURE.value,
     FailureType.PERMISSION_FAILURE.value,
     FailureType.TIMEOUT.value,
+    FailureType.NO_SOURCE_CHANGES.value,
 }
 
 
@@ -925,6 +927,12 @@ class WorkflowRunner:
             report.patch = generate_patch(workspace_path, final_changes)
             logger.info("Patch generated successfully")
 
+            # Reject final completion if no source changes were made
+            if not final_changes:
+                logger.warning("No source changes detected. Rejecting final completion.")
+                report.passed = False
+                report.failure_type = "NO_SOURCE_CHANGES"
+
             # Step 15: Generate acceptance evidence before workspace cleanup
             # This must happen before the temporary workspace is destroyed
             if change_plan is not None:
@@ -945,6 +953,7 @@ class WorkflowRunner:
                     "PERMISSION_FAILURE",
                     "SCOPE_VIOLATION",
                     "TIMEOUT",
+                    "NO_SOURCE_CHANGES",
                 },
                 execution_failed=not report.passed,
                 verifier_passed=report.passed,

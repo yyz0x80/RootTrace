@@ -588,15 +588,18 @@ class AgentLoop:
 
     @staticmethod
     def _filter_repair_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Filter tool schemas to only allow read and edit tools for repair rounds.
+        """Filter tool schemas to allow repair tools including command execution.
+
+        Repair rounds need read, edit, and command tools to fix code and verify fixes.
+        The run_command tool is already secured by command whitelist and workspace policy.
 
         Args:
             tool_schemas: Full list of available tool schemas
 
         Returns:
-            Filtered list containing only read_file, edit_file, and write_file tools
+            Filtered list containing read_file, edit_file, write_file, and run_command tools
         """
-        repair_allowed_tools = {"read_file", "edit_file", "write_file"}
+        repair_allowed_tools = {"read_file", "edit_file", "write_file", "run_command"}
         return [
             schema
             for schema in tool_schemas

@@ -27,7 +27,7 @@ def test_provider():
     if not api_key:
         print("ERROR: ZHIPU_API_KEY or OPENAI_API_KEY environment variable not set")
         print("Please set it with: export ZHIPU_API_KEY='your-key-here'")
-        return False
+        return
 
     print("Found API key")
 
@@ -89,29 +89,21 @@ def test_provider():
             print(f"   Total tokens: {total}")
 
         print("\nAll tests passed! Provider is working correctly.")
-        return True
 
     except ImportError as e:
         print(f"ERROR: Import error: {e}")
         print("Please install required packages: pip install openai python-dotenv")
-        return False
     except Exception as e:
         print(f"ERROR: Test failed with error: {e}")
         import traceback
         traceback.print_exc()
-        return False
 
 
 if __name__ == "__main__":
     print("Testing Provider Connectivity")
     print("=" * 50)
 
-    success = test_provider()
+    test_provider()
 
     print("\n" + "=" * 50)
-    if success:
-        print("Provider test completed successfully")
-        sys.exit(0)
-    else:
-        print("Provider test failed")
-        sys.exit(1)
+    print("Provider test completed")

@@ -701,9 +701,27 @@ class TestAgentState:
 
         filtered = AgentLoop._filter_repair_tools(tool_schemas)
 
-        assert len(filtered) == 3
+        assert len(filtered) == 4
         tool_names = {schema["function"]["name"] for schema in filtered}
-        assert tool_names == {"read_file", "edit_file", "write_file"}
+        assert tool_names == {"read_file", "edit_file", "write_file", "run_command"}
+
+    def test_filter_repair_tools_excludes_non_repair_tools(self):
+        """Test that repair tool filtering excludes non-repair tools like search_code."""
+        tool_schemas = [
+            {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "edit_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "write_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "search_code", "parameters": {}}},
+            {"type": "function", "function": {"name": "run_command", "parameters": {}}},
+        ]
+
+        filtered = AgentLoop._filter_repair_tools(tool_schemas)
+
+        # search_code should be excluded
+        assert len(filtered) == 4
+        tool_names = {schema["function"]["name"] for schema in filtered}
+        assert tool_names == {"read_file", "edit_file", "write_file", "run_command"}
+        assert "search_code" not in tool_names
 
     def test_record_file_read(self):
         """Test recording file reads."""

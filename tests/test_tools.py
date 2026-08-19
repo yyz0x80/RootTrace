@@ -1926,6 +1926,51 @@ class TestWorkspaceChanges:
         # Verify patch contains the modified file
         assert "initial.py" in patch_content or "modified content" in patch_content
 
+    def test_run_command_whitelist_enforcement_for_repair(self, temp_workspace):
+        """Test that run_command enforces whitelist even in repair mode."""
+        # Initialize git repo
+        subprocess.run(["git", "init", "-q"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_workspace.root, check=True)
+
+        # Create a test file
+        test_file = temp_workspace.root / "test.py"
+        test_file.write_text("print('hello')\n")
+        subprocess.run(["git", "add", "test.py"], cwd=temp_workspace.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Initial commit"], cwd=temp_workspace.root, check=True)
+
+        # Create tool registry
+        tool_registry = ToolRegistry(workspace=temp_workspace)
+
+        # Test allowed command: pytest
+        result = tool_registry.run_command({"command": "pytest"})
+        # Command should be allowed (even if it fails, it's not rejected by whitelist)
+        assert "not allowed" not in result.content
+
+        # Test disallowed command: ls
+        result = tool_registry.run_command({"command": "ls"})
+        assert not result.ok
+        assert "not allowed" in result.content
+
+        # Test allowed command: ruff check
+        result = tool_registry.run_command({"command": "ruff check"})
+        # Should be allowed (may fail if ruff not installed, but not rejected by whitelist)
+        assert "not allowed" not in result.content
+
+        # Test disallowed python command (not pytest)
+        result = tool_registry.run_command({"command": "python test.py"})
+        assert not result.ok
+        assert "Only 'python -m pytest' is allowed" in result.content
+
+        # Test allowed git diff
+        result = tool_registry.run_command({"command": "git diff"})
+        assert result.ok
+
+        # Test disallowed git command
+        result = tool_registry.run_command({"command": "git push"})
+        assert not result.ok
+        assert "Only 'git diff' and 'git status' are allowed" in result.content
+
 
 class TestWorkspaceChange:
     """Tests for WorkspaceChange dataclass"""

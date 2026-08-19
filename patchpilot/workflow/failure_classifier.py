@@ -33,6 +33,7 @@ class FailureType(str, Enum):
     MODEL_FAILURE = "MODEL_FAILURE"
     REQUIREMENT_AMBIGUITY = "REQUIREMENT_AMBIGUITY"
     SCOPE_VIOLATION = "SCOPE_VIOLATION"
+    NO_SOURCE_CHANGES = "NO_SOURCE_CHANGES"
 
 
 def _is_pytest_command(command: str) -> bool:
