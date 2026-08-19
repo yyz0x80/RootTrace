@@ -990,6 +990,8 @@ class TestWorkflowRunnerBuildRepairPrompt:
             verifier=Mock(),
             workspace=Mock(spec=Workspace),
         )
+        from patchpilot.issue.schema import TaskConstraint
+
         issue = NormalizedIssue(
             title="Correct median",
             task_type="bug",
@@ -1004,7 +1006,13 @@ class TestWorkflowRunnerBuildRepairPrompt:
                     description="Odd inputs preserve the middle value.",
                 ),
             ],
-            constraints=["Change only benchmark/statistics.py."],
+            constraints=[
+                TaskConstraint(
+                    id="C-1",
+                    description="Change only benchmark/statistics.py.",
+                    kind="WRITE_SCOPE",
+                ),
+            ],
             ambiguous_points=[],
             expected_test_areas=[],
             implementation_notes=[],
