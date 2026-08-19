@@ -2,7 +2,7 @@
   "task_id": "sf-bool-whitespace-001",
   "category": "single_file_bug",
   "repository": "fixtures/day5_python_repo",
-  "base_commit": "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+  "base_commit": "e32138dad45ca3652677aa9aaef4417975047d0e",
   "issue": "tasks/sf-bool-whitespace-001/issue.md",
   "expected_final_status": "VERIFIED",
   "allowed_changes": ["benchmark/booleans.py"],

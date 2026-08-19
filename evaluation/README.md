@@ -25,7 +25,7 @@ can be versioned normally. Create a clean checkout with:
 python evaluation/materialize_fixture.py \
   --source evaluation/fixtures/day5_python_repo \
   --destination /tmp/patchpilot-task-repo \
-  --expected-commit a3df5b5f8aadf0015070e07ad21c22f744de3230
+  --expected-commit e32138dad45ca3652677aa9aaef4417975047d0e
 ```
 
 The command fails if the generated commit differs from the manifest. Each run

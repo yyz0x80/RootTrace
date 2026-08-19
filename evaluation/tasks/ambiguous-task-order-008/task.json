@@ -2,7 +2,7 @@
   "task_id": "ambiguous-task-order-008",
   "category": "ambiguous_requirement",
   "repository": "fixtures/day5_python_repo",
-  "base_commit": "a3df5b5f8aadf0015070e07ad21c22f744de3230",
+  "base_commit": "e32138dad45ca3652677aa9aaef4417975047d0e",
   "issue": "tasks/ambiguous-task-order-008/issue.md",
   "expected_phase": "prepare",
   "expected_final_status": "NEEDS_CLARIFICATION",
