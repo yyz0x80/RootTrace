@@ -65,18 +65,36 @@ class RunResult:
 
 @dataclass
 class ScoreResult:
-    """Scoring result for a task."""
+    """Scoring result for a task.
+
+    Fields:
+        task_id: Task identifier
+        category: Task category
+        expected_status: Expected final status from task manifest
+        actual_status: Actual status reported by PatchPilot
+        phase_reached: Execution phase reached (prepare or execute)
+        functional_correctness: 1 if patch applies and all hidden tests pass, 0 otherwise
+        outcome_accuracy: 1 if actual_status equals expected_status, 0 otherwise
+        hidden_tests_passed: True if all hidden tests passed, False if any failed
+        hidden_tests_applicable: True if hidden tests were configured and run
+        verification_report_present: True if verification_report.json exists
+        patch_generated: True if patch.diff was generated
+        patch_applied: True if patch was successfully applied to scoring copy
+        details: Additional diagnostic information
+    """
 
     task_id: str
     category: str
     expected_status: str
     actual_status: str
     phase_reached: str
-    score: float
+    functional_correctness: float
+    outcome_accuracy: float
     hidden_tests_passed: bool
-    outcome_matched: bool
+    hidden_tests_applicable: bool
     verification_report_present: bool = False
     patch_generated: bool = False
+    patch_applied: bool = False
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -778,6 +796,12 @@ def score_task(
 ) -> ScoreResult:
     """Score a completed task by applying patch and running hidden tests.
 
+    Scoring semantics:
+    - functional_correctness: 1 if patch applies and all hidden tests pass, 0 otherwise
+    - outcome_accuracy: 1 if actual_status equals expected_status, 0 otherwise
+    - For prepare-only tasks, functional_correctness is not applicable (set to 0)
+    - For tasks with no hidden tests, hidden_tests_applicable is False
+
     Args:
         task_config: Task configuration
         run_result: Result from task execution
@@ -794,15 +818,17 @@ def score_task(
     patch_file = execute_dir / "patch.diff"
     task_dir = evaluation_root / Path(task_config.issue).parent
 
+    # Initialize result with default values
     result = ScoreResult(
         task_id=task_id,
         category=task_config.category,
         expected_status=task_config.expected_final_status,
         actual_status="UNKNOWN",
         phase_reached=run_result.phase,
-        score=0.0,
+        functional_correctness=0.0,
+        outcome_accuracy=0.0,
         hidden_tests_passed=False,
-        outcome_matched=run_result.outcome_matched,
+        hidden_tests_applicable=bool(task_config.score_commands),
         verification_report_present=(
             check_verification_report(execute_dir)
             if run_result.phase == "execute"
@@ -813,6 +839,7 @@ def score_task(
             if run_result.phase == "execute"
             else False
         ),
+        patch_applied=False,
     )
     result.details["run_status"] = run_result.status
     if run_result.failure_type:
@@ -821,7 +848,10 @@ def score_task(
     # For tasks that stopped at prepare phase
     if run_result.phase == "prepare":
         result.actual_status = run_result.actual_status
-        result.score = 1.0 if run_result.outcome_matched else 0.0
+        result.outcome_accuracy = 1.0 if run_result.outcome_matched else 0.0
+        # Functional correctness is not applicable for prepare-only tasks
+        result.functional_correctness = 0.0
+        result.hidden_tests_applicable = False
         if run_result.error_message:
             result.details["error_message"] = run_result.error_message
         return result
@@ -833,7 +863,10 @@ def score_task(
             if run_result.actual_status != "UNKNOWN"
             else "EXECUTION_FAILED"
         )
-        result.score = 0.0
+        result.outcome_accuracy = (
+            1.0 if result.actual_status == result.expected_status else 0.0
+        )
+        result.functional_correctness = 0.0
         if run_result.error_message:
             result.details["error_message"] = run_result.error_message
         return result
@@ -845,8 +878,8 @@ def score_task(
         if run_result.actual_status == "UNKNOWN" and run_summary is not None
         else run_result.actual_status
     )
-    result.outcome_matched = (
-        result.actual_status == result.expected_status
+    result.outcome_accuracy = (
+        1.0 if result.actual_status == result.expected_status else 0.0
     )
 
     # Create scoring repository copy
@@ -858,6 +891,7 @@ def score_task(
 
         # Apply the patch when present. A patch is mandatory only for tasks
         # that declare hidden score commands.
+        patch_applied = False
         if patch_file.exists():
             patch_result = apply_patch(score_repo, patch_file)
             if patch_result.returncode != 0:
@@ -866,41 +900,42 @@ def score_task(
                     or patch_result.stdout.strip()
                     or "git apply failed without output"
                 )
-                result.score = 0.0
+                result.functional_correctness = 0.0
                 return result
+            patch_applied = True
+            result.patch_applied = True
+        
         if task_config.score_commands and not patch_file.exists():
             result.details["patch_error"] = "Patch file was not generated"
-            result.score = 0.0
+            result.functional_correctness = 0.0
             return result
 
-        # Run score commands (hidden tests)
-        all_passed = True
-        test_results = []
+        # Run score commands (hidden tests) if configured
+        if task_config.score_commands:
+            all_passed = True
+            test_results = []
 
-        for command in task_config.score_commands:
-            cmd_result = run_score_command(command, score_repo, task_dir)
-            passed = cmd_result.returncode == 0
-            all_passed = all_passed and passed
-            test_results.append(
-                {
-                    "command": command,
-                    "passed": passed,
-                    "stdout": cmd_result.stdout,
-                    "stderr": cmd_result.stderr,
-                }
-            )
+            for command in task_config.score_commands:
+                cmd_result = run_score_command(command, score_repo, task_dir)
+                passed = cmd_result.returncode == 0
+                all_passed = all_passed and passed
+                test_results.append(
+                    {
+                        "command": command,
+                        "passed": passed,
+                        "stdout": cmd_result.stdout,
+                        "stderr": cmd_result.stderr,
+                    }
+                )
 
-        result.hidden_tests_passed = all_passed
-        result.details["test_results"] = test_results
-
-        # Calculate score based on status match and hidden tests
-        status_match = result.actual_status == result.expected_status
-        if status_match and result.hidden_tests_passed:
-            result.score = 1.0
-        elif status_match:
-            result.score = 0.5
+            result.hidden_tests_passed = all_passed
+            result.details["test_results"] = test_results
+            
+            # Functional correctness is 1 only if patch applied and all tests pass
+            result.functional_correctness = 1.0 if (patch_applied and all_passed) else 0.0
         else:
-            result.score = 0.0
+            # No hidden tests configured - functional correctness depends on patch applicability
+            result.functional_correctness = 1.0 if patch_applied else 0.0
 
     finally:
         # Clean up temporary directory
@@ -921,18 +956,21 @@ def save_score_result(run_dir: Path, score: ScoreResult) -> None:
     with open(score_file, "w") as f:
         json.dump(
             {
+                "schema_version": "2.0",
                 "task_id": score.task_id,
                 "category": score.category,
                 "expected_status": score.expected_status,
                 "actual_status": score.actual_status,
                 "phase_reached": score.phase_reached,
-                "score": score.score,
+                "functional_correctness": score.functional_correctness,
+                "outcome_accuracy": score.outcome_accuracy,
                 "hidden_tests_passed": score.hidden_tests_passed,
-                "outcome_matched": score.outcome_matched,
+                "hidden_tests_applicable": score.hidden_tests_applicable,
                 "verification_report_present": (
                     score.verification_report_present
                 ),
                 "patch_generated": score.patch_generated,
+                "patch_applied": score.patch_applied,
                 "details": score.details,
             },
             f,
@@ -1045,10 +1083,13 @@ def aggregate_scores(
     aggregate = {
         "timestamp": timestamp,
         "variant": variant,
+        "schema_version": "2.0",
         "total_tasks": 0,
         "completed_tasks": 0,
-        "total_score": 0.0,
-        "average_score": 0.0,
+        "total_functional_correctness": 0.0,
+        "average_functional_correctness": 0.0,
+        "total_outcome_accuracy": 0.0,
+        "average_outcome_accuracy": 0.0,
         "category_scores": {},
         "task_results": [],
     }
@@ -1069,6 +1110,16 @@ def aggregate_scores(
     )
     aggregate["total_tasks"] = len(task_ids)
 
+    # New metrics for separated scoring
+    functional_correct_sum = 0
+    functional_correct_eligible = 0
+    outcome_match_sum = 0
+    false_verified_count = 0
+    false_verified_eligible = 0
+    patch_applied_sum = 0
+    patch_applied_eligible = 0
+    
+    # Legacy metrics for backward compatibility where appropriate
     outcome_matches = 0
     verified_tasks = 0
     verified_eligible = sum(
@@ -1109,8 +1160,27 @@ def aggregate_scores(
             continue
 
         aggregate["completed_tasks"] += 1
-        aggregate["total_score"] += task_score["score"]
         aggregate["task_results"].append(task_score)
+
+        # Handle both old and new schema versions
+        schema_version = task_score.get("schema_version", "1.0")
+        if schema_version == "2.0":
+            functional_correctness = task_score.get("functional_correctness", 0.0)
+            outcome_accuracy = task_score.get("outcome_accuracy", 0.0)
+            hidden_tests_applicable = task_score.get("hidden_tests_applicable", False)
+            patch_applied = task_score.get("patch_applied", False)
+            # For backward compatibility with code expecting "score"
+            legacy_score = functional_correctness
+        else:
+            # Legacy schema: "score" field exists
+            legacy_score = task_score.get("score", 0.0)
+            functional_correctness = legacy_score  # Best effort mapping
+            outcome_accuracy = 1.0 if task_score.get("outcome_matched", False) else 0.0
+            hidden_tests_applicable = task_score.get("hidden_tests_passed", False) is not None
+            patch_applied = task_score.get("patch_generated", False)
+
+        aggregate["total_functional_correctness"] += functional_correctness
+        aggregate["total_outcome_accuracy"] += outcome_accuracy
 
         category = config.category if config else task_score["category"]
         expected_status = (
@@ -1121,6 +1191,28 @@ def aggregate_scores(
         actual_status = task_score.get("actual_status")
         phase_reached = task_score.get("phase_reached")
 
+        # New separated metrics
+        if hidden_tests_applicable and phase_reached == "execute":
+            functional_correct_eligible += 1
+            functional_correct_sum += functional_correctness
+            
+            # False VERIFIED: reported VERIFIED but functional checks failed
+            if actual_status == "VERIFIED" and functional_correctness == 0.0:
+                false_verified_count += 1
+            if expected_status == "VERIFIED":
+                false_verified_eligible += 1
+                
+            # Patch applicability
+            if patch_applied is not None:
+                patch_applied_eligible += 1
+                if patch_applied:
+                    patch_applied_sum += 1
+
+        # Outcome accuracy (separate from functional correctness)
+        if actual_status == expected_status:
+            outcome_match_sum += 1
+
+        # Legacy metrics for backward compatibility
         if actual_status == expected_status:
             outcome_matches += 1
 
@@ -1140,10 +1232,12 @@ def aggregate_scores(
         if category not in aggregate["category_scores"]:
             aggregate["category_scores"][category] = {
                 "count": 0,
-                "total_score": 0.0,
+                "total_functional_correctness": 0.0,
+                "total_outcome_accuracy": 0.0,
             }
         aggregate["category_scores"][category]["count"] += 1
-        aggregate["category_scores"][category]["total_score"] += task_score["score"]
+        aggregate["category_scores"][category]["total_functional_correctness"] += functional_correctness
+        aggregate["category_scores"][category]["total_outcome_accuracy"] += outcome_accuracy
 
         report = load_json_object(task_dir / "execute" / "verification_report.json")
         run_summary = load_json_object(task_dir / "execute" / "run_summary.json")
@@ -1229,17 +1323,43 @@ def aggregate_scores(
 
     # Calculate averages
     if aggregate["completed_tasks"] > 0:
-        aggregate["average_score"] = (
-            aggregate["total_score"] / aggregate["completed_tasks"]
+        aggregate["average_functional_correctness"] = (
+            aggregate["total_functional_correctness"] / aggregate["completed_tasks"]
+        )
+        aggregate["average_outcome_accuracy"] = (
+            aggregate["total_outcome_accuracy"] / aggregate["completed_tasks"]
         )
 
     for category in aggregate["category_scores"]:
         cat_data = aggregate["category_scores"][category]
         if cat_data["count"] > 0:
-            cat_data["average_score"] = cat_data["total_score"] / cat_data["count"]
+            cat_data["average_functional_correctness"] = (
+                cat_data["total_functional_correctness"] / cat_data["count"]
+            )
+            cat_data["average_outcome_accuracy"] = (
+                cat_data["total_outcome_accuracy"] / cat_data["count"]
+            )
 
     aggregate["missing_score_count"] = missing_scores
     aggregate["metrics"] = {
+        # New separated metrics
+        "functional_correctness_rate": rate_metric(
+            functional_correct_sum,
+            functional_correct_eligible,
+        ),
+        "outcome_accuracy_rate": rate_metric(
+            outcome_match_sum,
+            aggregate["total_tasks"],
+        ),
+        "false_verified_rate": rate_metric(
+            false_verified_count,
+            false_verified_eligible,
+        ),
+        "patch_applicability_rate": rate_metric(
+            patch_applied_sum,
+            patch_applied_eligible,
+        ),
+        # Legacy metrics for backward compatibility
         "expected_outcome_match_rate": rate_metric(
             outcome_matches,
             aggregate["total_tasks"],
@@ -1423,19 +1543,20 @@ def main() -> None:
                 timestamp=timestamp,
             )
 
-            print(f"  Score: {score_result.score:.1f}, Status: {score_result.actual_status}")
-            report_state = (
-                "present"
-                if score_result.verification_report_present
-                else "missing"
-            )
-            patch_state = (
-                "generated" if score_result.patch_generated else "missing"
-            )
-            print(
-                f"  Artifacts: verification_report={report_state}, "
-                f"patch={patch_state}"
-            )
+            print(f"  Functional: {score_result.functional_correctness:.1f}, Outcome: {score_result.outcome_accuracy:.1f}, Status: {score_result.actual_status}")
+            if hasattr(score_result, 'verification_report_present'):
+                report_state = (
+                    "present"
+                    if score_result.verification_report_present
+                    else "missing"
+                )
+                patch_state = (
+                    "generated" if score_result.patch_generated else "missing"
+                )
+                print(
+                    f"  Artifacts: verification_report={report_state}, "
+                    f"patch={patch_state}"
+                )
 
             # Save score result
             run_dir = evaluation_root / "runs" / timestamp / task_config.task_id
@@ -1459,13 +1580,17 @@ def main() -> None:
     print(f"Results saved to: evaluation/runs/{timestamp}/")
     print(f"Total tasks: {aggregate['total_tasks']}")
     print(f"Completed: {aggregate['completed_tasks']}")
-    print(f"Average score: {aggregate['average_score']:.2f}")
+    print(f"Functional correctness: {aggregate['average_functional_correctness']:.2f}")
+    print(f"Outcome accuracy: {aggregate['average_outcome_accuracy']:.2f}")
 
     # Print category breakdown
     if aggregate["category_scores"]:
-        print("\nCategory scores:")
+        print("\nCategory breakdown:")
         for category, data in aggregate["category_scores"].items():
-            print(f"  {category}: {data['average_score']:.2f} ({data['count']} tasks)")
+            print(f"  {category}:")
+            print(f"    Functional: {data['average_functional_correctness']:.2f}")
+            print(f"    Outcome: {data['average_outcome_accuracy']:.2f}")
+            print(f"    Tasks: {data['count']}")
 
 
 if __name__ == "__main__":
