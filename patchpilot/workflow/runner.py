@@ -58,11 +58,12 @@ from patchpilot.verification.config import (
     VerificationStrategy,
     VerificationTimeouts,
 )
-from patchpilot.verification.report import VerificationReport, failure_fingerprint
+from patchpilot.verification.report import VerificationReport
 from patchpilot.verification.targets import select_target_tests
 from patchpilot.workflow.completion import determine_completion_state
 from patchpilot.workflow.execute_logger import ExecuteLogger
 from patchpilot.workflow.failure_classifier import FailureType
+from patchpilot.workflow.repair_selector import RepairSelector
 from patchpilot.workflow.result import WorkflowResult
 from patchpilot.workflow.trace import TraceEvent, TraceWriter
 from patchpilot.workspace import Workspace
@@ -850,28 +851,60 @@ class WorkflowRunner:
             ExecuteLogger.log_verification(verification_results)
 
             # Step 13: Repair loop if verification failed
-            previous_failure = None
+            previous_repair_fingerprints: set[str] = set()
+            approved_files_set = (
+                {change.path for change in change_plan.planned_changes}
+                if change_plan
+                else set()
+            )
 
             while not report.passed:
-                # Check for repeated failure (fingerprint check)
-                current_failure = failure_fingerprint(report)
+                # Use RepairSelector to select repairable failures
+                repair_selector = RepairSelector(
+                    strategy=self.verification_strategy.value,
+                    changed_files=changed_file_paths,
+                    approved_files=approved_files_set,
+                )
+                selection = repair_selector.select_repair_candidates(
+                    report,
+                    change_plan,
+                )
 
-                if current_failure == previous_failure:
+                # Check if we should stop without repair
+                if selection.should_stop:
                     logger.warning(
-                        "Same failure repeated. Stopping repair loop to avoid futile attempts."
+                        "Repair stopped: %s",
+                        selection.stop_reason,
                     )
-                    ExecuteLogger.log_repair_stopped("Same failure repeated")
+                    ExecuteLogger.log_repair_stopped(selection.stop_reason)
                     break
 
-                previous_failure = current_failure
+                # Check for repeated failures using repair candidate fingerprints
+                current_repair_fingerprints = {
+                    candidate.fingerprint for candidate in selection.repair_candidates
+                }
 
-                # Check for unrecoverable errors
-                if report.failure_type in UNRECOVERABLE_FAILURE_TYPES:
+                if current_repair_fingerprints == previous_repair_fingerprints:
                     logger.warning(
-                        "Unrecoverable failure detected: %s. Stopping repair loop.",
-                        report.failure_type,
+                        "Same repairable failures repeated. Stopping repair loop to avoid futile attempts."
                     )
-                    ExecuteLogger.log_repair_stopped(f"Unrecoverable failure: {report.failure_type}")
+                    ExecuteLogger.log_repair_stopped("Same repairable failures repeated")
+                    break
+
+                previous_repair_fingerprints = current_repair_fingerprints
+
+                # Check for unrecoverable errors from excluded failures
+                blocking_excluded = [
+                    f for f in selection.excluded_failures if f.is_blocking
+                ]
+                if blocking_excluded:
+                    logger.warning(
+                        "Blocking non-repairable failures detected: %s. Stopping repair loop.",
+                        ", ".join(f.reason for f in blocking_excluded),
+                    )
+                    ExecuteLogger.log_repair_stopped(
+                        f"Blocking failures: {', '.join(f.reason for f in blocking_excluded)}"
+                    )
                     break
 
                 # Check repair attempt limit
@@ -887,13 +920,13 @@ class WorkflowRunner:
                 report.retry_count = retry_count
                 ExecuteLogger.log_repair_attempt(retry_count, self.max_repair_attempts)
                 logger.info(
-                    "Starting repair attempt %d/%d",
+                    "Starting repair attempt %d/%d with %d repairable failures",
                     retry_count,
                     self.max_repair_attempts,
+                    len(selection.repair_candidates),
                 )
 
-                # Build a bounded failure-diff context instead of restarting
-                # the generic repository-discovery workflow.
+                # Build a bounded failure-diff context using selected repair candidates
                 current_changes = _get_workspace_changes(workspace_path)
                 current_patch = generate_patch(
                     workspace_path,
@@ -907,6 +940,7 @@ class WorkflowRunner:
                     current_changes=current_changes,
                     change_plan=change_plan,
                     normalized_issue=normalized_issue,
+                    selection=selection,
                 )
 
                 # Run agent with repair prompt
@@ -1334,6 +1368,7 @@ class WorkflowRunner:
         current_changes: list[WorkspaceChange] | None = None,
         change_plan: ChangePlan | None = None,
         normalized_issue: NormalizedIssue | None = None,
+        selection: Any = None,
     ) -> str:
         """Build a bounded repair prompt from the current failure differential.
 
@@ -1350,57 +1385,81 @@ class WorkflowRunner:
             current_changes: Files changed by the initial implementation.
             change_plan: Structured approved change plan when available.
             normalized_issue: Structured issue and acceptance criteria.
+            selection: RepairSelection with repair candidates (relevance-aware).
 
         Returns:
             Compact, structured repair prompt string.
         """
-        failed_checks = failure_report.get_failed_checks()
-        failed_file_path = None
-        failed_line_number = None
-
-        if not failed_checks:
-            failure_summary = "No specific failure details available"
-            relevant_criterion_ids: list[str] = []
-        else:
-            latest_failure = failed_checks[-1]
-            relevant_criterion_ids = latest_failure.subject_ids
-            failure_summary = (
-                f"Command: {latest_failure.command}\n"
-                f"Failure Type: {latest_failure.failure_type}\n"
-                f"Exit Code: {latest_failure.exit_code}"
-            )
-
-            # Extract file and line information from failure for minimal context
-            if latest_failure.summary:
-                summary_dict = latest_failure.summary
-                if summary_dict.get("failed_tests"):
-                    failure_summary += (
-                        f"\nFailed Tests: {', '.join(summary_dict['failed_tests'])}"
-                    )
-                if summary_dict.get("error_type"):
-                    failure_summary += (
-                        f"\nError Type: {summary_dict['error_type']}"
-                    )
-                if "relevant_output" in summary_dict:
-                    failure_summary += (
-                        "\nRelevant Output:\n"
-                        + _truncate_repair_text(
-                            str(summary_dict["relevant_output"]),
-                            MAX_REPAIR_FAILURE_OUTPUT_CHARS,
-                        )
-                    )
-
-                # Extract file path and line number from error output
+        # Use repair candidates from selection if available (relevance-aware)
+        if selection and selection.repair_candidates:
+            failure_summary = self._format_repair_candidates(selection)
+            # Collect all relevant criterion IDs from repair candidates
+            relevant_criterion_ids = {
+                criterion_id
+                for candidate in selection.repair_candidates
+                for criterion_id in candidate.check.subject_ids
+            }
+            # Extract file and line from first repair candidate for context
+            failed_file_path = None
+            failed_line_number = None
+            if selection.repair_candidates:
+                first_candidate = selection.repair_candidates[0]
+                summary_dict = first_candidate.check.summary or {}
                 relevant_output = str(summary_dict.get("relevant_output", ""))
                 if relevant_output:
-                    # Try to extract file:line pattern from Python tracebacks
                     file_line_match = re.search(r'File "([^"]+)", line (\d+)', relevant_output)
                     if file_line_match:
                         failed_file_path = file_line_match.group(1)
                         failed_line_number = int(file_line_match.group(2))
+        else:
+            # Fallback to original logic for backward compatibility
+            failed_checks = failure_report.get_failed_checks()
+            failed_file_path = None
+            failed_line_number = None
+
+            if not failed_checks:
+                failure_summary = "No specific failure details available"
+                relevant_criterion_ids: list[str] = []
+            else:
+                latest_failure = failed_checks[-1]
+                relevant_criterion_ids = latest_failure.subject_ids
+                failure_summary = (
+                    f"Command: {latest_failure.command}\n"
+                    f"Failure Type: {latest_failure.failure_type}\n"
+                    f"Exit Code: {latest_failure.exit_code}"
+                )
+
+                # Extract file and line information from failure for minimal context
+                if latest_failure.summary:
+                    summary_dict = latest_failure.summary
+                    if summary_dict.get("failed_tests"):
                         failure_summary += (
-                            f"\nFailed Location: {failed_file_path}:{failed_line_number}"
+                            f"\nFailed Tests: {', '.join(summary_dict['failed_tests'])}"
                         )
+                    if summary_dict.get("error_type"):
+                        failure_summary += (
+                            f"\nError Type: {summary_dict['error_type']}"
+                        )
+                    if "relevant_output" in summary_dict:
+                        failure_summary += (
+                            "\nRelevant Output:\n"
+                            + _truncate_repair_text(
+                                str(summary_dict["relevant_output"]),
+                                MAX_REPAIR_FAILURE_OUTPUT_CHARS,
+                            )
+                        )
+
+                    # Extract file path and line number from error output
+                    relevant_output = str(summary_dict.get("relevant_output", ""))
+                    if relevant_output:
+                        # Try to extract file:line pattern from Python tracebacks
+                        file_line_match = re.search(r'File "([^"]+)", line (\d+)', relevant_output)
+                        if file_line_match:
+                            failed_file_path = file_line_match.group(1)
+                            failed_line_number = int(file_line_match.group(2))
+                            failure_summary += (
+                                f"\nFailed Location: {failed_file_path}:{failed_line_number}"
+                            )
 
         if normalized_issue is not None:
             task_goal = (
@@ -1501,6 +1560,51 @@ class WorkflowRunner:
             ),
             failure=failure_summary,
         )
+
+    def _format_repair_candidates(self, selection: Any) -> str:
+        """Format selected repair candidates as actionable repair evidence.
+
+        Args:
+            selection: RepairSelection with repair candidates
+
+        Returns:
+            Formatted repair candidates string
+        """
+        if not selection.repair_candidates:
+            return "No repairable failures selected."
+
+        candidate_details = []
+        for i, candidate in enumerate(selection.repair_candidates, 1):
+            details = [
+                f"Failure {i}:",
+                f"  Command: {candidate.check.command}",
+                f"  Tier: {candidate.tier}",
+                f"  Transition: {candidate.transition}",
+                f"  Reason: {candidate.reason}",
+                f"  Failure Type: {candidate.check.failure_type or 'unknown'}",
+                f"  Exit Code: {candidate.check.exit_code}",
+            ]
+
+            summary: dict[str, Any] = candidate.check.summary or {}
+            failed_tests = summary.get("failed_tests")
+            if isinstance(failed_tests, list) and failed_tests:
+                details.append(
+                    "  Failed Tests: " + ", ".join(str(test) for test in failed_tests)
+                )
+
+            error_type = summary.get("error_type")
+            if error_type:
+                details.append(f"  Error Type: {error_type}")
+
+            if candidate.bounded_output:
+                details.append(
+                    "  Relevant Output:\n"
+                    + _truncate_repair_text(candidate.bounded_output, MAX_REPAIR_FAILURE_OUTPUT_CHARS)
+                )
+
+            candidate_details.append("\n".join(details))
+
+        return "\n\n".join(candidate_details)
 
     def _get_modified_files(self) -> list[str]:
         """Get list of modified files using git status --porcelain.

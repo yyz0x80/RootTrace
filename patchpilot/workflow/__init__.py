@@ -5,6 +5,7 @@ This module provides workflow orchestration components including:
 - Agent workflow coordination
 - Error categorization and routing
 - Repair loop with early stopping logic
+- Repair candidate selector for relevance-aware repair
 - Complete workflow runner for end-to-end execution
 - Structured logging for execute workflow
 - Completion state determination
@@ -36,6 +37,12 @@ from patchpilot.workflow.repair_loop import (
     build_failure_repair_prompt,
     run_repair_loop,
 )
+from patchpilot.workflow.repair_selector import (
+    ExcludedFailure,
+    RepairCandidate,
+    RepairSelection,
+    RepairSelector,
+)
 from patchpilot.workflow.result import WorkflowResult
 from patchpilot.workflow.runner import (
     MAX_REPAIR_ATTEMPTS,
@@ -51,15 +58,19 @@ from patchpilot.workflow.trace import TraceEvent, TraceWriter
 __all__ = [
     "MAX_REPAIR_ATTEMPTS",
     "CompletionDecision",
+    "ExcludedFailure",
     "ExecuteLogger",
     "FailureType",
     "PermissionAuditor",
     "PermissionDecision",
     "PermissionResult",
+    "RepairCandidate",
     "RepairLoop",
     "RepairLoopError",
     "RepairLoopLimitError",
     "RepairLoopStalledError",
+    "RepairSelection",
+    "RepairSelector",
     "RuleID",
     "TraceEvent",
     "TraceWriter",

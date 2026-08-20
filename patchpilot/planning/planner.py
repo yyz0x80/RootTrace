@@ -181,11 +181,14 @@ Required structure:
 def _extract_json(text: str) -> dict:
     """Extract JSON from LLM response, handling markdown code blocks.
 
+    Also cleans null baseline_evidence values to empty strings to prevent
+    Pydantic validation errors when LLMs don't follow instructions.
+
     Args:
         text: Raw LLM response text.
 
     Returns:
-        Parsed JSON dictionary.
+        Parsed JSON dictionary with cleaned baseline_evidence values.
 
     Raises:
         ValueError: If no valid JSON is found in the response.
@@ -209,7 +212,24 @@ def _extract_json(text: str) -> dict:
     if start == -1 or end == -1:
         raise ValueError("Planner did not return JSON")
 
-    return json.loads(text[start : end + 1])
+    parsed_json = json.loads(text[start : end + 1])
+
+    # Clean null baseline_evidence values to empty strings
+    # This prevents Pydantic validation errors when LLM returns null
+    def clean_baseline_evidence(data):
+        """Recursively convert null baseline_evidence values to empty strings."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key == "baseline_evidence" and value is None:
+                    data[key] = ""
+                elif isinstance(value, (dict, list)):
+                    clean_baseline_evidence(value)
+        elif isinstance(data, list):
+            for item in data:
+                clean_baseline_evidence(item)
+
+    clean_baseline_evidence(parsed_json)
+    return parsed_json
 
 
 def _parse_plan_response(response: str, base_commit: str) -> ChangePlan:

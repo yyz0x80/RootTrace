@@ -11,6 +11,7 @@ from patchpilot.evidence.schema import (
 from patchpilot.workflow.completion import (
     determine_completion_state,
 )
+from patchpilot.workflow.repair_selector import RepairSelector
 
 
 def test_needs_clarification_state():
@@ -361,3 +362,70 @@ def test_compliant_constraints():
 
     assert result.state == CompletionState.VERIFIED
     assert result.constraint_violation_count == 0
+
+
+def test_repair_selector_completion_hint_non_blocking_failures():
+    """Test that repair selector provides correct completion hint for non-blocking failures."""
+    from patchpilot.verification.report import CheckReport, VerificationReport
+    from patchpilot.evidence.schema import CheckTransition
+
+    # Create a report with only pre-existing failures (non-blocking)
+    report = VerificationReport(passed=False)
+    report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_3_REGRESSION",
+            command="pytest tests/",
+            passed=False,
+            exit_code=1,
+            duration_seconds=1.0,
+            failure_type="AssertionError",
+            tier="affected",
+            transition=CheckTransition.PRE_EXISTING_FAILURE.value,
+            failure_fingerprint="preexisting123",
+            summary={"error_type": "AssertionError", "failed_tests": ["test_old"]},
+        )
+    )
+
+    selector = RepairSelector(strategy="balanced")
+    selection = selector.select_repair_candidates(report)
+
+    assert selection.should_repair is False
+    assert selection.should_stop is True
+    assert selection.completion_hint == "PARTIALLY_VERIFIED"
+    assert "non-repairable" in selection.stop_reason.lower() or "pre-existing" in selection.stop_reason.lower()
+
+
+def test_repair_selector_completion_hint_blocking_failures():
+    """Test that repair selector provides correct completion hint for blocking failures."""
+    from patchpilot.verification.report import CheckReport, VerificationReport
+    from patchpilot.evidence.schema import CheckTransition
+    from patchpilot.workflow.failure_classifier import FailureType
+
+    # Create a report with environment failure (blocking)
+    report = VerificationReport(passed=False)
+    report.add_check(
+        CheckReport(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_2_TARGET_TESTS",
+            command="pytest tests/",
+            passed=False,
+            exit_code=1,
+            duration_seconds=1.0,
+            failure_type=FailureType.ENVIRONMENT_FAILURE.value,
+            tier="required",
+            transition=CheckTransition.NEW_OR_UNCOMPARED.value,
+            failure_fingerprint="env123",
+            summary={"error_type": "ModuleNotFoundError", "relevant_output": "command not found"},
+        )
+    )
+
+    selector = RepairSelector(strategy="balanced")
+    selection = selector.select_repair_candidates(report)
+
+    assert selection.should_repair is False
+    assert selection.should_stop is True
+    assert selection.completion_hint == "BLOCKED"
+    assert "non-repairable" in selection.stop_reason.lower()

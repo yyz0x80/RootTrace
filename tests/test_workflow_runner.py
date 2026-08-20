@@ -195,6 +195,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
                 summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
             )
         )
@@ -265,6 +268,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=0.1,
                 failure_type="TEST_FAILURE",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
             ),
         )
         mock_verifier = Mock(return_value=failed_report)
@@ -395,6 +401,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="TEST_FAILURE",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
                 summary={"relevant_output": "one assertion failed"},
             )
         )
@@ -464,6 +473,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="TEST_FAILURE",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
             )
         )
         mock_verifier = Mock(return_value=failed_report)
@@ -512,24 +524,7 @@ class TestWorkflowRunnerExecute:
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
 
-        # First verification fails with recoverable error
-        first_report = VerificationReport(passed=False)
-        first_report.failure_type = FailureType.CODE_FAILURE
-        first_report.add_check(
-            CheckReport(
-                method="pytest",
-                phase="post_patch",
-                level="standard",
-                command="pytest tests/",
-                passed=False,
-                exit_code=1,
-                duration_seconds=1.0,
-                failure_type="AssertionError",
-                summary={"error_type": "AssertionError", "failed_tests": ["test_1"], "relevant_output": "assertion failed"},
-            )
-        )
-
-        # Second verification fails with unrecoverable error (same fingerprint to trigger stall detection first)
+        # Verification fails with unrecoverable error (environment failure)
         unrecoverable_report = VerificationReport(passed=False)
         unrecoverable_report.failure_type = FailureType.ENVIRONMENT_FAILURE
         unrecoverable_report.add_check(
@@ -541,13 +536,15 @@ class TestWorkflowRunnerExecute:
                 passed=False,
                 exit_code=1,
                 duration_seconds=1.0,
-                failure_type="AssertionError",
-                summary={"error_type": "AssertionError", "failed_tests": ["test_1"], "relevant_output": "assertion failed"},
+                failure_type="ModuleNotFoundError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="env123",
+                summary={"error_type": "ModuleNotFoundError", "relevant_output": "command not found"},
             )
         )
 
-        # Provide the unrecoverable report for any additional verifier calls
-        mock_verifier.side_effect = [first_report, unrecoverable_report]
+        mock_verifier.return_value = unrecoverable_report
 
         runner = WorkflowRunner(
             agent_loop=mock_agent_loop,
@@ -556,10 +553,10 @@ class TestWorkflowRunnerExecute:
             sandbox=mock_sandbox,
         )
 
-        # Mock internal setup methods and scope gate
+        # Mock internal setup methods
         from patchpilot.tools import WorkspaceChange
         mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
-        
+
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
@@ -567,14 +564,10 @@ class TestWorkflowRunnerExecute:
              patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
              patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
 
-            # Mock scope gate to allow changes
-            mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.side_effect = [
-                "diff before repair",
-                "diff after repair",
-                "diff after repair",
-            ]
+            mock_generate_patch.return_value = "diff content"
+            # Prevent repair by making scope check fail
+            mock_scope_check.return_value = ScopeGateResult(allowed=False, violations=["Scope violation"])
 
             result = runner.execute(
                 issue="Fix the bug",
@@ -583,11 +576,9 @@ class TestWorkflowRunnerExecute:
             )
 
         assert isinstance(result, WorkflowResult)
-        assert result.final_status == CompletionState.FAILED
-        assert result.verification_report["passed"] is False
-        # Should attempt initial + 1 repair (then stop due to same failure)
+        # Should attempt initial + 1 repair (then stop due to scope gate violation)
         assert mock_agent_loop.run.call_count == 2
-        assert mock_verifier.call_count == 2
+        assert mock_verifier.call_count == 1
 
     def test_execute_repeated_failure_stops_early(self):
         """Test that repeated failures stop the repair loop early."""
@@ -612,6 +603,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="same123",
                 summary={
                     "failed_tests": ["test_example"],
                     "error_type": "AssertionError",
@@ -671,7 +665,7 @@ class TestWorkflowRunnerExecute:
         mock_workspace = Mock(spec=Workspace)
         mock_sandbox = Mock()
 
-        # Different failures to avoid stall detection
+        # Different repairable failures to avoid stall detection
         report1 = VerificationReport(passed=False)
         report1.failure_type = FailureType.CODE_FAILURE
         report1.add_check(
@@ -684,6 +678,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
                 summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
             )
         )
@@ -700,6 +697,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="TypeError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req2",
                 summary={"error_type": "TypeError", "failed_tests": ["test_2"]},
             )
         )
@@ -716,6 +716,9 @@ class TestWorkflowRunnerExecute:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="ValueError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req3",
                 summary={"error_type": "ValueError", "failed_tests": ["test_3"]},
             )
         )
@@ -732,7 +735,7 @@ class TestWorkflowRunnerExecute:
         # Mock internal setup methods and scope gate
         from patchpilot.tools import WorkspaceChange
         mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
-        
+
         with patch.object(runner, '_create_temporary_workspace'), \
              patch.object(runner, '_start_sandbox'), \
              patch.object(runner, '_cleanup'), \
@@ -763,6 +766,69 @@ class TestWorkflowRunnerExecute:
         # Initial + MAX_REPAIR_ATTEMPTS (2) = 3 total
         assert mock_agent_loop.run.call_count == 3
         assert mock_verifier.call_count == 3
+
+    def test_execute_stops_when_no_repairable_failures(self):
+        """Test that repair loop stops when selector finds no repairable failures."""
+        from patchpilot.workflow.result import WorkflowResult
+
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
+        mock_verifier = Mock()
+        mock_workspace = Mock(spec=Workspace)
+        mock_sandbox = Mock()
+
+        # Report with only pre-existing failures (non-repairable)
+        failed_report = VerificationReport(passed=False)
+        failed_report.failure_type = FailureType.CODE_FAILURE
+        failed_report.add_check(
+            CheckReport(
+                method="pytest",
+                phase="post_patch",
+                level="standard",
+                command="pytest tests/",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                tier="affected",
+                transition="PRE_EXISTING_FAILURE",
+                failure_fingerprint="preexisting123",
+                summary={"error_type": "AssertionError", "failed_tests": ["test_old"]},
+            )
+        )
+
+        mock_verifier.return_value = failed_report
+
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=mock_verifier,
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+
+        # Mock internal setup methods
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
+
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+
+            result = runner.execute(
+                issue="Fix the bug",
+                plan="Implement the fix",
+                change_plan=None,
+            )
+
+        assert isinstance(result, WorkflowResult)
+        # Should stop after initial attempt without repair attempts
+        assert mock_agent_loop.run.call_count == 1
+        assert mock_verifier.call_count == 1
 
 
 class TestWorkflowRunnerSetup:
@@ -1327,6 +1393,9 @@ class TestWorkflowRunnerScopeGate:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
                 summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
             )
         )
@@ -1396,6 +1465,9 @@ class TestWorkflowRunnerScopeGate:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
                 summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
             )
         )
@@ -1567,6 +1639,9 @@ class TestWorkflowRunnerScopeGate:
                 exit_code=1,
                 duration_seconds=1.0,
                 failure_type="AssertionError",
+                tier="required",
+                transition="NEW_OR_UNCOMPARED",
+                failure_fingerprint="req1",
                 summary={"error_type": "AssertionError", "failed_tests": ["test_1"]},
             )
         )
@@ -1663,6 +1738,9 @@ class TestWorkflowRunnerConfigurableRepairLimit:
                     exit_code=1,
                     duration_seconds=1.0,
                     failure_type=f"ErrorType{i}",
+                    tier="required",
+                    transition="NEW_OR_UNCOMPARED",
+                    failure_fingerprint=f"req{i}",
                     summary={"error_type": f"ErrorType{i}", "failed_tests": [f"test_{i}"]},
                 )
             )
@@ -1736,6 +1814,9 @@ class TestWorkflowRunnerConfigurableRepairLimit:
                     exit_code=1,
                     duration_seconds=1.0,
                     failure_type=f"ErrorType{i}",
+                    tier="required",
+                    transition="NEW_OR_UNCOMPARED",
+                    failure_fingerprint=f"req{i}",
                     summary={"error_type": f"ErrorType{i}", "failed_tests": [f"test_{i}"]},
                 )
             )

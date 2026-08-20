@@ -320,3 +320,5 @@ def test_failure_type_enum_values():
     assert FailureType.TIMEOUT == "TIMEOUT"
     assert FailureType.MODEL_FAILURE == "MODEL_FAILURE"
     assert FailureType.REQUIREMENT_AMBIGUITY == "REQUIREMENT_AMBIGUITY"
+    assert FailureType.SCOPE_VIOLATION == "SCOPE_VIOLATION"
+    assert FailureType.NO_SOURCE_CHANGES == "NO_SOURCE_CHANGES"
