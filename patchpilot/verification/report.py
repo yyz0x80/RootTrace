@@ -42,6 +42,10 @@ class CheckReport:
         subject_ids: List of acceptance criteria or constraint IDs associated with this check
         direct: Whether this check provides direct evidence for the subject_ids
         selection_reason: Reason why this test was selected (for tiered verification)
+        test_node: Test node identifier for pytest checks (e.g., "tests/test_example.py::test_func")
+        transition: Transition type from baseline to post-patch (for post-patch checks)
+        baseline_check_id: Verification ID of the matching baseline check (for post-patch checks)
+        failure_fingerprint: Stable identifier for failure pattern (for failed checks)
     """
 
     method: str
@@ -59,6 +63,10 @@ class CheckReport:
     direct: bool = False
     tier: str = ""
     selection_reason: str = ""
+    test_node: str = ""
+    transition: str = ""
+    baseline_check_id: str = ""
+    failure_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the check report to a dictionary for serialization.
@@ -89,6 +97,7 @@ class VerificationReport:
         strategy: Verification strategy used (strict, balanced, focused)
         verification_status: Detailed verification status (VERIFIED, PARTIALLY_VERIFIED, FAILED)
         tier_summary: Summary of check results by tier
+        transition_summary: Summary of check transitions from baseline to post-patch
     """
 
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -103,6 +112,7 @@ class VerificationReport:
     strategy: str = ""
     verification_status: str = ""
     tier_summary: dict[str, dict[str, Any]] = field(default_factory=dict)
+    transition_summary: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Populate phase-specific lists from checks after initialization."""
@@ -290,6 +300,15 @@ class VerificationReport:
                 check_data["tier"] = ""
             if "selection_reason" not in check_data:
                 check_data["selection_reason"] = ""
+            # Handle backward compatibility for new baseline-delta fields
+            if "test_node" not in check_data:
+                check_data["test_node"] = ""
+            if "transition" not in check_data:
+                check_data["transition"] = ""
+            if "baseline_check_id" not in check_data:
+                check_data["baseline_check_id"] = ""
+            if "failure_fingerprint" not in check_data:
+                check_data["failure_fingerprint"] = ""
             checks.append(CheckReport(**check_data))
         
         # Handle backward compatibility for reports without phase-specific lists
@@ -321,6 +340,7 @@ class VerificationReport:
             strategy=data.get("strategy", ""),
             verification_status=data.get("verification_status", ""),
             tier_summary=data.get("tier_summary", {}),
+            transition_summary=data.get("transition_summary", {}),
         )
 
 

@@ -62,6 +62,22 @@ class EvidenceStatus(str, Enum):
     UNVERIFIED = "UNVERIFIED"
 
 
+class CheckTransition(str, Enum):
+    """Transition type for baseline-delta comparison of verification checks.
+
+    Represents the change in status from baseline to post-patch for a specific check.
+    Transitions are determined deterministically based on baseline and post-patch results.
+    """
+
+    RESOLVED = "RESOLVED"  # FAIL → PASS: Check was failing in baseline, now passes
+    PRESERVED = "PRESERVED"  # PASS → PASS: Check remained passing
+    REGRESSION = "REGRESSION"  # PASS → FAIL: Check was passing, now failing
+    PRE_EXISTING_FAILURE = "PRE_EXISTING_FAILURE"  # FAIL → FAIL with equivalent fingerprint
+    WORSENED = "WORSENED"  # FAIL → FAIL with changed or expanded fingerprint
+    NEW_OR_UNCOMPARED = "NEW_OR_UNCOMPARED"  # No matching baseline check
+    UNVERIFIED = "UNVERIFIED"  # Check was not executed
+
+
 class CompletionState(str, Enum):
     """Overall completion state for a task based on acceptance evidence.
 

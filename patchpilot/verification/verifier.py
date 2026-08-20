@@ -30,7 +30,15 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from patchpilot.evidence.schema import CheckTransition
 from patchpilot.sandbox.docker_runner import DockerSandbox
+from patchpilot.verification.baseline_delta import (
+    apply_baseline_delta_evaluation,
+    classify_transition,
+    compute_failure_fingerprint,
+    compute_transition_summary,
+    match_baseline_checks,
+)
 from patchpilot.verification.config import (
     VerificationStrategy,
     VerificationTimeouts,
@@ -149,7 +157,11 @@ class Verifier:
             timeout_seconds=self.timeouts.regression_tests,
             subject_ids=subject_ids or [],
             direct=False,
+            test_node="",  # Baseline regression doesn't target specific nodes
         )
+        # Add failure fingerprint for baseline checks
+        if not regression_check.passed:
+            regression_check.failure_fingerprint = compute_failure_fingerprint(regression_check)
         checks.append(regression_check)
 
         # Run target tests if specified
@@ -172,7 +184,11 @@ class Verifier:
                 timeout_seconds=self.timeouts.target_tests,
                 subject_ids=subject_ids or [],
                 direct=True,
+                test_node=target_tests[0] if target_tests else "",  # Use first test as node identifier
             )
+            # Add failure fingerprint for baseline checks
+            if not target_check.passed:
+                target_check.failure_fingerprint = compute_failure_fingerprint(target_check)
             checks.append(target_check)
 
         # Run specialized checks if change plan provides them
@@ -182,6 +198,10 @@ class Verifier:
                 change_plan,
                 phase="baseline",
             )
+            # Add failure fingerprints for baseline specialized checks
+            for check in specialized_checks:
+                if not check.passed:
+                    check.failure_fingerprint = compute_failure_fingerprint(check)
             checks.extend(specialized_checks)
 
         # Create baseline report
@@ -208,6 +228,7 @@ class Verifier:
         direct_subject_ids: list[str] | None = None,
         retry_count: int = 0,
         change_plan: ChangePlan | None = None,
+        baseline_report: VerificationReport | None = None,
     ) -> VerificationReport:
         """Run post-patch verification after making changes.
 
@@ -231,6 +252,7 @@ class Verifier:
             direct_subject_ids: Optional list of directly exercised acceptance criteria IDs
             retry_count: Number of retry attempts for failed checks
             change_plan: Optional ChangePlan with specialized verification specs
+            baseline_report: Optional baseline VerificationReport for delta comparison
 
         Returns:
             VerificationReport containing post-patch check results
@@ -253,6 +275,7 @@ class Verifier:
             timeout_seconds=self.timeouts.ruff,
             subject_ids=[],
             direct=False,
+            test_node="",
         )
         checks.append(ruff_check)
 
@@ -276,6 +299,7 @@ class Verifier:
                 timeout_seconds=self.timeouts.target_tests,
                 subject_ids=direct_subject_ids or subject_ids or [],
                 direct=bool(direct_subject_ids),
+                test_node=target_tests[0] if target_tests else "",
             )
             checks.append(target_check)
 
@@ -304,6 +328,7 @@ class Verifier:
             timeout_seconds=self.timeouts.regression_tests,
             subject_ids=[],  # Regression tests don't map to specific ACs
             direct=False,
+            test_node="",
         )
         checks.append(regression_check)
 
@@ -315,13 +340,57 @@ class Verifier:
             )
             checks.extend(constraint_checks)
 
-        # Create post-patch report (non-fail-fast)
+        # Apply baseline-delta comparison if baseline checks available
+        baseline_checks = baseline_report.get_baseline_checks() if baseline_report else []
+        if baseline_checks:
+            # Match post-patch checks to baseline
+            baseline_matches = match_baseline_checks(
+                post_patch_checks=checks,
+                baseline_checks=baseline_checks,
+            )
+
+            # Classify transitions for each post-patch check
+            for check in checks:
+                if check.phase == "post_patch":
+                    baseline_check = baseline_matches.get(check.verification_id)
+                    transition, baseline_check_id = classify_transition(
+                        baseline_check=baseline_check,
+                        post_patch_check=check,
+                    )
+                    check.transition = transition
+                    check.baseline_check_id = baseline_check_id
+                    # Add failure fingerprint for failed checks
+                    if not check.passed:
+                        check.failure_fingerprint = compute_failure_fingerprint(check)
+
+            # Compute transition summary
+            transition_summary = compute_transition_summary(checks)
+        else:
+            # No baseline available, mark all as NEW_OR_UNCOMPARED
+            for check in checks:
+                if check.phase == "post_patch":
+                    check.transition = CheckTransition.NEW_OR_UNCOMPARED.value
+                    check.baseline_check_id = ""
+                    if not check.passed:
+                        check.failure_fingerprint = compute_failure_fingerprint(check)
+            transition_summary = compute_transition_summary(checks)
+
+        # Create post-patch report with transition information
         report = VerificationReport(
             run_id=run_id,
-            passed=all(check.passed for check in checks),
+            passed=True,  # Will be updated by baseline-delta evaluation
             checks=checks,
             retry_count=retry_count,
+            transition_summary=transition_summary,
         )
+
+        # Apply baseline-delta evaluation to determine final status
+        verification_status, passed = apply_baseline_delta_evaluation(
+            report=report,
+            strategy=self.strategy.value,
+        )
+        report.verification_status = verification_status
+        report.passed = passed
 
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]
@@ -342,11 +411,12 @@ class Verifier:
         change_plan: ChangePlan | None = None,
         repo_root: Path | None = None,
         python_files: list[str] | None = None,
+        baseline_report: VerificationReport | None = None,
     ) -> VerificationReport:
         """Run post-patch verification with tiered test classification.
 
         Executes verification checks in tier order (REQUIRED, AFFECTED, OPTIONAL)
-        and applies the configured verification strategy to determine final status.
+        and applies baseline-delta evaluation to determine final status.
 
         Args:
             run_id: Unique identifier for this verification run
@@ -358,9 +428,10 @@ class Verifier:
             change_plan: Optional ChangePlan with specialized verification specs
             repo_root: Path to repository root for dependency analysis
             python_files: List of all Python files in repository
+            baseline_report: Optional baseline VerificationReport for delta comparison
 
         Returns:
-            VerificationReport containing tiered check results and strategy-based status
+            VerificationReport containing tiered check results and baseline-delta evaluation
         """
         checks: list[CheckReport] = []
         tier_results: dict[str, dict[str, Any]] = {
@@ -368,6 +439,9 @@ class Verifier:
             "affected": {"total": 0, "passed": 0, "failed": 0, "skipped": 0},
             "optional": {"total": 0, "passed": 0, "failed": 0, "skipped": 0},
         }
+
+        # Store baseline checks for delta comparison
+        baseline_checks = baseline_report.get_baseline_checks() if baseline_report else []
 
         # Level 1: Ruff linting (always runs, not tiered)
         ruff_command = "ruff check --no-cache ."
@@ -385,6 +459,7 @@ class Verifier:
             timeout_seconds=self.timeouts.ruff,
             subject_ids=[],
             direct=False,
+            test_node="",
         )
         checks.append(ruff_check)
 
@@ -470,6 +545,7 @@ class Verifier:
                 timeout_seconds=self.timeouts.regression_tests,
                 subject_ids=[],
                 direct=False,
+                test_node="",
             )
             regression_check.tier = "optional"
             regression_check.selection_reason = "Fallback full regression suite (no classified tests)"
@@ -488,11 +564,65 @@ class Verifier:
             )
             checks.extend(constraint_checks)
 
-        # Apply verification strategy to determine final status
-        verification_status, passed = self._apply_strategy(
-            tier_results,
-            checks,
+        # Apply baseline-delta comparison if baseline checks available
+        if baseline_checks:
+            # Match post-patch checks to baseline
+            baseline_matches = match_baseline_checks(
+                post_patch_checks=checks,
+                baseline_checks=baseline_checks,
+            )
+
+            # Classify transitions for each post-patch check
+            for check in checks:
+                if check.phase == "post_patch":
+                    baseline_check = baseline_matches.get(check.verification_id)
+                    transition, baseline_check_id = classify_transition(
+                        baseline_check=baseline_check,
+                        post_patch_check=check,
+                    )
+                    check.transition = transition
+                    check.baseline_check_id = baseline_check_id
+                    # Add failure fingerprint for failed checks
+                    if not check.passed:
+                        check.failure_fingerprint = compute_failure_fingerprint(check)
+
+            # Compute transition summary
+            transition_summary = compute_transition_summary(checks)
+        else:
+            # No baseline available, mark all as NEW_OR_UNCOMPARED
+            for check in checks:
+                if check.phase == "post_patch":
+                    check.transition = CheckTransition.NEW_OR_UNCOMPARED.value
+                    check.baseline_check_id = ""
+                    if not check.passed:
+                        check.failure_fingerprint = compute_failure_fingerprint(check)
+            transition_summary = compute_transition_summary(checks)
+
+        # Create post-patch report with transition information
+        report = VerificationReport(
+            run_id=run_id,
+            passed=True,  # Will be updated by baseline-delta evaluation
+            checks=checks,
+            retry_count=retry_count,
+            strategy=self.strategy.value,
+            verification_status="",  # Will be set by baseline-delta evaluation
+            tier_summary=tier_results,
+            transition_summary=transition_summary,
         )
+
+        # Apply baseline-delta evaluation to determine final status
+        verification_status, passed = apply_baseline_delta_evaluation(
+            report=report,
+            strategy=self.strategy.value,
+        )
+        report.verification_status = verification_status
+        report.passed = passed
+
+        # Set failure info if any check failed
+        failed_checks = [check for check in checks if not check.passed]
+        if failed_checks:
+            report.failed_level = failed_checks[0].level
+            report.failure_type = failed_checks[0].failure_type
 
         # Create post-patch report with tier information
         report = VerificationReport(
@@ -562,6 +692,7 @@ class Verifier:
                 timeout_seconds=self.timeouts.target_tests,
                 subject_ids=subject_ids,
                 direct=direct,
+                test_node=test_path,  # Use test path as node identifier
             )
             check.tier = tier
             check.selection_reason = selection_reason
@@ -575,68 +706,6 @@ class Verifier:
                 tier_results[tier]["failed"] += 1
 
         return checks
-
-    def _apply_strategy(
-        self,
-        tier_results: dict[str, dict[str, Any]],
-        checks: list[CheckReport],
-    ) -> tuple[str, bool]:
-        """Apply verification strategy to determine final status.
-
-        Args:
-            tier_results: Summary of check results by tier
-            checks: All executed checks
-
-        Returns:
-            Tuple of (verification_status, passed) based on strategy
-        """
-        # Check for Ruff or constraint audit failures (always blocking)
-        non_pytest_failures = [
-            check for check in checks
-            if not check.passed and check.method in ("ruff", "constraint_audit")
-        ]
-        if non_pytest_failures:
-            return "FAILED", False
-
-        required_passed = tier_results["required"]["failed"] == 0
-        affected_passed = tier_results["affected"]["failed"] == 0
-        optional_passed = tier_results["optional"]["failed"] == 0
-
-        has_affected = tier_results["affected"]["total"] > 0
-        has_optional = tier_results["optional"]["total"] > 0
-
-        if self.strategy == VerificationStrategy.STRICT:
-            # Any new post-patch failure blocks VERIFIED
-            if required_passed and affected_passed and optional_passed:
-                return "VERIFIED", True
-            else:
-                return "FAILED", False
-
-        elif self.strategy == VerificationStrategy.BALANCED:
-            # REQUIRED and AFFECTED must pass
-            # OPTIONAL failure results in PARTIALLY_VERIFIED
-            if not required_passed or not affected_passed:
-                return "FAILED", False
-            elif not optional_passed:
-                return "PARTIALLY_VERIFIED", True
-            else:
-                return "VERIFIED", True
-
-        elif self.strategy == VerificationStrategy.FOCUSED:
-            # REQUIRED tests must pass
-            # Missing or failed broader tests prevent full-confidence VERIFIED
-            if not required_passed:
-                return "FAILED", False
-            elif not has_affected and not has_optional:
-                # No broader tests available, but REQUIRED passed
-                return "VERIFIED", True
-            elif not affected_passed or not optional_passed:
-                # Broader tests exist but failed
-                return "PARTIALLY_VERIFIED", True
-            else:
-                return "VERIFIED", True
-
-        return "FAILED", False
 
     def verify(
         self,
@@ -683,6 +752,7 @@ class Verifier:
         timeout_seconds: int,
         subject_ids: list[str],
         direct: bool,
+        test_node: str = "",
     ) -> CheckReport:
         """Create a CheckReport from command execution result.
 
@@ -695,6 +765,7 @@ class Verifier:
             timeout_seconds: Timeout budget that was configured for this check
             subject_ids: List of acceptance criteria IDs
             direct: Whether this provides direct evidence
+            test_node: Test node identifier for pytest checks
 
         Returns:
             CheckReport with execution results
@@ -711,6 +782,7 @@ class Verifier:
                 timeout_seconds=timeout_seconds,
                 subject_ids=subject_ids,
                 direct=direct,
+                test_node=test_node,
             )
 
         # Check failed - parse and classify the failure
@@ -730,6 +802,7 @@ class Verifier:
             summary=asdict(summary),
             subject_ids=subject_ids,
             direct=direct,
+            test_node=test_node,
         )
 
     def _create_constraint_audit_checks(

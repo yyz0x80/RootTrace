@@ -450,6 +450,7 @@ class WorkflowRunner:
         retry_count: int,
         phase: str = "post_patch",
         changed_files: list[str] | None = None,
+        baseline_report: VerificationReport | None = None,
     ) -> VerificationReport:
         """Run an injected verifier or the built-in sandbox verifier.
 
@@ -459,6 +460,7 @@ class WorkflowRunner:
             retry_count: Current retry attempt number
             phase: Verification phase ("baseline" or "post_patch")
             changed_files: Optional list of changed file paths for dependency analysis
+            baseline_report: Optional baseline VerificationReport for delta comparison
 
         Returns:
             VerificationReport containing verification results
@@ -515,6 +517,7 @@ class WorkflowRunner:
                 direct_subject_ids=selection.direct_acceptance_criteria,
                 retry_count=retry_count,
                 change_plan=change_plan,
+                baseline_report=baseline_report,
             )
 
     def _get_sandbox_verifier(self) -> Verifier:
@@ -547,6 +550,7 @@ class WorkflowRunner:
         retry_count: int,
         phase: str = "post_patch",
         changed_files: list[str] | None = None,
+        baseline_report: VerificationReport | None = None,
     ) -> VerificationReport:
         """Run verification and append its complete report to the trace."""
         report = self._run_verification(
@@ -555,6 +559,7 @@ class WorkflowRunner:
             retry_count=retry_count,
             phase=phase,
             changed_files=changed_files,
+            baseline_report=baseline_report,
         )
         trace_writer.write(
             TraceEvent(
@@ -830,11 +835,11 @@ class WorkflowRunner:
                 change_plan=change_plan,
                 retry_count=retry_count,
                 changed_files=changed_file_paths,
+                baseline_report=baseline_report,
             )
 
-            # Merge baseline checks into the post-patch report for behavior comparison
-            if baseline_report is not None:
-                report.merge_baseline(baseline_report)
+            # Note: Baseline checks are already incorporated via baseline-delta comparison
+            # No need to merge baseline checks into post-patch report
 
             # Log verification results
             verification_results = {}
@@ -983,11 +988,11 @@ class WorkflowRunner:
                     change_plan=change_plan,
                     retry_count=retry_count,
                     changed_files=repair_changed_paths,
+                    baseline_report=baseline_report,
                 )
 
-                # Merge baseline checks into the repair report for behavior comparison
-                if baseline_report is not None:
-                    report.merge_baseline(baseline_report)
+                # Note: Baseline checks are already incorporated via baseline-delta comparison
+                # No need to merge baseline checks into repair report
 
             # Step 14: Generate patch with all changes
             logger.info("Generating patch with all changes")
