@@ -66,6 +66,10 @@ ERROR RECOVERY STRATEGY:
 - If edit_file fails due to text mismatch, the file content likely changed - re-read it first.
 - If edit_file fails with "old_text not found" or "empty old_text", you MUST re-read the file and use the exact current content.
 - If edit_file fails multiple times with the same error, stop and reconsider your approach.
+- When errors indicate "Undefined name" or "NameError":
+  * Identify the missing type, function, or module name
+  * Add the corresponding import statement at the top of the file
+  * Use standard import forms (from module import name or import module)
 
 FORBIDDEN:
 - Describing tool calls in text instead of calling them
@@ -104,10 +108,14 @@ REPAIR WORKFLOW:
 3. Do not search the whole repository or re-read tests unless the supplied
    evidence is insufficient to locate the root cause.
 4. Fix the source-code root cause without weakening expected behavior.
-5. Run the exact failed verification command after the edit.
-6. If verification still fails, use the new failure output to make a different
+5. When errors indicate "Undefined name" or "NameError":
+   * Identify the missing type, function, or module name
+   * Add the corresponding import statement at the top of the file
+   * Use standard import forms (from module import name or import module)
+6. Run the exact failed verification command after the edit.
+7. If verification still fails, use the new failure output to make a different
    source-code correction. Never change tests to make a failure disappear.
-7. Return a final answer only after the failed verification command passes.
+8. Return a final answer only after the failed verification command passes.
 
 The external verifier and programmatic workspace policy remain authoritative.
 """.strip()

@@ -76,10 +76,11 @@ def map_acceptance_evidence(
             if "pytest" in check.command or check.method in ("acceptance_probe", "structural_check")
         ]
 
-        # Extract command results for evidence
+        # Extract command results for evidence from post-patch phase only
         command_results = [
             f"{check.method}/{check.level}: {'PASSED' if check.passed else 'FAILED'}"
             for check in mapped_checks
+            if check.phase == "post_patch"
         ]
 
         # Step 4: Delegate evidence aggregation to compute status

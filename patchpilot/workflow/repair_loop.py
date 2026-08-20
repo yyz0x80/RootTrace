@@ -295,6 +295,15 @@ class RepairLoop:
 
                 # Check if we should stop without repair
                 if selection.should_stop:
+                    # If there are repair candidates but agent made no changes, give a second chance
+                    if selection.repair_candidates and attempt == 1:
+                        logger.warning(
+                            "Agent had repair candidates but made no changes on attempt %d, retrying with stronger prompt",
+                            attempt,
+                        )
+                        # Continue to next attempt instead of stopping
+                        continue
+
                     logger.warning(
                         "Repair stopped: %s (attempt %d)",
                         selection.stop_reason,

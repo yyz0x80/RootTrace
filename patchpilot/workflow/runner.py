@@ -973,6 +973,25 @@ class WorkflowRunner:
                     repair_changes,
                 )
                 if repaired_patch == current_patch:
+                    # If there are repair candidates but agent made no changes on first attempt, give a second chance
+                    if selection.repair_candidates and retry_count == 0:
+                        logger.warning(
+                            "Repair agent had repair candidates but made no changes on attempt %d, retrying with stronger prompt",
+                            retry_count + 1,
+                        )
+                        # Increment retry count and continue to next attempt
+                        retry_count += 1
+                        report.retry_count = retry_count
+                        ExecuteLogger.log_repair_attempt(retry_count, self.max_repair_attempts)
+                        logger.info(
+                            "Retrying repair attempt %d/%d with %d repairable failures",
+                            retry_count,
+                            self.max_repair_attempts,
+                            len(selection.repair_candidates),
+                        )
+                        # Skip the normal retry_count increment below and jump to repair prompt building
+                        continue
+
                     logger.warning(
                         "Repair agent did not change the patch. Stopping repair loop."
                     )

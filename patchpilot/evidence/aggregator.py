@@ -67,6 +67,8 @@ def aggregate_evidence(
         behavior_preservation,
         structural_contract,
         constraint,
+        report,
+        criterion_id,
     )
 
     # Generate explanation based on the determining factor
@@ -76,6 +78,8 @@ def aggregate_evidence(
         behavior_preservation,
         structural_contract,
         constraint,
+        report,
+        criterion_id,
     )
 
     return AcceptanceEvidence(
@@ -372,12 +376,14 @@ def _determine_overall_status(
     behavior_preservation: BehaviorPreservationEvidence | None,
     structural_contract: StructuralContractEvidence | None,
     constraint: ConstraintEvidence | None,
+    report: VerificationReport | None = None,
+    criterion_id: str = "",
 ) -> EvidenceStatus:
     """Determine overall evidence status from all dimensions.
 
     The overall status is determined by the most severe evidence:
-    - FAIL if any dimension is FAIL
-    - PASS if at least one dimension is PASS and none are FAIL
+    - FAIL if any dimension is FAIL or if post-patch checks mapped to criterion failed
+    - PASS if at least one dimension is PASS and none are FAIL and post-patch checks pass
     - UNVERIFIED otherwise
 
     Args:
@@ -385,6 +391,8 @@ def _determine_overall_status(
         behavior_preservation: Behavior preservation evidence
         structural_contract: Structural contract evidence
         constraint: Constraint evidence
+        report: Verification report with post-patch check results
+        criterion_id: ID of the acceptance criterion for post-patch failure check
 
     Returns:
         Overall EvidenceStatus
@@ -402,6 +410,17 @@ def _determine_overall_status(
             continue
         if evidence.status in (BehaviorChangeStatus.FAIL, BehaviorPreservationStatus.FAIL,
                               StructuralContractStatus.FAIL, ConstraintStatus.VIOLATED):
+            return EvidenceStatus.FAIL
+
+    # Check if post-patch checks mapped to this criterion failed
+    # This prevents marking AC as PASS when code cannot execute (e.g., import errors)
+    if report and criterion_id:
+        post_patch_checks = [
+            check
+            for check in report.get_post_patch_checks()
+            if criterion_id in check.subject_ids
+        ]
+        if post_patch_checks and not all(check.passed for check in post_patch_checks):
             return EvidenceStatus.FAIL
 
     # Check for PASS/COMPLIANT in any dimension, but only if we have actual evidence
@@ -428,6 +447,8 @@ def _generate_explanation(
     behavior_preservation: BehaviorPreservationEvidence | None,
     structural_contract: StructuralContractEvidence | None,
     constraint: ConstraintEvidence | None,
+    report: VerificationReport | None = None,
+    criterion_id: str = "",
 ) -> str:
     """Generate explanation based on the determining evidence dimension.
 
@@ -437,11 +458,24 @@ def _generate_explanation(
         behavior_preservation: Behavior preservation evidence
         structural_contract: Structural contract evidence
         constraint: Constraint evidence
+        report: Verification report with post-patch check results
+        criterion_id: ID of the acceptance criterion for post-patch failure check
 
     Returns:
         Human-readable explanation
     """
     if status == EvidenceStatus.FAIL:
+        # Check if post-patch checks mapped to this criterion failed
+        if report and criterion_id:
+            post_patch_checks = [
+                check
+                for check in report.get_post_patch_checks()
+                if criterion_id in check.subject_ids
+            ]
+            failed_post_patch_checks = [check for check in post_patch_checks if not check.passed]
+            if failed_post_patch_checks:
+                return f"FAIL: Post-patch verification failed for criterion {criterion_id}. Code cannot execute or tests fail."
+
         # Find the FAILing dimension
         if constraint and constraint.status == ConstraintStatus.VIOLATED:
             return f"FAIL: {constraint.explanation}"
