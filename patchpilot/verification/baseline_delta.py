@@ -351,7 +351,8 @@ def apply_baseline_delta_evaluation(
     # Check for blocking transitions in REQUIRED tier
     required_regression = required.get("regression", 0)
     required_worsened = required.get("worsened", 0)
-    required_failures = required.get("pre_existing_failure", 0) + required.get("new_or_uncompared", 0)
+    required_pre_existing = required.get("pre_existing_failure", 0)
+    required_new_or_uncompared = required.get("new_or_uncompared", 0)
 
     # Check for blocking transitions in AFFECTED tier
     affected_regression = affected.get("regression", 0)
@@ -361,8 +362,21 @@ def apply_baseline_delta_evaluation(
     optional_regression = optional.get("regression", 0)
     optional_worsened = optional.get("worsened", 0)
 
-    # REQUIRED failures (including pre-existing) are not allowed - must be fixed
-    if required_failures > 0:
+    # Check for failures in unknown/empty tiers - these should block VERIFIED
+    # to ensure all pytest failures are properly classified
+    unknown_tier_failures = 0
+    for check in report.checks:
+        if not check.passed and check.method == "pytest":
+            tier = check.tier or ""
+            if tier not in ("required", "affected", "optional"):
+                unknown_tier_failures += 1
+
+    if unknown_tier_failures > 0:
+        return "FAILED", False
+
+    # REQUIRED: any failure (including pre-existing) blocks VERIFIED
+    # Use transition_summary data which is already computed
+    if required_pre_existing > 0 or required_new_or_uncompared > 0:
         return "FAILED", False
 
     # REGRESSION and WORSENED in REQUIRED or AFFECTED block VERIFIED
@@ -370,6 +384,10 @@ def apply_baseline_delta_evaluation(
         return "FAILED", False
     if affected_regression > 0 or affected_worsened > 0:
         return "FAILED", False
+
+    # PRE_EXISTING_FAILURE in AFFECTED should not block VERIFIED
+    # (it was already failing before our changes)
+    # No action needed - this is allowed
 
     # Apply strategy-based handling of OPTIONAL regressions
     if strategy == "strict":

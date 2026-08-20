@@ -1,6 +1,5 @@
 """Tests for the repair candidate selector for relevance-aware repair loop."""
 
-import pytest
 
 from patchpilot.evidence.schema import CheckTransition
 from patchpilot.planning.schema import ChangePlan, PlannedChange

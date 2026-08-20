@@ -514,6 +514,66 @@ class TestWorkflowRunnerExecute:
         assert error.verification_report == failed_report.to_dict()
         assert error.verification_report["retry_count"] == 1
 
+    def test_workflow_runner_uses_tiered_verification(self):
+        """Test that WorkflowRunner uses tiered verification in production path."""
+        mock_agent_loop = Mock(spec=AgentLoop)
+        mock_agent_loop.force_tool_selection = False
+        mock_workspace = Mock(spec=Workspace)
+        mock_workspace.root = Path("/tmp/test-workspace")  # Add the missing attribute
+        mock_sandbox = Mock()
+        
+        # Mock the sandbox verifier
+        from patchpilot.verification.verifier import Verifier
+        mock_verifier_instance = Mock(spec=Verifier)
+        
+        # Mock verify_post_patch_tiered to ensure it's called
+        mock_verifier_instance.verify_post_patch_tiered.return_value = VerificationReport(
+            run_id="test-run",
+            passed=True,
+            checks=[],
+        )
+        
+        runner = WorkflowRunner(
+            agent_loop=mock_agent_loop,
+            verifier=None,  # Use built-in verifier
+            workspace=mock_workspace,
+            sandbox=mock_sandbox,
+        )
+        
+        # Replace the sandbox verifier with our mock
+        runner._sandbox_verifier = mock_verifier_instance
+        
+        # Mock internal setup methods
+        from patchpilot.tools import WorkspaceChange
+        mock_changes = [WorkspaceChange(path="src/file.py", action="modify")]
+        
+        with patch.object(runner, '_create_temporary_workspace'), \
+             patch.object(runner, '_start_sandbox'), \
+             patch.object(runner, '_cleanup'), \
+             patch('patchpilot.repository.analyzer._git_ls_files') as mock_git_ls, \
+             patch('patchpilot.workflow.runner._get_workspace_changes') as mock_get_changes, \
+             patch('patchpilot.workflow.runner.generate_patch') as mock_generate_patch:
+            
+            mock_git_ls.return_value = ["src/file.py", "tests/test_file.py"]
+            mock_get_changes.return_value = mock_changes
+            mock_generate_patch.return_value = "diff content"
+            
+            # Call _run_verification with post_patch phase
+            runner._run_verification(
+                run_id="test-run",
+                change_plan=None,
+                retry_count=0,
+                phase="post_patch",
+                changed_files=["src/file.py"],
+                baseline_report=None,
+            )
+        
+        # Verify that verify_post_patch_tiered was called (not verify_post_patch)
+        mock_verifier_instance.verify_post_patch_tiered.assert_called_once()
+        
+        # Verify it was NOT called with the old verify_post_patch method
+        assert not mock_verifier_instance.verify_post_patch.called
+
     def test_execute_unrecoverable_failure_stops_after_detection(self):
         """Test that unrecoverable failures stop the repair loop after detection."""
         from patchpilot.workflow.result import WorkflowResult

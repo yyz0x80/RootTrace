@@ -593,6 +593,75 @@ def test_apply_baseline_delta_evaluation_pre_existing_failure_allowed():
     assert passed is True
 
 
+def test_apply_baseline_delta_evaluation_unknown_tier_blocks():
+    """Test that pytest failures with unknown tier block VERIFIED."""
+    from patchpilot.verification.report import CheckReport
+    
+    report = VerificationReport(
+        run_id="test-run",
+        passed=True,
+        checks=[
+            CheckReport(
+                method="pytest",
+                phase="post_patch",
+                level="LEVEL_2_TARGET_TESTS",
+                command="python -m pytest tests/test_unknown.py -q -p no:cacheprovider",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                test_node="tests/test_unknown.py::test_func",
+                tier="",  # Empty tier - should block
+                transition="NEW_OR_UNCOMPARED",
+            ),
+        ],
+        transition_summary={
+            "overall": {
+                "resolved": 0,
+                "preserved": 0,
+                "regression": 0,
+                "pre_existing_failure": 0,
+                "worsened": 0,
+                "new_or_uncompared": 1,
+                "unverified": 0,
+            },
+            "by_tier": {
+                "required": {
+                    "resolved": 0,
+                    "preserved": 0,
+                    "regression": 0,
+                    "pre_existing_failure": 0,
+                    "worsened": 0,
+                    "new_or_uncompared": 0,
+                    "unverified": 0,
+                },
+                "affected": {
+                    "resolved": 0,
+                    "preserved": 0,
+                    "regression": 0,
+                    "pre_existing_failure": 0,
+                    "worsened": 0,
+                    "new_or_uncompared": 0,
+                    "unverified": 0,
+                },
+                "optional": {
+                    "resolved": 0,
+                    "preserved": 0,
+                    "regression": 0,
+                    "pre_existing_failure": 0,
+                    "worsened": 0,
+                    "new_or_uncompared": 0,
+                    "unverified": 0,
+                },
+            },
+        },
+    )
+    
+    status, passed = apply_baseline_delta_evaluation(report, VerificationStrategy.BALANCED.value)
+    assert status == "FAILED"
+    assert passed is False
+
+
 def test_apply_baseline_delta_evaluation_optional_regression_balanced():
     """Test that OPTIONAL regression results in PARTIALLY_VERIFIED with BALANCED strategy."""
     report = VerificationReport(
@@ -701,10 +770,26 @@ def test_apply_baseline_delta_evaluation_optional_regression_strict():
 
 def test_apply_baseline_delta_evaluation_required_failure_blocks():
     """Test that REQUIRED failure (including pre-existing) blocks verification."""
+    from patchpilot.verification.report import CheckReport
+    
     report = VerificationReport(
         run_id="test-run",
         passed=True,
-        checks=[],
+        checks=[
+            CheckReport(
+                method="pytest",
+                phase="post_patch",
+                level="LEVEL_2_TARGET_TESTS",
+                command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
+                passed=False,
+                exit_code=1,
+                duration_seconds=1.0,
+                failure_type="AssertionError",
+                test_node="tests/test_required.py::test_func",
+                tier="required",
+                transition="pre_existing_failure",
+            ),
+        ],
         transition_summary={
             "overall": {
                 "resolved": 0,

@@ -512,7 +512,7 @@ class TestBuildFailureRepairPrompt:
         )
 
         # Create a mock selection with repair candidates
-        from patchpilot.workflow.repair_selector import RepairCandidate, RepairSelection
+        from patchpilot.workflow.repair_selector import RepairCandidate
         selection = RepairSelection(
             repair_candidates=[
                 RepairCandidate(

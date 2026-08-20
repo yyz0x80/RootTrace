@@ -511,13 +511,17 @@ class WorkflowRunner:
                 change_plan=change_plan,
             )
         else:
-            return verifier.verify_post_patch(
+            # Use tiered verification to ensure test classifications are applied
+            return verifier.verify_post_patch_tiered(
                 run_id=run_id,
-                target_tests=selection.tests,
+                target_selection=selection,
+                changed_files=changed_files,
                 subject_ids=selection.acceptance_criteria,
                 direct_subject_ids=selection.direct_acceptance_criteria,
                 retry_count=retry_count,
                 change_plan=change_plan,
+                repo_root=repo_root,
+                python_files=python_files,
                 baseline_report=baseline_report,
             )
 

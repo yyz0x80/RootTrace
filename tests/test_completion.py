@@ -366,8 +366,8 @@ def test_compliant_constraints():
 
 def test_repair_selector_completion_hint_non_blocking_failures():
     """Test that repair selector provides correct completion hint for non-blocking failures."""
-    from patchpilot.verification.report import CheckReport, VerificationReport
     from patchpilot.evidence.schema import CheckTransition
+    from patchpilot.verification.report import CheckReport, VerificationReport
 
     # Create a report with only pre-existing failures (non-blocking)
     report = VerificationReport(passed=False)
@@ -399,8 +399,8 @@ def test_repair_selector_completion_hint_non_blocking_failures():
 
 def test_repair_selector_completion_hint_blocking_failures():
     """Test that repair selector provides correct completion hint for blocking failures."""
-    from patchpilot.verification.report import CheckReport, VerificationReport
     from patchpilot.evidence.schema import CheckTransition
+    from patchpilot.verification.report import CheckReport, VerificationReport
     from patchpilot.workflow.failure_classifier import FailureType
 
     # Create a report with environment failure (blocking)

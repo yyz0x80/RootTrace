@@ -443,7 +443,7 @@ class Verifier:
         # Store baseline checks for delta comparison
         baseline_checks = baseline_report.get_baseline_checks() if baseline_report else []
 
-        # Level 1: Ruff linting (always runs, not tiered)
+        # Level 1: Ruff linting (always runs, marked as required since it's blocking)
         ruff_command = "ruff check --no-cache ."
         ruff_result = self.sandbox.run(
             ruff_command,
@@ -461,7 +461,14 @@ class Verifier:
             direct=False,
             test_node="",
         )
+        ruff_check.tier = "required"
+        ruff_check.selection_reason = "Ruff linting - blocking style check"
         checks.append(ruff_check)
+        tier_results["required"]["total"] += 1
+        if ruff_check.passed:
+            tier_results["required"]["passed"] += 1
+        else:
+            tier_results["required"]["failed"] += 1
 
         # Classify tests into tiers based on target selection
         required_tests: list[str] = []
@@ -562,7 +569,14 @@ class Verifier:
                 run_id,
                 change_plan,
             )
+            # Mark constraint audit checks as required (they are blocking)
+            for check in constraint_checks:
+                check.tier = "required"
+                check.selection_reason = "Constraint audit - deterministic policy validation"
             checks.extend(constraint_checks)
+            tier_results["required"]["total"] += len(constraint_checks)
+            tier_results["required"]["passed"] += sum(1 for c in constraint_checks if c.passed)
+            tier_results["required"]["failed"] += sum(1 for c in constraint_checks if not c.passed)
 
         # Apply baseline-delta comparison if baseline checks available
         if baseline_checks:
@@ -617,23 +631,6 @@ class Verifier:
         )
         report.verification_status = verification_status
         report.passed = passed
-
-        # Set failure info if any check failed
-        failed_checks = [check for check in checks if not check.passed]
-        if failed_checks:
-            report.failed_level = failed_checks[0].level
-            report.failure_type = failed_checks[0].failure_type
-
-        # Create post-patch report with tier information
-        report = VerificationReport(
-            run_id=run_id,
-            passed=passed,
-            checks=checks,
-            retry_count=retry_count,
-            strategy=self.strategy.value,
-            verification_status=verification_status,
-            tier_summary=tier_results,
-        )
 
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]
