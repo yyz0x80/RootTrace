@@ -446,6 +446,38 @@ def test_pre_existing_repository_failures_do_not_fail_patch() -> None:
     assert report.transition_summary["overall"]["pre_existing_failure"] == 2
 
 
+def test_regression_timeout_produces_partial_verification() -> None:
+    """A full-suite timeout should reduce coverage without blocking the patch."""
+    timeout = CommandResult(
+        command="python -m pytest -q -p no:cacheprovider",
+        exit_code=124,
+        stdout="",
+        stderr="",
+        duration_seconds=300.0,
+        timed_out=True,
+    )
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        passing_result("ruff check --no-cache ."),
+        timeout,
+        passing_result("ruff check --no-cache ."),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
+    ]
+    verifier = Verifier(sandbox=sandbox_mock)
+    baseline_report = verifier.verify_baseline(run_id="baseline")
+
+    report = verifier.verify_post_patch_tiered(
+        run_id="post-patch",
+        target_selection=TargetTestSelection([], [], [], []),
+        baseline_report=baseline_report,
+    )
+
+    assert baseline_report.failure_type == "BASELINE_INCOMPLETE"
+    assert report.verification_status == "PARTIALLY_VERIFIED"
+    assert report.regression_coverage == "INCOMPLETE"
+    assert report.failure_type == "VERIFICATION_INCOMPLETE"
+
+
 def test_verify_post_patch_collects_all_evidence() -> None:
     """Test post-patch verification collects complete evidence despite failures."""
     sandbox_mock = MagicMock()

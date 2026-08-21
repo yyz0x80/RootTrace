@@ -172,6 +172,12 @@ def classify_transition(
     """
     baseline_check_id = baseline_check.verification_id if baseline_check else ""
 
+    if post_patch_check.failure_type == "TIMEOUT" or (
+        baseline_check is not None
+        and baseline_check.failure_type == "TIMEOUT"
+    ):
+        return CheckTransition.UNVERIFIED.value, baseline_check_id
+
     # If no baseline match, classify as NEW_OR_UNCOMPARED
     if baseline_check is None:
         return CheckTransition.NEW_OR_UNCOMPARED.value, baseline_check_id
@@ -373,6 +379,15 @@ def apply_baseline_delta_evaluation(
     optional_regression = optional.get("regression", 0)
     optional_worsened = optional.get("worsened", 0)
 
+    required_timeout = any(
+        not check.passed
+        and check.failure_type == "TIMEOUT"
+        and check.tier in ("required", "affected")
+        for check in report.get_post_patch_checks()
+    )
+    if required_timeout:
+        return "FAILED", False
+
     if (
         required.get("regression", 0) > 0
         or required.get("worsened", 0) > 0
@@ -416,6 +431,12 @@ def apply_baseline_delta_evaluation(
         or (affected_uncompared > 0 and affected_uncompared_failures)
     ):
         return "FAILED", False
+
+    if (
+        affected.get("unverified", 0) > 0
+        or optional.get("unverified", 0) > 0
+    ):
+        return "PARTIALLY_VERIFIED", True
 
     # PRE_EXISTING_FAILURE in AFFECTED should not block VERIFIED
     # (it was already failing before our changes)

@@ -96,6 +96,7 @@ class VerificationReport:
         patch: Git diff patch containing all changes made
         strategy: Verification strategy used (strict, balanced, focused)
         verification_status: Detailed verification status (VERIFIED, PARTIALLY_VERIFIED, FAILED)
+        regression_coverage: Regression evidence coverage (FULL or INCOMPLETE)
         tier_summary: Summary of check results by tier
         transition_summary: Summary of check transitions from baseline to post-patch
     """
@@ -111,6 +112,7 @@ class VerificationReport:
     patch: str = ""
     strategy: str = ""
     verification_status: str = ""
+    regression_coverage: str = "FULL"
     tier_summary: dict[str, dict[str, Any]] = field(default_factory=dict)
     transition_summary: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -339,6 +341,7 @@ class VerificationReport:
             patch=data.get("patch", ""),
             strategy=data.get("strategy", ""),
             verification_status=data.get("verification_status", ""),
+            regression_coverage=data.get("regression_coverage", "FULL"),
             tier_summary=data.get("tier_summary", {}),
             transition_summary=data.get("transition_summary", {}),
         )

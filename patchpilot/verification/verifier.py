@@ -266,13 +266,35 @@ class Verifier:
             passed=all(check.passed for check in checks),
             checks=checks,
             retry_count=0,
+            regression_coverage=(
+                "INCOMPLETE"
+                if any(
+                    check.failure_type == "TIMEOUT"
+                    and check.tier == "optional"
+                    for check in checks
+                )
+                else "FULL"
+            ),
         )
 
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]
         if failed_checks:
             report.failed_level = failed_checks[0].level
-            report.failure_type = failed_checks[0].failure_type
+            optional_timeout = next(
+                (
+                    check
+                    for check in failed_checks
+                    if check.failure_type == "TIMEOUT"
+                    and check.tier == "optional"
+                ),
+                None,
+            )
+            report.failure_type = (
+                "BASELINE_INCOMPLETE"
+                if optional_timeout is not None
+                else failed_checks[0].failure_type
+            )
 
         return report
 
@@ -447,13 +469,26 @@ class Verifier:
         )
         report.verification_status = verification_status
         report.passed = passed
+        report.regression_coverage = (
+            "INCOMPLETE"
+            if any(
+                check.failure_type == "TIMEOUT"
+                and check.tier == "optional"
+                for check in checks + baseline_checks
+            )
+            else "FULL"
+        )
 
         if baseline_report is not None:
             report.merge_baseline(baseline_report)
 
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]
-        if failed_checks:
+        if verification_status == "PARTIALLY_VERIFIED":
+            report.failure_type = "VERIFICATION_INCOMPLETE"
+            if failed_checks:
+                report.failed_level = failed_checks[0].level
+        elif failed_checks:
             report.failed_level = failed_checks[0].level
             report.failure_type = failed_checks[0].failure_type
 
@@ -691,13 +726,26 @@ class Verifier:
         )
         report.verification_status = verification_status
         report.passed = passed
+        report.regression_coverage = (
+            "INCOMPLETE"
+            if any(
+                check.failure_type == "TIMEOUT"
+                and check.tier == "optional"
+                for check in checks + baseline_checks
+            )
+            else "FULL"
+        )
 
         if baseline_report is not None:
             report.merge_baseline(baseline_report)
 
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]
-        if failed_checks:
+        if verification_status == "PARTIALLY_VERIFIED":
+            report.failure_type = "VERIFICATION_INCOMPLETE"
+            if failed_checks:
+                report.failed_level = failed_checks[0].level
+        elif failed_checks:
             report.failed_level = failed_checks[0].level
             report.failure_type = failed_checks[0].failure_type
 
