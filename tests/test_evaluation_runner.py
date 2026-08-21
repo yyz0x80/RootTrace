@@ -186,6 +186,41 @@ def test_select_task_configs_returns_all_tasks_without_filter(
     assert [config.task_id for config in selected] == ["task-a", "task-b"]
 
 
+def test_indexed_tasks_define_explicit_verification_contracts(
+    tmp_path: Path,
+) -> None:
+    """All indexed tasks should declare phase and regression expectations."""
+    evaluation_root = Path(__file__).parents[1] / "evaluation"
+    tasks_dir = evaluation_root / "tasks"
+    index = json.loads((tasks_dir / "index.json").read_text(encoding="utf-8"))
+    task_paths = runner.resolve_task_paths(tasks_dir, index["tasks"])
+
+    assert len(task_paths) == 10
+    repositories: dict[str, str] = {}
+    for task_path in task_paths:
+        manifest = json.loads(task_path.read_text(encoding="utf-8"))
+        phase = manifest["expected_phase"]
+        regression_tests = manifest["regression_tests"]
+        assert phase in {"prepare", "execute"}
+        assert regression_tests == (["."] if phase == "execute" else [])
+        if manifest["expected_final_status"] == "VERIFIED":
+            assert manifest["score_commands"]
+
+        repository = manifest["repository"]
+        base_commit = manifest["base_commit"]
+        previous_commit = repositories.setdefault(repository, base_commit)
+        assert previous_commit == base_commit
+
+    for index_number, (repository, base_commit) in enumerate(
+        repositories.items()
+    ):
+        runner.materialize(
+            evaluation_root / repository,
+            tmp_path / f"fixture-{index_number}",
+            base_commit,
+        )
+
+
 def test_select_task_configs_rejects_unknown_task_id(tmp_path: Path) -> None:
     tasks_dir = tmp_path / "evaluation" / "tasks"
     write_task(tasks_dir / "task-a", "task-a")
@@ -366,7 +401,7 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
         task_id="relative-path-task",
         category="single_file_bug",
         repository="fixtures/day5_python_repo",
-        base_commit="e32138dad45ca3652677aa9aaef4417975047d0e",  # Use actual fixture commit
+        base_commit="65b943998bcb8432096ea21ecb7e3b2da4feaadd",
         issue="tasks/relative-path-task/issue.md",
         expected_final_status="VERIFIED",
         allowed_changes=["benchmark/booleans.py"],
@@ -405,7 +440,7 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
     assert result.regression_tests_applicable is True
     assert result.regression_tests_passed is True
     assert result.details["regression_transitions"] == [
-        {"target": ".", "transition": "PRESERVED"}
+        {"target": ".", "transition": "PRE_EXISTING_FAILURE"}
     ]
 
 
@@ -437,7 +472,7 @@ def test_score_task_preserves_failed_status_without_verification_report(
         task_id="failed-task",
         category="single_file_bug",
         repository="fixtures/day5_python_repo",
-        base_commit="e32138dad45ca3652677aa9aaef4417975047d0e",  # Use actual fixture commit
+        base_commit="65b943998bcb8432096ea21ecb7e3b2da4feaadd",
         issue="tasks/failed-task/issue.md",
         expected_final_status="VERIFIED",
         allowed_changes=[],
@@ -818,7 +853,7 @@ def test_verified_with_failing_hidden_tests(tmp_path: Path) -> None:
 
 
 def test_wrong_status_with_passing_hidden_tests(tmp_path: Path) -> None:
-    """Test wrong status with passing hidden tests yields zero outcome accuracy."""
+    """Functional correctness remains independent from outcome accuracy."""
     evaluation_root = tmp_path / "evaluation"
     timestamp = "wrong-status-run"
     config = make_task_config("fix", "single_file_bug", "VERIFIED")
@@ -832,7 +867,7 @@ def test_wrong_status_with_passing_hidden_tests(tmp_path: Path) -> None:
         criteria=[],
         evidence={},
         prepare_usage=(2, 10, 5),
-        functional_correctness=0.0,  # Should be 0 since status is wrong
+        functional_correctness=1.0,
         outcome_accuracy=0.0,  # Status doesn't match
         hidden_tests_passed=True,
         hidden_tests_applicable=True,
@@ -845,7 +880,7 @@ def test_wrong_status_with_passing_hidden_tests(tmp_path: Path) -> None:
         task_configs=[config],
     )
 
-    assert aggregate["metrics"]["functional_correctness_rate"]["value"] == 0.0
+    assert aggregate["metrics"]["functional_correctness_rate"]["value"] == 1.0
     assert aggregate["metrics"]["outcome_accuracy_rate"]["value"] == 0.0
 
 
@@ -1131,7 +1166,7 @@ def test_execute_task_materializes_expected_git_commit(
         task_id="prepare-only",
         category="ambiguous_requirement",
         repository="fixtures/day5_python_repo",
-        base_commit="e32138dad45ca3652677aa9aaef4417975047d0e",  # Use actual fixture commit
+        base_commit="65b943998bcb8432096ea21ecb7e3b2da4feaadd",
         issue="tasks/prepare-only/issue.md",
         expected_final_status="NEEDS_CLARIFICATION",
         allowed_changes=[],
@@ -1213,7 +1248,7 @@ def test_execute_task_uses_summary_for_prepare_failure(
         task_id="plan-invalid",
         category="small_feature",
         repository="fixtures/day5_python_repo",
-        base_commit="e32138dad45ca3652677aa9aaef4417975047d0e",  # Use actual fixture commit
+        base_commit="65b943998bcb8432096ea21ecb7e3b2da4feaadd",
         issue="tasks/plan-invalid/issue.md",
         expected_final_status="VERIFIED",
         allowed_changes=[],
@@ -1291,7 +1326,7 @@ def test_execute_task_baseline_skips_prepare_and_uses_run_summary(
         task_id="baseline-task",
         category="ambiguous_requirement",
         repository="fixtures/day5_python_repo",
-        base_commit="e32138dad45ca3652677aa9aaef4417975047d0e",  # Use actual fixture commit
+        base_commit="65b943998bcb8432096ea21ecb7e3b2da4feaadd",
         issue="tasks/baseline-task/issue.md",
         expected_final_status="FAILED",  # Baseline expects actual status
         allowed_changes=[],

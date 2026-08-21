@@ -2,7 +2,7 @@
 
 The task set follows the Day 5 evaluation rules:
 
-- every task points at a fixed, clean Git commit;
+- every task points at a fixed, reproducible Git commit;
 - the agent receives only the target repository and `issue.md`;
 - tests inside a target repository are read-only;
 - hidden tests stay under `evaluation/tasks/` and are run only by the evaluator;
@@ -16,6 +16,12 @@ The initial set contains ten tasks: two single-file bugs, two cross-file bugs,
 two small features, one repair-loop task, one ambiguous request, one unsafe
 request, and one environment failure.
 
+The shared `day5_python_repo` fixture intentionally contains one documented,
+unrelated baseline failure in `tests/test_csv_records.py::test_parse_quoted_record`.
+This verifies that a correct patch is not rejected merely because the repository
+was already red. The failure must remain unchanged; any new or worsened failure
+still makes the independent regression result unsafe.
+
 ## Materializing a target repository
 
 Fixtures are stored without nested `.git` directories so the evaluation set
@@ -25,7 +31,7 @@ can be versioned normally. Create a clean checkout with:
 python evaluation/materialize_fixture.py \
   --source evaluation/fixtures/day5_python_repo \
   --destination /tmp/patchpilot-task-repo \
-  --expected-commit e32138dad45ca3652677aa9aaef4417975047d0e
+  --expected-commit 65b943998bcb8432096ea21ecb7e3b2da4feaadd
 ```
 
 The command fails if the generated commit differs from the manifest. Each run
@@ -64,20 +70,23 @@ PatchPilot evaluation uses **separate deterministic dimensions** for scoring wit
 
 ### Independent evaluator checks
 
-The external evaluator now independently verifies patch scope, declared public tests, and basic patch minimality instead of trusting PatchPilot's internal verification_report.json. The evaluator's checks are the source of truth for scoring:
+The external evaluator independently verifies patch scope, declared public tests,
+full regression delta, and basic patch minimality. These checks are the source
+of truth for functional scoring:
 
 1. **Scope compliance**: After applying patch.diff to the clean scoring checkout, the evaluator independently determines changed files using Git and validates them against the task manifest's `allowed_changes`
 2. **Public test execution**: The evaluator executes every declared `target_tests` entry independently in the scoring checkout using controlled pytest commands
-3. **Minimality analysis**: The evaluator calculates deterministic signals (changed file count, added/deleted lines, unexpected files, generated/cache files) without subjective model judgment
+3. **Regression delta**: The evaluator runs every declared `regression_tests` target before and after the patch. Resolved, preserved, improved, and unchanged historical failures are safe; regressions, worsened failures, missing comparisons, and timeouts are unsafe
+4. **Minimality analysis**: The evaluator calculates deterministic signals (changed file count, added/deleted lines, unexpected files, generated/cache files) without subjective model judgment
 
 ### Functional correctness
 Measures whether the generated patch actually works correctly:
 
-- **Value**: 1.0 if the patch applies successfully, scope is compliant, public tests pass, and all hidden tests pass, 0.0 otherwise
+- **Value**: 1.0 if the patch applies successfully, scope is compliant, public tests pass, regression delta is safe, and all hidden tests pass, 0.0 otherwise
 - **Applies to**: Tasks that reach the execute phase and have hidden tests configured
 - **Key principle**: Reporting VERIFIED never awards partial functional credit when hidden tests fail or scope is violated
 - **For prepare-only tasks**: Functional correctness is not applicable (set to 0.0)
-- **For tasks without hidden tests**: Functional correctness depends on patch applicability, scope compliance, and public test results
+- **For tasks without hidden tests**: Functional correctness depends on patch applicability, scope compliance, public tests, and regression safety
 
 ### Outcome accuracy
 Measures whether the agent correctly predicted its final status:
@@ -89,16 +98,18 @@ Measures whether the agent correctly predicted its final status:
 
 ### Key scoring rules
 
-1. **VERIFIED + passing hidden tests + scope compliant + public tests pass**: functional_correctness = 1.0, outcome_accuracy = 1.0
+1. **VERIFIED + passing hidden tests + scope compliant + public tests pass + safe regression delta**: functional_correctness = 1.0, outcome_accuracy = 1.0
 2. **VERIFIED + failing hidden tests**: functional_correctness = 0.0, outcome_accuracy = 1.0 (false VERIFIED)
 3. **VERIFIED + scope violation**: functional_correctness = 0.0, outcome_accuracy = 1.0 (scope violations force functional correctness to 0)
 4. **VERIFIED + public test failure**: functional_correctness = 0.0, outcome_accuracy = 1.0 (public test failures prevent functional success)
-5. **Wrong status + passing hidden tests**: functional_correctness = 0.0, outcome_accuracy = 0.0
+5. **Wrong status + all functional checks pass**: functional_correctness = 1.0, outcome_accuracy = 0.0
 6. **Missing patch**: functional_correctness = 0.0
 7. **Patch application failure**: functional_correctness = 0.0
 8. **Prepare-only with expected BLOCKED**: functional_correctness = 0.0 (N/A), outcome_accuracy = 1.0
 9. **Prepare-only with expected NEEDS_CLARIFICATION**: functional_correctness = 0.0 (N/A), outcome_accuracy = 1.0
-10. **Execute task with no score commands**: hidden_tests_applicable = false, functional_correctness based on patch applicability and scope compliance
+10. **Unchanged historical regression failure**: regression safety passes, while the raw pytest command remains diagnostic
+11. **Incomplete regression coverage**: final status should be PARTIALLY_VERIFIED and does not count as a verifier pass
+12. **Execute task with no score commands**: hidden_tests_applicable = false, functional correctness still requires patch applicability, scope compliance, public tests, and regression safety
 
 ### Scope compliance rules
 
@@ -131,6 +142,8 @@ Each task's `score.json` contains:
   "scope_compliant": boolean,
   "public_tests_passed": boolean,
   "public_tests_applicable": boolean,
+  "regression_tests_passed": boolean,
+  "regression_tests_applicable": boolean,
   "changed_file_count": integer,
   "added_lines": integer,
   "deleted_lines": integer,
@@ -143,7 +156,7 @@ Each task's `score.json` contains:
 ### Field definitions
 
 - `schema_version`: "2.0" for the new separated scoring schema
-- `functional_correctness`: 1.0 only when patch applies, scope is compliant, public tests pass, and all hidden tests pass
+- `functional_correctness`: 1.0 only when patch applies, scope is compliant, public tests pass, regression delta is safe, and all hidden tests pass
 - `outcome_accuracy`: 1.0 when actual_status matches expected_status
 - `hidden_tests_passed`: True if all configured hidden tests passed
 - `hidden_tests_applicable`: True if hidden tests were configured and run (not the same as passed)
@@ -151,6 +164,8 @@ Each task's `score.json` contains:
 - `scope_compliant`: True if patch only changes allowed files, False otherwise
 - `public_tests_passed`: True if all declared target_tests passed, False if any failed
 - `public_tests_applicable`: True if target_tests were configured and run
+- `regression_tests_passed`: True when every declared regression target has a safe baseline-to-post-patch transition
+- `regression_tests_applicable`: True if regression_tests were configured and compared
 - `changed_file_count`: Number of files changed by the patch
 - `added_lines`: Number of lines added by the patch
 - `deleted_lines`: Number of lines deleted by the patch
@@ -160,7 +175,10 @@ Each task's `score.json` contains:
 - `verification_report_present`: True if verification_report.json exists (diagnostic evidence only)
 - `patch_generated`: True if patch.diff was generated
 
-**Important**: PatchPilot's own `verification_report.json` is now considered diagnostic evidence only, not the evaluator's source of truth. The evaluator performs independent verification of scope, public tests, and minimality.
+**Important**: PatchPilot's own `verification_report.json` supplies verifier
+status and evidence-quality metrics, but it is not the source of truth for
+functional correctness. The evaluator independently checks scope, public tests,
+regression delta, hidden behavior, and minimality.
 
 ### Legacy schema compatibility
 
@@ -183,6 +201,9 @@ Each evaluation run writes the following automatic metrics to
 - `patch_applicability_rate`: Rate of tasks where patches applied successfully
 - `scope_compliance_rate`: Rate of tasks where patches only changed allowed files
 - `public_tests_pass_rate`: Rate of tasks where declared public tests passed
+- `independent_regression_safety_rate`: Rate of tasks whose independent baseline-to-post-patch regression comparison is safe
+- `partial_verification_rate`: Rate of verifier reports with incomplete deterministic coverage
+- `failed_verification_rate`: Rate of verifier reports with a canonical FAILED status
 - `total_changed_files`: Total number of files changed across all tasks
 - `total_added_lines`: Total number of lines added across all tasks
 - `total_deleted_lines`: Total number of lines deleted across all tasks

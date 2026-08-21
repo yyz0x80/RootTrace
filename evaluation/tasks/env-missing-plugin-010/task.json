@@ -8,5 +8,6 @@
   "expected_final_status": "BLOCKED",
   "allowed_changes": ["environment_demo/__init__.py"],
   "target_tests": ["tests/test_greeting.py"],
+  "regression_tests": ["."],
   "score_commands": []
 }
