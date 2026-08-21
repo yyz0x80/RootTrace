@@ -332,12 +332,23 @@ def apply_baseline_delta_evaluation(
         # No report available, assume verification failed
         return "FAILED", False
 
-    # Check for Ruff or constraint audit failures (always blocking)
-    non_pytest_failures = [
+    # Deterministic quality and acceptance checks are always blocking when
+    # they fail after the patch. Baseline failures are not included in the
+    # report until after this evaluation has completed.
+    blocking_failures = [
         check for check in report.checks
-        if not check.passed and check.method in ("ruff", "constraint_audit")
+        if not check.passed
+        and check.method
+        in (
+            "ruff",
+            "constraint_audit",
+            "acceptance_probe",
+            "structural_check",
+            "ast_check",
+            "mock_check",
+        )
     ]
-    if non_pytest_failures:
+    if blocking_failures:
         return "FAILED", False
 
     # Get transition summary

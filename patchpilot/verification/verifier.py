@@ -200,6 +200,10 @@ class Verifier:
             )
             # Add failure fingerprints for baseline specialized checks
             for check in specialized_checks:
+                check.tier = "required"
+                check.selection_reason = (
+                    "Specialized verification check from ChangePlan"
+                )
                 if not check.passed:
                     check.failure_fingerprint = compute_failure_fingerprint(check)
             checks.extend(specialized_checks)

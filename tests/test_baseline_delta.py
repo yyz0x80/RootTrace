@@ -434,6 +434,32 @@ def test_apply_baseline_delta_evaluation_verified():
     assert passed is True
 
 
+def test_failed_specialized_check_blocks_verification() -> None:
+    """A failed direct acceptance check must prevent VERIFIED."""
+    check = CheckReport(
+        method="acceptance_probe",
+        phase="post_patch",
+        level="SPECIALIZED_PROBE",
+        command="probe:ac-1",
+        passed=False,
+        exit_code=1,
+        duration_seconds=0.1,
+        tier="required",
+        subject_ids=["AC-1"],
+        direct=True,
+    )
+    report = VerificationReport(
+        run_id="specialized-failure",
+        checks=[check],
+        transition_summary=compute_transition_summary([check]),
+    )
+
+    status, passed = apply_baseline_delta_evaluation(report)
+
+    assert status == "FAILED"
+    assert passed is False
+
+
 def test_apply_baseline_delta_evaluation_required_regression():
     """Test that REQUIRED regression blocks VERIFIED."""
     report = VerificationReport(
