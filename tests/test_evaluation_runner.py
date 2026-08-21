@@ -645,6 +645,76 @@ def test_empty_metric_denominator_is_not_reported_as_zero(tmp_path: Path) -> Non
             assert metric["value"] is None
 
 
+def test_aggregate_separates_partial_and_baseline_delta_results(
+    tmp_path: Path,
+) -> None:
+    """Partial coverage is not a pass, while unchanged failures are safe."""
+    evaluation_root = tmp_path / "evaluation"
+    timestamp = "verification-status-run"
+    partial = make_task_config("partial", "single_file_bug", "VERIFIED")
+    historical = make_task_config("historical", "single_file_bug", "VERIFIED")
+
+    write_metric_task(
+        evaluation_root / "runs" / timestamp,
+        partial,
+        actual_status="PARTIALLY_VERIFIED",
+        phase="execute",
+        report={
+            "passed": True,
+            "verification_status": "PARTIALLY_VERIFIED",
+            "regression_coverage": "INCOMPLETE",
+            "checks": [
+                {
+                    "phase": "post_patch",
+                    "level": "LEVEL_3_REGRESSION",
+                    "passed": False,
+                    "transition": "UNVERIFIED",
+                }
+            ],
+        },
+        run_summary={"retry_count": 1},
+        criteria=[],
+        evidence={},
+        prepare_usage=(1, 1, 1),
+    )
+    write_metric_task(
+        evaluation_root / "runs" / timestamp,
+        historical,
+        actual_status="VERIFIED",
+        phase="execute",
+        report={
+            "passed": True,
+            "verification_status": "VERIFIED",
+            "regression_coverage": "FULL",
+            "checks": [
+                {
+                    "phase": "post_patch",
+                    "level": "LEVEL_3_REGRESSION",
+                    "passed": False,
+                    "transition": "PRE_EXISTING_FAILURE",
+                }
+            ],
+        },
+        run_summary={"retry_count": 0},
+        criteria=[],
+        evidence={},
+        prepare_usage=(1, 1, 1),
+    )
+
+    aggregate = aggregate_scores(
+        evaluation_root,
+        timestamp,
+        task_configs=[partial, historical],
+    )
+    metrics = aggregate["metrics"]
+
+    assert metrics["verifier_pass_rate"]["value"] == 0.5
+    assert metrics["partial_verification_rate"]["value"] == 0.5
+    assert metrics["failed_verification_rate"]["value"] == 0.0
+    assert metrics["regression_pass_rate"]["value"] == 0.5
+    assert metrics["retry_recovery_rate"]["value"] == 0.0
+
+
 def test_missing_token_usage_is_not_treated_as_zero(tmp_path: Path) -> None:
     evaluation_root = tmp_path / "evaluation"
     timestamp = "missing-usage-run"

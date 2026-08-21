@@ -1346,6 +1346,37 @@ def check_passed(report: dict[str, Any], level: str) -> bool:
     return bool(matching) and all(check.get("passed") is True for check in matching)
 
 
+def canonical_verification_status(report: dict[str, Any]) -> str:
+    """Return the canonical verifier status with legacy-report fallback."""
+    status = report.get("verification_status")
+    if status in {"VERIFIED", "PARTIALLY_VERIFIED", "FAILED"}:
+        return str(status)
+    return "VERIFIED" if report.get("passed") is True else "FAILED"
+
+
+def regression_delta_passed(report: dict[str, Any]) -> bool:
+    """Return whether full regression evidence is complete and regression-free."""
+    if report.get("regression_coverage", "FULL") != "FULL":
+        return False
+
+    checks = report.get("checks", [])
+    regression_checks = [
+        check
+        for check in checks
+        if isinstance(check, dict)
+        and check.get("phase", "post_patch") == "post_patch"
+        and check.get("level") == "LEVEL_3_REGRESSION"
+    ]
+    if not regression_checks:
+        return False
+
+    return all(
+        check.get("passed") is True
+        or check.get("transition") == "PRE_EXISTING_FAILURE"
+        for check in regression_checks
+    )
+
+
 def task_phase_usage(
     task_dir: Path,
     phase_reached: str,
@@ -1464,6 +1495,8 @@ def aggregate_scores(
         for config in configs_by_id.values()
     )
     verifier_passes = 0
+    verifier_partial = 0
+    verifier_failures = 0
     verifier_reports = 0
     verifier_missing = 0
     regression_passes = 0
@@ -1613,13 +1646,18 @@ def aggregate_scores(
                 verifier_missing += 1
             else:
                 verifier_reports += 1
-                if report.get("passed") is True:
+                verification_status = canonical_verification_status(report)
+                if verification_status == "VERIFIED":
                     verifier_passes += 1
+                elif verification_status == "PARTIALLY_VERIFIED":
+                    verifier_partial += 1
+                else:
+                    verifier_failures += 1
 
             if (
                 expected_status == "VERIFIED"
                 and report is not None
-                and check_passed(report, "LEVEL_3_REGRESSION")
+                and regression_delta_passed(report)
             ):
                 regression_passes += 1
 
@@ -1635,7 +1673,10 @@ def aggregate_scores(
                 retry_count = run_summary.get("retry_count")
                 if isinstance(retry_count, int) and retry_count > 0:
                     retry_attempted += 1
-                    if report is not None and report.get("passed") is True:
+                    if (
+                        report is not None
+                        and canonical_verification_status(report) == "VERIFIED"
+                    ):
                         retry_recoveries += 1
 
             normalized_issue = load_json_object(
@@ -1764,6 +1805,14 @@ def aggregate_scores(
             **rate_metric(verifier_passes, verifier_reports),
             "missing_count": verifier_missing,
         },
+        "partial_verification_rate": rate_metric(
+            verifier_partial,
+            verifier_reports,
+        ),
+        "failed_verification_rate": rate_metric(
+            verifier_failures,
+            verifier_reports,
+        ),
         "acceptance_criteria_coverage": {
             **rate_metric(acceptance_passes, acceptance_total),
             "missing_evidence_count": acceptance_missing_evidence,
