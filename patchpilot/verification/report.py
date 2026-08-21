@@ -45,7 +45,7 @@ class CheckReport:
         test_node: Test node identifier for pytest checks (e.g., "tests/test_example.py::test_func")
         transition: Transition type from baseline to post-patch (for post-patch checks)
         baseline_check_id: Verification ID of the matching baseline check (for post-patch checks)
-        failure_fingerprint: Stable identifier for failure pattern (for failed checks)
+        failure_fingerprint: Stable identifier for failure pattern (for failed checks). Can be a string or dict mapping test nodes to fingerprints.
     """
 
     method: str
@@ -66,7 +66,7 @@ class CheckReport:
     test_node: str = ""
     transition: str = ""
     baseline_check_id: str = ""
-    failure_fingerprint: str = ""
+    failure_fingerprint: str | dict[str, str] = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the check report to a dictionary for serialization.
@@ -311,6 +311,10 @@ class VerificationReport:
                 check_data["baseline_check_id"] = ""
             if "failure_fingerprint" not in check_data:
                 check_data["failure_fingerprint"] = ""
+            # Handle failure_fingerprint that can be string or dict
+            if "failure_fingerprint" in check_data and isinstance(check_data["failure_fingerprint"], dict):
+                # Keep as dict for pytest per-test failure mapping
+                pass
             checks.append(CheckReport(**check_data))
         
         # Handle backward compatibility for reports without phase-specific lists

@@ -1500,6 +1500,141 @@ def test_compare_test_run_delta_rejects_new_failure() -> None:
     assert transitions == [{"target": ".", "transition": "REGRESSION"}]
 
 
+def test_compare_test_run_delta_accepts_improved() -> None:
+    """IMPROVED transition should be accepted in delta comparison."""
+    baseline = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a - AssertionError\nFAILED tests/test_b.py::test_b - ValueError",
+            "stderr": "",
+        }
+    ]
+    post_patch = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_b.py::test_b - ValueError",  # test_a resolved
+            "stderr": "",
+        }
+    ]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is True
+    assert transitions == [{"target": ".", "transition": "IMPROVED"}]
+
+
+def test_compare_test_run_delta_detects_worsened_error() -> None:
+    """WORSENED transition should be detected when same test fails with different error."""
+    baseline = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a - AssertionError: expected 5 got 3",
+            "stderr": "",
+        }
+    ]
+    post_patch = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a - TypeError: unsupported operand type",  # Same test, different error
+            "stderr": "",
+        }
+    ]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is False
+    assert transitions == [{"target": ".", "transition": "WORSENED"}]
+
+
+def test_compare_test_run_delta_regressions_block_improvement() -> None:
+    """New failures should block even when some tests improved."""
+    baseline = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a - AssertionError\nFAILED tests/test_b.py::test_b - ValueError",
+            "stderr": "",
+        }
+    ]
+    post_patch = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_b.py::test_b - ValueError\nFAILED tests/test_c.py::test_c - IndexError",  # test_a resolved, test_c new
+            "stderr": "",
+        }
+    ]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is False
+    assert transitions == [{"target": ".", "transition": "REGRESSION"}]
+
+
+def test_compare_test_run_delta_assertion_content_change_worsened() -> None:
+    """AssertionError content changes should be detected as WORSENED."""
+    baseline = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a\nAssertionError: expected 5 but got 3",
+            "stderr": "",
+        }
+    ]
+    post_patch = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a\nAssertionError: expected 10 but got 3",  # Same test, different assertion content
+            "stderr": "",
+        }
+    ]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is False
+    assert transitions == [{"target": ".", "transition": "WORSENED"}]
+
+
+def test_compare_test_run_delta_value_error_content_change_worsened() -> None:
+    """ValueError content changes should be detected as WORSENED."""
+    baseline = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_a.py::test_a\nFAILED tests/test_b.py::test_b\nValueError: old-b",
+            "stderr": "",
+        }
+    ]
+    post_patch = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_b.py::test_b\nValueError: changed-b",  # test_a resolved, test_b error content changed
+            "stderr": "",
+        }
+    ]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is False
+    assert transitions == [{"target": ".", "transition": "WORSENED"}]
+
+
 def test_minimality_analysis_empty_patch(tmp_path: Path) -> None:
     """Test minimality analysis with empty patch."""
     # Test the analyze_patch_minimality function directly

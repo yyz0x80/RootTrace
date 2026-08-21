@@ -74,6 +74,7 @@ class CheckTransition(str, Enum):
     REGRESSION = "REGRESSION"  # PASS → FAIL: Check was passing, now failing
     PRE_EXISTING_FAILURE = "PRE_EXISTING_FAILURE"  # FAIL → FAIL with equivalent fingerprint
     WORSENED = "WORSENED"  # FAIL → FAIL with changed or expanded fingerprint
+    IMPROVED = "IMPROVED"  # Some historical failures resolved without new regressions
     NEW_OR_UNCOMPARED = "NEW_OR_UNCOMPARED"  # No matching baseline check
     UNVERIFIED = "UNVERIFIED"  # Check was not executed
 

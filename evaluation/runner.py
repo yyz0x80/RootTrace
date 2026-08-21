@@ -13,6 +13,7 @@ This module implements the evaluation pipeline that:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -859,6 +860,114 @@ def _failed_test_ids(result: dict[str, Any]) -> set[str]:
     )
 
 
+def _extract_test_error_sections(output: str) -> dict[str, str]:
+    """Extract error sections for individual failed tests from pytest output.
+
+    Parses the full pytest output to find complete error sections for each
+    failed test, enabling comparison of error fingerprints between runs.
+
+    Args:
+        output: Full pytest output
+
+    Returns:
+        Dict mapping test node IDs to their error section content
+    """
+    error_sections: dict[str, str] = {}
+    lines = output.split('\n')
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Look for FAILED lines
+        match = re.match(r"^FAILED\s+(\S+?)(?:\s+-|$)", line)
+        if match:
+            test_node = match.group(1)
+            error_lines = [line]
+            # Include subsequent lines until next test failure or end
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                # Stop if we hit another test's failure
+                if re.match(r"^FAILED\s+\S+", next_line) and test_node not in next_line:
+                    break
+                error_lines.append(next_line)
+                i += 1
+            error_sections[test_node] = "\n".join(error_lines)
+        else:
+            i += 1
+
+    return error_sections
+
+
+def _compute_test_error_fingerprint(error_section: str) -> str:
+    """Compute fingerprint for a specific test's error section.
+
+    Includes error message content for all exception types to detect when
+    the same test fails with different error details, not just different error types.
+
+    Args:
+        error_section: Error output for a specific test
+
+    Returns:
+        Stable fingerprint for the error
+    """
+    if not error_section:
+        return ""
+
+    # Extract error type from the section
+    error_match = re.search(r'(\w+Error):', error_section)
+    error_type = error_match.group(1) if error_match else "unknown"
+
+    # Create fingerprint from error type and message content
+    components = [error_type]
+
+    # Extract error message content for all exception types
+    if error_type != "unknown":
+        # Try to extract the error message after the exception type
+        error_message_match = re.search(rf'{error_type}:\s*(.+)', error_section)
+        if error_message_match:
+            # Take first 50 chars of error message for stability
+            error_message = error_message_match.group(1)[:50].replace(" ", "_").replace("\n", "_")
+            components.append(error_message)
+        else:
+            # Fallback: extract any message-like content
+            message_match = re.search(r':\s*(.+)', error_section)
+            if message_match:
+                error_message = message_match.group(1)[:50].replace(" ", "_").replace("\n", "_")
+                components.append(error_message)
+
+    # Extract assertion patterns if present
+    assert_pattern = re.search(r'assertion_(\w+)', error_section)
+    if assert_pattern:
+        components.append(assert_pattern.group(1))
+
+    # Filter out empty components
+    fingerprint_parts = [c for c in components if c]
+    fingerprint = "|".join(fingerprint_parts)
+
+    # Hash for stable compact identifier
+    return hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+
+
+def _get_test_error_fingerprints(result: dict[str, Any]) -> dict[str, str]:
+    """Get error fingerprints for all failed tests in a command result.
+
+    Args:
+        result: Command result dictionary
+
+    Returns:
+        Dict mapping test node IDs to their error fingerprints
+    """
+    output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+    error_sections = _extract_test_error_sections(output)
+
+    fingerprints: dict[str, str] = {}
+    for test_node, error_section in error_sections.items():
+        fingerprints[test_node] = _compute_test_error_fingerprint(error_section)
+
+    return fingerprints
+
+
 def _failure_signature(result: dict[str, Any]) -> tuple[str, ...]:
     """Build a stable fallback signature for non-standard pytest failures."""
     output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
@@ -879,7 +988,12 @@ def classify_test_result_transition(
     baseline: dict[str, Any] | None,
     post_patch: dict[str, Any],
 ) -> str:
-    """Classify one independent test command using baseline-delta semantics."""
+    """Classify one independent test command using baseline-delta semantics.
+
+    Now uses per-test error fingerprint comparison to detect WORSENED transitions
+    when the same test fails with different error types, matching the verification
+    system's behavior.
+    """
     if baseline is None:
         return "NEW_OR_UNCOMPARED"
     if baseline.get("timed_out") or post_patch.get("timed_out"):
@@ -896,13 +1010,41 @@ def classify_test_result_transition(
 
     baseline_failures = _failed_test_ids(baseline)
     post_patch_failures = _failed_test_ids(post_patch)
+
     if baseline_failures and post_patch_failures:
+        # Use fingerprint comparison for accurate classification
+        baseline_fingerprints = _get_test_error_fingerprints(baseline)
+        post_patch_fingerprints = _get_test_error_fingerprints(post_patch)
+
+        # Check for worsened failures (same test, different error)
+        worsened_tests = []
+        for test_node in baseline_failures & post_patch_failures:
+            baseline_fp = baseline_fingerprints.get(test_node, "")
+            post_patch_fp = post_patch_fingerprints.get(test_node, "")
+            if baseline_fp and post_patch_fp and baseline_fp != post_patch_fp:
+                worsened_tests.append(test_node)
+
+        if worsened_tests:
+            return "WORSENED"
+
+        # Check for regressions (new failures)
+        new_failures = post_patch_failures - baseline_failures
+        if new_failures:
+            return "REGRESSION"
+
+        # Check for improvements (some failures resolved)
+        resolved_failures = baseline_failures - post_patch_failures
+        if resolved_failures:
+            return "IMPROVED"
+
+        # Same tests failed with same errors
         if post_patch_failures == baseline_failures:
             return "PRE_EXISTING_FAILURE"
-        if post_patch_failures < baseline_failures:
-            return "IMPROVED"
+
+        # Fallback to comparison for edge cases
         return "WORSENED"
 
+    # Fallback to signature comparison for non-standard failures
     if _failure_signature(baseline) == _failure_signature(post_patch):
         return "PRE_EXISTING_FAILURE"
     return "WORSENED"
@@ -1515,7 +1657,10 @@ def regression_delta_passed(report: dict[str, Any]) -> bool:
 
     return all(
         check.get("passed") is True
-        or check.get("transition") == "PRE_EXISTING_FAILURE"
+        or check.get("transition") in {
+            "PRE_EXISTING_FAILURE",
+            "IMPROVED",
+        }
         for check in regression_checks
     )
 

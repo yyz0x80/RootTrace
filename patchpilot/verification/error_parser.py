@@ -31,6 +31,7 @@ class FailureSummary:
         failed_tests: List of test names that failed (for pytest)
         error_type: Categorized error type (e.g., "AssertionError", "Timeout")
         relevant_output: Extracted relevant output lines for debugging
+        full_output: Complete output for detailed error section parsing
         timed_out: Whether the command timed out
     """
     command: str
@@ -38,6 +39,7 @@ class FailureSummary:
     failed_tests: list[str]
     error_type: str
     relevant_output: str
+    full_output: str = ""
     timed_out: bool = False
 
 
@@ -165,5 +167,6 @@ def parse_failure(
         failed_tests=_find_failed_tests(text),
         error_type=error_type,
         relevant_output=_extract_relevant_output(text),
+        full_output=text,  # Include full output for detailed parsing
         timed_out=result.timed_out,
     )
