@@ -877,6 +877,7 @@ def handle_run(args) -> None:
             max_repair_attempts=args.max_repairs,
             verification_timeouts=verification_timeouts,
             verification_strategy=verification_strategy,
+            output_dir=str(output_dir),
         )
 
         # Execute workflow
@@ -1202,6 +1203,7 @@ def handle_execute(args) -> None:
             max_repair_attempts=args.max_repairs,
             verification_timeouts=verification_timeouts,
             verification_strategy=verification_strategy,
+            output_dir=str(output_dir),
         )
 
         # Step 9: Execute workflow
@@ -1415,6 +1417,7 @@ def handle_baseline(args) -> None:
         )
         verification_timeouts = _create_verification_timeouts(args)
         verification_strategy = _create_verification_strategy(args)
+        output_dir = Path(args.output_dir)
         runner = WorkflowRunner(
             agent_loop=agent_loop,
             verifier=None,
@@ -1422,9 +1425,8 @@ def handle_baseline(args) -> None:
             max_repair_attempts=0,
             verification_timeouts=verification_timeouts,
             verification_strategy=verification_strategy,
+            output_dir=str(output_dir),
         )
-
-        output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         result = runner.execute_baseline(
             issue=raw_issue.body,

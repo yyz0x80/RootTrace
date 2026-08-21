@@ -410,6 +410,7 @@ class WorkflowRunner:
         max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
         verification_timeouts: VerificationTimeouts | None = None,
         verification_strategy: VerificationStrategy = VerificationStrategy.BALANCED,
+        output_dir: str = "artifacts",
     ) -> None:
         """Initialize the WorkflowRunner with required components.
 
@@ -422,6 +423,7 @@ class WorkflowRunner:
             max_repair_attempts: Maximum number of repair attempts (default: MAX_REPAIR_ATTEMPTS)
             verification_timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
             verification_strategy: Verification strategy (strict, balanced, focused)
+            output_dir: Directory where artifacts are saved (default: "artifacts")
         """
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be non-negative")
@@ -433,6 +435,7 @@ class WorkflowRunner:
         self.verification_strategy = verification_strategy
         self.max_repair_attempts = max_repair_attempts
         self.verification_timeouts = verification_timeouts or VerificationTimeouts()
+        self.output_dir = output_dir
         self._temp_dir: tempfile.TemporaryDirectory | None = None
         self._sandbox_verifier: Verifier | None = None
 
@@ -748,7 +751,7 @@ class WorkflowRunner:
                     )
                     artifacts = {
                         "verification_report": (
-                            "artifacts/verification_report.json"
+                            f"{self.output_dir}/verification_report.json"
                         )
                     }
                     if trace_path is not None:
@@ -1124,8 +1127,8 @@ class WorkflowRunner:
             # Log final result section
             artifacts = {}
             if report.patch:
-                artifacts["patch"] = "artifacts/patch.diff"
-            artifacts["verification_report"] = "artifacts/verification_report.json"
+                artifacts["patch"] = f"{self.output_dir}/patch.diff"
+            artifacts["verification_report"] = f"{self.output_dir}/verification_report.json"
             if trace_path is not None:
                 artifacts["execution_trace"] = str(trace_path)
 
