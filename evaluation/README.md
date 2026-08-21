@@ -60,16 +60,24 @@ Every subprocess writes `stdout.log` and `stderr.log` beside its artifacts.
 
 ## Scoring semantics (schema version 2.0)
 
-PatchPilot evaluation uses **separate deterministic dimensions** for scoring:
+PatchPilot evaluation uses **separate deterministic dimensions** for scoring with **independent evaluator verification**:
+
+### Independent evaluator checks
+
+The external evaluator now independently verifies patch scope, declared public tests, and basic patch minimality instead of trusting PatchPilot's internal verification_report.json. The evaluator's checks are the source of truth for scoring:
+
+1. **Scope compliance**: After applying patch.diff to the clean scoring checkout, the evaluator independently determines changed files using Git and validates them against the task manifest's `allowed_changes`
+2. **Public test execution**: The evaluator executes every declared `target_tests` entry independently in the scoring checkout using controlled pytest commands
+3. **Minimality analysis**: The evaluator calculates deterministic signals (changed file count, added/deleted lines, unexpected files, generated/cache files) without subjective model judgment
 
 ### Functional correctness
 Measures whether the generated patch actually works correctly:
 
-- **Value**: 1.0 if the patch applies successfully and all hidden tests pass, 0.0 otherwise
+- **Value**: 1.0 if the patch applies successfully, scope is compliant, public tests pass, and all hidden tests pass, 0.0 otherwise
 - **Applies to**: Tasks that reach the execute phase and have hidden tests configured
-- **Key principle**: Reporting VERIFIED never awards partial functional credit when hidden tests fail
+- **Key principle**: Reporting VERIFIED never awards partial functional credit when hidden tests fail or scope is violated
 - **For prepare-only tasks**: Functional correctness is not applicable (set to 0.0)
-- **For tasks without hidden tests**: Functional correctness depends on patch applicability only
+- **For tasks without hidden tests**: Functional correctness depends on patch applicability, scope compliance, and public test results
 
 ### Outcome accuracy
 Measures whether the agent correctly predicted its final status:
@@ -81,14 +89,25 @@ Measures whether the agent correctly predicted its final status:
 
 ### Key scoring rules
 
-1. **VERIFIED + passing hidden tests**: functional_correctness = 1.0, outcome_accuracy = 1.0
+1. **VERIFIED + passing hidden tests + scope compliant + public tests pass**: functional_correctness = 1.0, outcome_accuracy = 1.0
 2. **VERIFIED + failing hidden tests**: functional_correctness = 0.0, outcome_accuracy = 1.0 (false VERIFIED)
-3. **Wrong status + passing hidden tests**: functional_correctness = 0.0, outcome_accuracy = 0.0
-4. **Missing patch**: functional_correctness = 0.0
-5. **Patch application failure**: functional_correctness = 0.0
-6. **Prepare-only with expected BLOCKED**: functional_correctness = 0.0 (N/A), outcome_accuracy = 1.0
-7. **Prepare-only with expected NEEDS_CLARIFICATION**: functional_correctness = 0.0 (N/A), outcome_accuracy = 1.0
-8. **Execute task with no score commands**: hidden_tests_applicable = false, functional_correctness based on patch applicability
+3. **VERIFIED + scope violation**: functional_correctness = 0.0, outcome_accuracy = 1.0 (scope violations force functional correctness to 0)
+4. **VERIFIED + public test failure**: functional_correctness = 0.0, outcome_accuracy = 1.0 (public test failures prevent functional success)
+5. **Wrong status + passing hidden tests**: functional_correctness = 0.0, outcome_accuracy = 0.0
+6. **Missing patch**: functional_correctness = 0.0
+7. **Patch application failure**: functional_correctness = 0.0
+8. **Prepare-only with expected BLOCKED**: functional_correctness = 0.0 (N/A), outcome_accuracy = 1.0
+9. **Prepare-only with expected NEEDS_CLARIFICATION**: functional_correctness = 0.0 (N/A), outcome_accuracy = 1.0
+10. **Execute task with no score commands**: hidden_tests_applicable = false, functional_correctness based on patch applicability and scope compliance
+
+### Scope compliance rules
+
+The evaluator enforces the following scope rules:
+
+- **Empty allowed_changes**: Treated as "no repository changes allowed," not "unrestricted"
+- **Denied paths**: Patches that modify `.git` internals, test files (`tests/`, `test_*.py`), secrets, CI files, or other sensitive paths are automatically non-compliant unless explicitly permitted
+- **Path normalization**: All paths are normalized as repository-relative POSIX paths
+- **Scope violations**: Force functional_correctness to 0.0 regardless of hidden test results
 
 ### Score artifact schema (score.json)
 
@@ -109,6 +128,14 @@ Each task's `score.json` contains:
   "verification_report_present": boolean,
   "patch_generated": boolean,
   "patch_applied": boolean,
+  "scope_compliant": boolean,
+  "public_tests_passed": boolean,
+  "public_tests_applicable": boolean,
+  "changed_file_count": integer,
+  "added_lines": integer,
+  "deleted_lines": integer,
+  "unexpected_changed_files": [string],
+  "minimality_warnings": [string],
   "details": {}
 }
 ```
@@ -116,14 +143,24 @@ Each task's `score.json` contains:
 ### Field definitions
 
 - `schema_version`: "2.0" for the new separated scoring schema
-- `functional_correctness`: 1.0 only when patch applies and all hidden tests pass
+- `functional_correctness`: 1.0 only when patch applies, scope is compliant, public tests pass, and all hidden tests pass
 - `outcome_accuracy`: 1.0 when actual_status matches expected_status
 - `hidden_tests_passed`: True if all configured hidden tests passed
 - `hidden_tests_applicable`: True if hidden tests were configured and run (not the same as passed)
 - `patch_applied`: True if patch was successfully applied to the scoring repository copy
+- `scope_compliant`: True if patch only changes allowed files, False otherwise
+- `public_tests_passed`: True if all declared target_tests passed, False if any failed
+- `public_tests_applicable`: True if target_tests were configured and run
+- `changed_file_count`: Number of files changed by the patch
+- `added_lines`: Number of lines added by the patch
+- `deleted_lines`: Number of lines deleted by the patch
+- `unexpected_changed_files`: List of changed files not in allowed_changes
+- `minimality_warnings`: List of warnings about patch size or content (e.g., large diffs, binary files)
 - `actual_status`, `expected_status`: Terminal status values from execution
-- `verification_report_present`: True if verification_report.json exists
+- `verification_report_present`: True if verification_report.json exists (diagnostic evidence only)
 - `patch_generated`: True if patch.diff was generated
+
+**Important**: PatchPilot's own `verification_report.json` is now considered diagnostic evidence only, not the evaluator's source of truth. The evaluator performs independent verification of scope, public tests, and minimality.
 
 ### Legacy schema compatibility
 
@@ -144,6 +181,14 @@ Each evaluation run writes the following automatic metrics to
 - `outcome_accuracy_rate`: Rate of tasks where actual_status matches expected_status
 - `false_verified_rate`: Rate of tasks that reported VERIFIED but failed functional checks
 - `patch_applicability_rate`: Rate of tasks where patches applied successfully
+- `scope_compliance_rate`: Rate of tasks where patches only changed allowed files
+- `public_tests_pass_rate`: Rate of tasks where declared public tests passed
+- `total_changed_files`: Total number of files changed across all tasks
+- `total_added_lines`: Total number of lines added across all tasks
+- `total_deleted_lines`: Total number of lines deleted across all tasks
+- `average_changed_files`: Average number of files changed per task (when applicable)
+- `average_added_lines`: Average number of lines added per task (when applicable)
+- `average_deleted_lines`: Average number of lines deleted per task (when applicable)
 
 ### Legacy metrics (for backward compatibility)
 

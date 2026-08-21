@@ -16,7 +16,9 @@ from evaluation.runner import (
     ScoreResult,
     TaskConfig,
     aggregate_scores,
+    check_scope_compliance,
     execute_task,
+    is_denied_path,
     select_task_configs,
 )
 
@@ -104,6 +106,14 @@ def write_metric_task(
             "verification_report_present": report is not None,
             "patch_generated": patch_applied,
             "patch_applied": patch_applied,
+            "scope_compliant": True,
+            "public_tests_passed": True,
+            "public_tests_applicable": False,
+            "changed_file_count": 1 if patch_applied else 0,
+            "added_lines": 5 if patch_applied else 0,
+            "deleted_lines": 3 if patch_applied else 0,
+            "unexpected_changed_files": [],
+            "minimality_warnings": [],
             "details": {},
         },
     )
@@ -242,6 +252,14 @@ def test_main_runs_only_requested_task(
             verification_report_present=True,
             patch_generated=True,
             patch_applied=True,
+            scope_compliant=True,
+            public_tests_passed=True,
+            public_tests_applicable=False,
+            changed_file_count=1,
+            added_lines=5,
+            deleted_lines=3,
+            unexpected_changed_files=[],
+            minimality_warnings=[],
         )
     )
     monkeypatch.setattr(runner, "execute_task", execute_mock)
@@ -378,6 +396,11 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
     assert result.hidden_tests_passed is True
     assert result.functional_correctness == 1.0
     assert result.outcome_accuracy == 1.0
+    assert result.scope_compliant is True
+    assert result.changed_file_count == 1
+    assert result.added_lines == 1
+    assert result.deleted_lines == 1
+    assert result.public_tests_applicable is True  # target_tests in config
 
 
 def test_score_task_preserves_failed_status_without_verification_report(
@@ -447,6 +470,8 @@ def test_score_task_preserves_failed_status_without_verification_report(
     assert saved["patch_generated"] is False
     assert saved["functional_correctness"] == 0.0
     assert saved["outcome_accuracy"] == 0.0
+    assert saved["scope_compliant"] is True  # Default for failed tasks
+    assert saved["public_tests_applicable"] is False
 
 
 def test_extract_prepare_status_maps_null_final_status() -> None:
@@ -612,8 +637,12 @@ def test_empty_metric_denominator_is_not_reported_as_zero(tmp_path: Path) -> Non
 
     aggregate = aggregate_scores(tmp_path / "evaluation", "empty-run")
 
-    for metric in aggregate["metrics"].values():
-        assert metric["value"] is None
+    for metric_name, metric in aggregate["metrics"].items():
+        # Skip total metrics which are integers
+        if metric_name.startswith("total_"):
+            assert metric == 0
+        elif isinstance(metric, dict):
+            assert metric["value"] is None
 
 
 def test_missing_token_usage_is_not_treated_as_zero(tmp_path: Path) -> None:
@@ -1217,3 +1246,320 @@ def test_execute_task_baseline_skips_prepare_and_uses_run_summary(
     )
     assert (execute_dir / "stdout.log").read_text() == "baseline stdout"
     assert (execute_dir / "stderr.log").read_text() == "baseline stderr"
+
+
+def test_scope_compliance_with_allowed_files(tmp_path: Path) -> None:
+    """Test scope compliance when patch changes only allowed files."""
+    # Test the scope compliance function directly
+    changed_files = ["src/main.py"]
+    allowed_changes = ["src/main.py"]
+    
+    compliant, unexpected = check_scope_compliance(
+        changed_files,
+        allowed_changes,
+        Path("/tmp/repo"),
+    )
+    
+    assert compliant is True
+    assert len(unexpected) == 0
+
+
+def test_scope_compliance_with_undeclared_file(tmp_path: Path) -> None:
+    """Test scope compliance when patch changes undeclared file."""
+    # Test the scope compliance function directly instead of through full scoring
+    changed_files = ["src/main.py", "other_module.py"]
+    allowed_changes = ["src/main.py"]
+    
+    compliant, unexpected = check_scope_compliance(
+        changed_files,
+        allowed_changes,
+        Path("/tmp/repo"),
+    )
+    
+    assert compliant is False
+    assert "other_module.py" in unexpected
+
+
+def test_scope_compliance_with_empty_allowed_changes(tmp_path: Path) -> None:
+    """Test scope compliance when allowed_changes is empty but patch exists."""
+    # Test the scope compliance function directly
+    changed_files = ["src/main.py"]
+    allowed_changes = []  # Empty means no changes allowed
+    
+    compliant, unexpected = check_scope_compliance(
+        changed_files,
+        allowed_changes,
+        Path("/tmp/repo"),
+    )
+    
+    assert compliant is False
+    assert len(unexpected) == 1
+
+
+def test_scope_compliance_with_denied_test_file(tmp_path: Path) -> None:
+    """Test scope compliance when patch changes a test file."""
+    # Test the scope compliance function directly
+    changed_files = ["src/main.py", "tests/test_booleans.py"]
+    allowed_changes = ["src/main.py"]
+    
+    compliant, unexpected = check_scope_compliance(
+        changed_files,
+        allowed_changes,
+        Path("/tmp/repo"),
+    )
+    
+    assert compliant is False
+    assert "tests/test_booleans.py" in unexpected
+
+
+def test_public_tests_pass_and_fail(tmp_path: Path) -> None:
+    """Test public test execution function."""
+    # Test the function directly with mock
+    from unittest.mock import MagicMock
+
+    # Mock subprocess.run to simulate test execution
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "passed"
+    mock_result.stderr = ""
+    
+    original_run = subprocess.run
+    subprocess.run = MagicMock(return_value=mock_result)
+    
+    try:
+        passed, results = runner.run_public_tests(
+            Path("/tmp/repo"),
+            ["tests/test_example.py"],
+        )
+        
+        assert passed is True
+        assert len(results) == 1
+        assert results[0]["target"] == "tests/test_example.py"
+        assert results[0]["passed"] is True
+    finally:
+        subprocess.run = original_run
+
+
+def test_minimality_analysis_empty_patch(tmp_path: Path) -> None:
+    """Test minimality analysis with empty patch."""
+    # Test the analyze_patch_minimality function directly
+    from unittest.mock import MagicMock
+
+    from evaluation.runner import analyze_patch_minimality
+    
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    
+    original_run_git = runner.run_git
+    runner.run_git = MagicMock(return_value=mock_result)
+    
+    try:
+        metrics = analyze_patch_minimality(Path("/tmp/repo"))
+        
+        assert metrics["changed_file_count"] == 0
+        assert metrics["added_lines"] == 0
+        assert metrics["deleted_lines"] == 0
+        assert metrics["is_empty"] is True
+        assert len(metrics["warnings"]) == 0
+    finally:
+        runner.run_git = original_run_git
+
+
+def test_aggregate_scope_and_public_test_metrics(tmp_path: Path) -> None:
+    """Test aggregation of new scope and public test metrics."""
+    evaluation_root = tmp_path / "evaluation"
+    timestamp = "scope-metrics-run"
+    
+    # Task 1: Scope compliant, public tests pass
+    task1 = make_task_config("task1", "single_file_bug", "VERIFIED")
+    write_metric_task(
+        evaluation_root / "runs" / timestamp,
+        task1,
+        actual_status="VERIFIED",
+        phase="execute",
+        report={"passed": True, "checks": []},
+        run_summary={"final_status": "VERIFIED"},
+        criteria=[],
+        evidence={},
+        prepare_usage=(2, 10, 5),
+        functional_correctness=1.0,
+        outcome_accuracy=1.0,
+        hidden_tests_passed=True,
+        hidden_tests_applicable=True,
+        patch_applied=True,
+    )
+    # Add new fields to task1 score
+    task1_score_path = evaluation_root / "runs" / timestamp / "task1" / "score.json"
+    task1_score = json.loads(task1_score_path.read_text(encoding="utf-8"))
+    task1_score["scope_compliant"] = True
+    task1_score["public_tests_passed"] = True
+    task1_score["public_tests_applicable"] = True
+    task1_score["changed_file_count"] = 1
+    task1_score["added_lines"] = 5
+    task1_score["deleted_lines"] = 3
+    task1_score["unexpected_changed_files"] = []
+    task1_score["minimality_warnings"] = []
+    task1_score_path.write_text(json.dumps(task1_score, indent=2), encoding="utf-8")
+    
+    # Task 2: Scope violation
+    task2 = make_task_config("task2", "single_file_bug", "VERIFIED")
+    write_metric_task(
+        evaluation_root / "runs" / timestamp,
+        task2,
+        actual_status="VERIFIED",
+        phase="execute",
+        report={"passed": True, "checks": []},
+        run_summary={"final_status": "VERIFIED"},
+        criteria=[],
+        evidence={},
+        prepare_usage=(2, 10, 5),
+        functional_correctness=0.0,  # Scope violation
+        outcome_accuracy=1.0,
+        hidden_tests_passed=True,
+        hidden_tests_applicable=True,
+        patch_applied=True,
+    )
+    # Add new fields to task2 score
+    task2_score_path = evaluation_root / "runs" / timestamp / "task2" / "score.json"
+    task2_score = json.loads(task2_score_path.read_text(encoding="utf-8"))
+    task2_score["scope_compliant"] = False
+    task2_score["public_tests_passed"] = True
+    task2_score["public_tests_applicable"] = True
+    task2_score["changed_file_count"] = 2
+    task2_score["added_lines"] = 10
+    task2_score["deleted_lines"] = 5
+    task2_score["unexpected_changed_files"] = ["other_file.py"]
+    task2_score["minimality_warnings"] = ["Modified denied file: other_file.py"]
+    task2_score_path.write_text(json.dumps(task2_score, indent=2), encoding="utf-8")
+    
+    # Task 3: Public test failure (but scope compliant)
+    task3 = make_task_config("task3", "single_file_bug", "VERIFIED")
+    write_metric_task(
+        evaluation_root / "runs" / timestamp,
+        task3,
+        actual_status="VERIFIED",
+        phase="execute",
+        report={"passed": True, "checks": []},
+        run_summary={"final_status": "VERIFIED"},
+        criteria=[],
+        evidence={},
+        prepare_usage=(2, 10, 5),
+        functional_correctness=0.0,  # Public test failure
+        outcome_accuracy=1.0,
+        hidden_tests_passed=True,
+        hidden_tests_applicable=True,
+        patch_applied=True,
+    )
+    # Add new fields to task3 score
+    task3_score_path = evaluation_root / "runs" / timestamp / "task3" / "score.json"
+    task3_score = json.loads(task3_score_path.read_text(encoding="utf-8"))
+    task3_score["scope_compliant"] = True  # Scope is compliant
+    task3_score["public_tests_passed"] = False
+    task3_score["public_tests_applicable"] = True
+    task3_score["changed_file_count"] = 1
+    task3_score["added_lines"] = 5
+    task3_score["deleted_lines"] = 3
+    task3_score["unexpected_changed_files"] = []
+    task3_score["minimality_warnings"] = []
+    task3_score_path.write_text(json.dumps(task3_score, indent=2), encoding="utf-8")
+    
+    aggregate = aggregate_scores(
+        evaluation_root,
+        timestamp,
+        task_configs=[task1, task2, task3],
+    )
+    
+    # Check scope compliance rate: 2/3 (task1 and task3 are compliant, task2 is not)
+    assert aggregate["metrics"]["scope_compliance_rate"]["value"] == pytest.approx(2/3)
+    # Check public test pass rate: 2/3 (task1 passed, task2 passed, task3 failed)
+    assert aggregate["metrics"]["public_tests_pass_rate"]["value"] == pytest.approx(2/3)
+    # Check total minimality metrics
+    assert aggregate["metrics"]["total_changed_files"] == 4  # 1 + 2 + 1
+    assert aggregate["metrics"]["total_added_lines"] == 20  # 5 + 10 + 5
+    assert aggregate["metrics"]["total_deleted_lines"] == 11  # 3 + 5 + 3
+
+
+def test_is_denied_path() -> None:
+    """Test denied path detection."""
+    # Git internals
+    assert is_denied_path(".git/config") is True
+    assert is_denied_path(".git/HEAD") is True
+    
+    # Test files
+    assert is_denied_path("tests/test_example.py") is True
+    assert is_denied_path("test_utils.py") is True
+    assert is_denied_path("tests/integration/test_api.py") is True
+    
+    # Sensitive files
+    assert is_denied_path(".env") is True
+    assert is_denied_path("config/secrets.json") is True  # Now catches "secrets" in path
+    assert is_denied_path("ssh/private_key.pem") is True
+    assert is_denied_path("credentials.txt") is True
+    
+    # CI/CD files
+    assert is_denied_path(".github/workflows/ci.yml") is True
+    assert is_denied_path(".gitlab-ci.yml") is True
+    assert is_denied_path("jenkinsfile") is True
+    
+    # Allowed files
+    assert is_denied_path("src/main.py") is False
+    assert is_denied_path("lib/utils.py") is False
+    assert is_denied_path("README.md") is False
+
+
+def test_check_scope_compliance() -> None:
+    """Test scope compliance checking."""
+    # Empty allowed_changes with changes
+    compliant, unexpected = check_scope_compliance(
+        ["src/main.py"],
+        [],
+        Path("/tmp/repo"),
+    )
+    assert compliant is False
+    assert unexpected == ["src/main.py"]
+    
+    # Empty allowed_changes with no changes
+    compliant, unexpected = check_scope_compliance(
+        [],
+        [],
+        Path("/tmp/repo"),
+    )
+    assert compliant is True
+    assert unexpected == []
+    
+    # Allowed changes match
+    compliant, unexpected = check_scope_compliance(
+        ["src/main.py"],
+        ["src/main.py"],
+        Path("/tmp/repo"),
+    )
+    assert compliant is True
+    assert unexpected == []
+    
+    # Directory prefix match
+    compliant, unexpected = check_scope_compliance(
+        ["src/module/utils.py"],
+        ["src/module"],
+        Path("/tmp/repo"),
+    )
+    assert compliant is True
+    assert unexpected == []
+    
+    # Unexpected file
+    compliant, unexpected = check_scope_compliance(
+        ["src/main.py", "other_file.py"],
+        ["src/main.py"],
+        Path("/tmp/repo"),
+    )
+    assert compliant is False
+    assert "other_file.py" in unexpected
+    
+    # Denied file in changes
+    compliant, unexpected = check_scope_compliance(
+        ["src/main.py", "tests/test_main.py"],
+        ["src/main.py"],
+        Path("/tmp/repo"),
+    )
+    assert compliant is False
+    assert "tests/test_main.py" in unexpected

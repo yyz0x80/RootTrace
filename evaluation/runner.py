@@ -80,6 +80,14 @@ class ScoreResult:
         verification_report_present: True if verification_report.json exists
         patch_generated: True if patch.diff was generated
         patch_applied: True if patch was successfully applied to scoring copy
+        scope_compliant: True if patch only changes allowed files, False otherwise
+        public_tests_passed: True if all declared target_tests passed, False if any failed
+        public_tests_applicable: True if target_tests were configured and run
+        changed_file_count: Number of files changed by the patch
+        added_lines: Number of lines added by the patch
+        deleted_lines: Number of lines deleted by the patch
+        unexpected_changed_files: List of changed files not in allowed_changes
+        minimality_warnings: List of warnings about patch size or content
         details: Additional diagnostic information
     """
 
@@ -95,6 +103,14 @@ class ScoreResult:
     verification_report_present: bool = False
     patch_generated: bool = False
     patch_applied: bool = False
+    scope_compliant: bool = True
+    public_tests_passed: bool = True
+    public_tests_applicable: bool = False
+    changed_file_count: int = 0
+    added_lines: int = 0
+    deleted_lines: int = 0
+    unexpected_changed_files: list[str] = field(default_factory=list)
+    minimality_warnings: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -571,6 +587,259 @@ def extract_prepare_status(summary: dict[str, Any] | None) -> str:
     return "UNKNOWN"
 
 
+def get_changed_files(repo: Path) -> list[str]:
+    """Get list of changed files in a repository using git.
+
+    Args:
+        repo: Path to the repository
+
+    Returns:
+        List of repository-relative POSIX paths for changed files
+    """
+    result = run_git(repo, "diff", "--name-only", check=False)
+    if result.returncode != 0:
+        return []
+    
+    changed_files = []
+    for line in result.stdout.strip().splitlines():
+        if line:
+            # Normalize to POSIX path separator
+            changed_files.append(line.replace("\\", "/"))
+    
+    return changed_files
+
+
+def normalize_path(path: str | Path) -> str:
+    """Normalize a path to repository-relative POSIX format.
+
+    Args:
+        path: Path to normalize
+
+    Returns:
+        Normalized POSIX path string
+    """
+    return str(Path(path).as_posix())
+
+
+def is_denied_path(path: str) -> bool:
+    """Check if a path is in a denied category.
+
+    Args:
+        path: Repository-relative path to check
+
+    Returns:
+        True if path is denied, False otherwise
+    """
+    path_normalized = normalize_path(path)
+    path_lower = path_normalized.lower()
+    
+    # Check for .git internals
+    if path_normalized.startswith(".git/"):
+        return True
+    
+    # Check for test files
+    if path_normalized.startswith(("tests/", "test_")):
+        return True
+    
+    # Check for common sensitive files
+    denied_patterns = [
+        ".env",
+        ".secrets",
+        "credentials",
+        "ssh",
+        ".pem",
+        ".key",
+        "secrets",  # Catch "secrets" in any part of path
+    ]
+    
+    for pattern in denied_patterns:
+        if pattern in path_lower:
+            return True
+    
+    # Check for CI/CD files
+    ci_patterns = [
+        ".github/",
+        ".gitlab-ci.yml",
+        "jenkinsfile",
+        ".travis.yml",
+        "circleci",
+    ]
+    
+    for pattern in ci_patterns:
+        if pattern in path_lower:
+            return True
+    
+    return False
+
+
+def check_scope_compliance(
+    changed_files: list[str],
+    allowed_changes: list[str],
+    repo_root: Path,
+) -> tuple[bool, list[str]]:
+    """Check if patch changes comply with allowed scope.
+
+    Args:
+        changed_files: List of repository-relative changed file paths
+        allowed_changes: List of allowed file patterns from task manifest
+        repo_root: Root directory of the repository
+
+    Returns:
+        Tuple of (is_compliant, list_of_unexpected_files)
+    """
+    # Empty allowed_changes means no changes allowed
+    if not allowed_changes:
+        if changed_files:
+            return False, changed_files.copy()
+        return True, []
+    
+    # Normalize allowed changes to POSIX paths
+    normalized_allowed = [normalize_path(p) for p in allowed_changes]
+    
+    unexpected_files = []
+    for changed_file in changed_files:
+        # Check if changed file is denied
+        if is_denied_path(changed_file):
+            unexpected_files.append(changed_file)
+            continue
+        
+        # Check if changed file is in allowed list
+        is_allowed = False
+        for allowed_pattern in normalized_allowed:
+            # Check for exact match or prefix match (for directories)
+            if changed_file == allowed_pattern or changed_file.startswith(
+                allowed_pattern + "/"
+            ):
+                is_allowed = True
+                break
+        
+        if not is_allowed:
+            unexpected_files.append(changed_file)
+    
+    return len(unexpected_files) == 0, unexpected_files
+
+
+def analyze_patch_minimality(repo: Path) -> dict[str, Any]:
+    """Analyze patch for minimality signals.
+
+    Args:
+        repo: Path to the repository with applied patch
+
+    Returns:
+        Dictionary with minimality metrics
+    """
+    # Get diff stats
+    result = run_git(repo, "diff", "--numstat", check=False)
+    if result.returncode != 0:
+        return {
+            "changed_file_count": 0,
+            "added_lines": 0,
+            "deleted_lines": 0,
+            "is_empty": True,
+            "warnings": [],
+        }
+    
+    changed_file_count = 0
+    added_lines = 0
+    deleted_lines = 0
+    warnings = []
+    
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        
+        parts = line.split()
+        if len(parts) >= 3:
+            try:
+                added = int(parts[0]) if parts[0] != "-" else 0
+                deleted = int(parts[1]) if parts[1] != "-" else 0
+                file_path = parts[2]
+                
+                changed_file_count += 1
+                added_lines += added
+                deleted_lines += deleted
+                
+                # Check for generated/cache files
+                if is_denied_path(file_path):
+                    warnings.append(f"Modified denied file: {file_path}")
+                
+                # Check for binary files (indicated by - in numstat)
+                if parts[0] == "-" and parts[1] == "-":
+                    warnings.append(f"Binary file modified: {file_path}")
+                
+            except (ValueError, IndexError):
+                continue
+    
+    is_empty = changed_file_count == 0
+    
+    # Add warning for large diffs (subjective but useful signal)
+    if added_lines + deleted_lines > 500:
+        warnings.append(f"Large diff: {added_lines + deleted_lines} lines changed")
+    
+    return {
+        "changed_file_count": changed_file_count,
+        "added_lines": added_lines,
+        "deleted_lines": deleted_lines,
+        "is_empty": is_empty,
+        "warnings": warnings,
+    }
+
+
+def run_public_tests(
+    repo: Path,
+    target_tests: list[str],
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Run declared public target tests independently.
+
+    Args:
+        repo: Path to the repository for test execution
+        target_tests: List of test targets from task manifest
+
+    Returns:
+        Tuple of (all_passed, list_of_test_results)
+    """
+    if not target_tests:
+        return True, []
+    
+    all_passed = True
+    test_results = []
+    
+    for test_target in target_tests:
+        # Parse test target as structured command
+        # Assume pytest-based tests by default
+        parts = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", test_target]
+        
+        try:
+            result = subprocess.run(
+                parts,
+                cwd=repo.resolve(),
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            
+            passed = result.returncode == 0
+            all_passed = all_passed and passed
+            
+            test_results.append({
+                "target": test_target,
+                "passed": passed,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            })
+        except subprocess.TimeoutExpired:
+            all_passed = False
+            test_results.append({
+                "target": test_target,
+                "passed": False,
+                "stdout": "",
+                "stderr": "Test execution timed out",
+            })
+    
+    return all_passed, test_results
+
+
 def execute_task(
     task_config: TaskConfig,
     evaluation_root: Path,
@@ -801,6 +1070,9 @@ def score_task(
     - outcome_accuracy: 1 if actual_status equals expected_status, 0 otherwise
     - For prepare-only tasks, functional_correctness is not applicable (set to 0)
     - For tasks with no hidden tests, hidden_tests_applicable is False
+    - scope_compliant: True if patch only changes allowed files, False otherwise
+    - public_tests_passed: True if all declared target_tests passed, False if any failed
+    - Scope violations force functional_correctness to 0
 
     Args:
         task_config: Task configuration
@@ -840,6 +1112,9 @@ def score_task(
             else False
         ),
         patch_applied=False,
+        scope_compliant=True,
+        public_tests_passed=True,
+        public_tests_applicable=bool(task_config.target_tests),
     )
     result.details["run_status"] = run_result.status
     if run_result.failure_type:
@@ -852,6 +1127,7 @@ def score_task(
         # Functional correctness is not applicable for prepare-only tasks
         result.functional_correctness = 0.0
         result.hidden_tests_applicable = False
+        result.public_tests_applicable = False
         if run_result.error_message:
             result.details["error_message"] = run_result.error_message
         return result
@@ -904,11 +1180,48 @@ def score_task(
                 return result
             patch_applied = True
             result.patch_applied = True
+            
+            # Independent scope compliance check
+            changed_files = get_changed_files(score_repo)
+            scope_compliant, unexpected_files = check_scope_compliance(
+                changed_files,
+                task_config.allowed_changes,
+                score_repo,
+            )
+            result.scope_compliant = scope_compliant
+            result.unexpected_changed_files = unexpected_files
+            
+            # Minimality analysis
+            minimality_metrics = analyze_patch_minimality(score_repo)
+            result.changed_file_count = minimality_metrics["changed_file_count"]
+            result.added_lines = minimality_metrics["added_lines"]
+            result.deleted_lines = minimality_metrics["deleted_lines"]
+            result.minimality_warnings = minimality_metrics["warnings"]
+            
+            # Scope violations force functional correctness to 0
+            if not scope_compliant:
+                result.functional_correctness = 0.0
+                result.details["scope_violation"] = unexpected_files
+                return result
         
         if task_config.score_commands and not patch_file.exists():
             result.details["patch_error"] = "Patch file was not generated"
             result.functional_correctness = 0.0
             return result
+
+        # Run declared public target tests independently
+        if task_config.target_tests:
+            public_tests_passed, public_test_results = run_public_tests(
+                score_repo,
+                task_config.target_tests,
+            )
+            result.public_tests_passed = public_tests_passed
+            result.details["public_test_results"] = public_test_results
+            
+            # Public test failure prevents functional success
+            if not public_tests_passed:
+                result.functional_correctness = 0.0
+                result.details["public_test_failure"] = True
 
         # Run score commands (hidden tests) if configured
         if task_config.score_commands:
@@ -931,11 +1244,18 @@ def score_task(
             result.hidden_tests_passed = all_passed
             result.details["test_results"] = test_results
             
-            # Functional correctness is 1 only if patch applied and all tests pass
-            result.functional_correctness = 1.0 if (patch_applied and all_passed) else 0.0
+            # Functional correctness is 1 only if patch applied, scope compliant, 
+            # public tests pass, and all hidden tests pass
+            if patch_applied and result.scope_compliant and result.public_tests_passed and all_passed:
+                result.functional_correctness = 1.0
+            else:
+                result.functional_correctness = 0.0
         else:
-            # No hidden tests configured - functional correctness depends on patch applicability
-            result.functional_correctness = 1.0 if patch_applied else 0.0
+            # No hidden tests configured - functional correctness depends on patch applicability and scope
+            if patch_applied and result.scope_compliant and result.public_tests_passed:
+                result.functional_correctness = 1.0
+            else:
+                result.functional_correctness = 0.0
 
     finally:
         # Clean up temporary directory
@@ -971,6 +1291,14 @@ def save_score_result(run_dir: Path, score: ScoreResult) -> None:
                 ),
                 "patch_generated": score.patch_generated,
                 "patch_applied": score.patch_applied,
+                "scope_compliant": score.scope_compliant,
+                "public_tests_passed": score.public_tests_passed,
+                "public_tests_applicable": score.public_tests_applicable,
+                "changed_file_count": score.changed_file_count,
+                "added_lines": score.added_lines,
+                "deleted_lines": score.deleted_lines,
+                "unexpected_changed_files": score.unexpected_changed_files,
+                "minimality_warnings": score.minimality_warnings,
                 "details": score.details,
             },
             f,
@@ -1119,6 +1447,15 @@ def aggregate_scores(
     patch_applied_sum = 0
     patch_applied_eligible = 0
     
+    # New scope and public test metrics
+    scope_compliant_sum = 0
+    scope_compliant_eligible = 0
+    public_tests_passed_sum = 0
+    public_tests_eligible = 0
+    total_changed_files = 0
+    total_added_lines = 0
+    total_deleted_lines = 0
+    
     # Legacy metrics for backward compatibility where appropriate
     outcome_matches = 0
     verified_tasks = 0
@@ -1169,6 +1506,12 @@ def aggregate_scores(
             outcome_accuracy = task_score.get("outcome_accuracy", 0.0)
             hidden_tests_applicable = task_score.get("hidden_tests_applicable", False)
             patch_applied = task_score.get("patch_applied", False)
+            scope_compliant = task_score.get("scope_compliant", True)
+            public_tests_passed = task_score.get("public_tests_passed", True)
+            public_tests_applicable = task_score.get("public_tests_applicable", False)
+            changed_file_count = task_score.get("changed_file_count", 0)
+            added_lines = task_score.get("added_lines", 0)
+            deleted_lines = task_score.get("deleted_lines", 0)
             # For backward compatibility with code expecting "score"
             legacy_score = functional_correctness
         else:
@@ -1178,6 +1521,12 @@ def aggregate_scores(
             outcome_accuracy = 1.0 if task_score.get("outcome_matched", False) else 0.0
             hidden_tests_applicable = task_score.get("hidden_tests_passed", False) is not None
             patch_applied = task_score.get("patch_generated", False)
+            scope_compliant = True  # Assume compliant for legacy
+            public_tests_passed = True  # Assume passed for legacy
+            public_tests_applicable = False  # Not tracked in legacy
+            changed_file_count = 0  # Not tracked in legacy
+            added_lines = 0  # Not tracked in legacy
+            deleted_lines = 0  # Not tracked in legacy
 
         aggregate["total_functional_correctness"] += functional_correctness
         aggregate["total_outcome_accuracy"] += outcome_accuracy
@@ -1207,6 +1556,23 @@ def aggregate_scores(
                 patch_applied_eligible += 1
                 if patch_applied:
                     patch_applied_sum += 1
+            
+            # Scope compliance (only when patch was applied)
+            if patch_applied:
+                scope_compliant_eligible += 1
+                if scope_compliant:
+                    scope_compliant_sum += 1
+            
+            # Public tests (only when applicable)
+            if public_tests_applicable:
+                public_tests_eligible += 1
+                if public_tests_passed:
+                    public_tests_passed_sum += 1
+            
+            # Aggregate minimality metrics
+            total_changed_files += changed_file_count
+            total_added_lines += added_lines
+            total_deleted_lines += deleted_lines
 
         # Outcome accuracy (separate from functional correctness)
         if actual_status == expected_status:
@@ -1359,6 +1725,32 @@ def aggregate_scores(
             patch_applied_sum,
             patch_applied_eligible,
         ),
+        "scope_compliance_rate": rate_metric(
+            scope_compliant_sum,
+            scope_compliant_eligible,
+        ),
+        "public_tests_pass_rate": rate_metric(
+            public_tests_passed_sum,
+            public_tests_eligible,
+        ),
+        "total_changed_files": total_changed_files,
+        "total_added_lines": total_added_lines,
+        "total_deleted_lines": total_deleted_lines,
+        "average_changed_files": {
+            "value": total_changed_files / scope_compliant_eligible if scope_compliant_eligible > 0 else None,
+            "numerator": total_changed_files,
+            "denominator": scope_compliant_eligible,
+        },
+        "average_added_lines": {
+            "value": total_added_lines / scope_compliant_eligible if scope_compliant_eligible > 0 else None,
+            "numerator": total_added_lines,
+            "denominator": scope_compliant_eligible,
+        },
+        "average_deleted_lines": {
+            "value": total_deleted_lines / scope_compliant_eligible if scope_compliant_eligible > 0 else None,
+            "numerator": total_deleted_lines,
+            "denominator": scope_compliant_eligible,
+        },
         # Legacy metrics for backward compatibility
         "expected_outcome_match_rate": rate_metric(
             outcome_matches,
