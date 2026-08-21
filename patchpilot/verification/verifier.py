@@ -484,7 +484,11 @@ class Verifier:
             report.merge_baseline(baseline_report)
 
         # Set failure info if any check failed
-        failed_checks = [check for check in checks if not check.passed]
+        failed_checks = [
+            check
+            for check in checks
+            if not check.passed and check.phase != "baseline"
+        ]
         if verification_status == "PARTIALLY_VERIFIED":
             report.failure_type = "VERIFICATION_INCOMPLETE"
             if failed_checks:
@@ -775,8 +779,12 @@ class Verifier:
         if baseline_report is not None:
             report.merge_baseline(baseline_report)
 
-        # Set failure info if any check failed
-        failed_checks = [check for check in checks if not check.passed]
+        # Baseline checks are merged for comparison only and cannot be primary.
+        failed_checks = [
+            check
+            for check in checks
+            if not check.passed and check.phase != "baseline"
+        ]
         if verification_status == "PARTIALLY_VERIFIED":
             report.failure_type = "VERIFICATION_INCOMPLETE"
             if failed_checks:

@@ -198,6 +198,114 @@ class TestAgentLoopRun:
             arguments={"query": "test"},
         )
 
+    def test_forced_tool_selection_only_applies_until_first_tool_call(self):
+        """Repair mode must require an action without preventing completion."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = [
+            {
+                "type": "function",
+                "function": {"name": "read_file", "parameters": {}},
+            }
+        ]
+        mock_tools.get_available_tools.return_value = ["read_file"]
+        mock_tools.execute.return_value = ToolResult(ok=True, content="source")
+        mock_provider.complete.side_effect = [
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="read_file",
+                        arguments={"path": "task.py"},
+                    )
+                ],
+            ),
+            AssistantTurn(content="Repair complete", tool_calls=[]),
+        ]
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            force_tool_selection=True,
+        )
+
+        assert agent_loop.run("Repair the patch") == "Repair complete"
+        assert (
+            mock_provider.complete.call_args_list[0].kwargs["tool_choice"]
+            == "required"
+        )
+        assert mock_provider.complete.call_args_list[1].kwargs["tool_choice"] is None
+
+    def test_completion_gate_requires_passing_pytest_and_ruff_after_edit(self):
+        """Text completion is rejected until the latest edit is fully verified."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_tools.get_available_tools.return_value = ["edit_file", "run_command"]
+        mock_tools.execute.side_effect = [
+            ToolResult(ok=True, content="--- a/task.py\n+++ b/task.py"),
+            ToolResult(ok=True, content="1 passed"),
+            ToolResult(ok=True, content="All checks passed"),
+        ]
+        mock_provider.complete.side_effect = [
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="edit-1",
+                        name="edit_file",
+                        arguments={
+                            "path": "task.py",
+                            "old_text": "old",
+                            "new_text": "new",
+                        },
+                    )
+                ],
+            ),
+            AssistantTurn(content="Done", tool_calls=[]),
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="pytest-1",
+                        name="run_command",
+                        arguments={"command": "python -m pytest -q"},
+                    )
+                ],
+            ),
+            AssistantTurn(content="Done", tool_calls=[]),
+            AssistantTurn(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="ruff-1",
+                        name="run_command",
+                        arguments={"command": "ruff check ."},
+                    )
+                ],
+            ),
+            AssistantTurn(content="Done", tool_calls=[]),
+        ]
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            max_rounds=6,
+            enforce_completion_gate=True,
+        )
+
+        assert agent_loop.run("Fix task.py") == "Done"
+        assert agent_loop.state.verified_edit_revision == 1
+        assert agent_loop.state.linted_edit_revision == 1
+        final_messages = mock_provider.complete.call_args.kwargs["messages"]
+        gate_messages = [
+            message["content"]
+            for message in final_messages
+            if message["role"] == "user"
+            and message["content"].startswith("Completion rejected")
+        ]
+        assert any("Pytest" in message for message in gate_messages)
+        assert any("Ruff" in message for message in gate_messages)
+
     def test_run_with_multiple_tool_calls(self):
         """Test execution of multiple tool calls in one round."""
         mock_provider = Mock()

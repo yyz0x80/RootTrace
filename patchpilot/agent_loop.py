@@ -203,6 +203,24 @@ class AgentState:
         """
         self.unique_files_read.add(file_path)
 
+    def record_pytest_passed(self) -> None:
+        """Record a passing Pytest run for the current edit revision."""
+        self.verified_edit_revision = self.edit_revision
+
+    def record_ruff_passed(self) -> None:
+        """Record a passing Ruff run for the current edit revision."""
+        self.linted_edit_revision = self.edit_revision
+
+    def completion_blocker(self) -> str | None:
+        """Return the deterministic reason that completion is not yet allowed."""
+        if self.edit_revision == 0:
+            return "make at least one effective source edit"
+        if self.verified_edit_revision != self.edit_revision:
+            return "run Pytest successfully after the latest source edit"
+        if self.linted_edit_revision != self.edit_revision:
+            return "run Ruff successfully after the latest source edit"
+        return None
+
     def record_completion_attempt(self) -> None:
         """Record a completion attempt for NO_PROGRESS detection."""
         self.consecutive_completions += 1
@@ -320,6 +338,7 @@ class AgentLoop:
         enable_progress_tracking: bool = True,
         max_empty_response_retries: int = DEFAULT_EMPTY_RESPONSE_RETRIES,
         force_tool_selection: bool = False,
+        enforce_completion_gate: bool = False,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -335,6 +354,7 @@ class AgentLoop:
         self.max_consecutive_failures = max_consecutive_failures
         self.enable_progress_tracking = enable_progress_tracking
         self.force_tool_selection = force_tool_selection
+        self.enforce_completion_gate = enforce_completion_gate
         self.max_empty_response_retries = max_empty_response_retries
         self.state = AgentState()
 
@@ -437,9 +457,18 @@ class AgentLoop:
                 else tool_schemas
             )
 
+            # Require the first repair action to use a tool. Later rounds must
+            # allow a text completion after the deterministic gate is satisfied.
+            tool_choice = (
+                "required"
+                if self.force_tool_selection and not self.state.tool_usage_count
+                else None
+            )
+
             assistant_turn = self._complete_with_empty_response_retry(
                 messages=enhanced_messages,
                 tools=active_tool_schemas,
+                tool_choice=tool_choice,
             )
 
             # Print round number and tool calls for user visibility
@@ -469,6 +498,24 @@ class AgentLoop:
                     raise AgentLoopError(
                         "Model returned neither tool calls nor final content"
                     )
+
+                blocker = (
+                    self.state.completion_blocker()
+                    if self.enforce_completion_gate
+                    else None
+                )
+                if blocker is not None:
+                    logger.warning("Completion rejected: %s", blocker)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Completion rejected by the deterministic gate: "
+                                f"{blocker}. Continue with the required tool calls."
+                            ),
+                        }
+                    )
+                    continue
 
                 # Record completion attempt for NO_PROGRESS detection
                 self.state.record_completion_attempt()
@@ -535,6 +582,15 @@ class AgentLoop:
                     and "path" in tool_call.arguments
                 ):
                     self.state.record_file_read(tool_call.arguments["path"])
+                elif (
+                    tool_call.name == "run_command"
+                    and tool_result.ok
+                    and "command" in tool_call.arguments
+                ):
+                    if self._is_pytest_tool_call(tool_call):
+                        self.state.record_pytest_passed()
+                    elif self._is_ruff_tool_call(tool_call):
+                        self.state.record_ruff_passed()
 
                 logger.info(
                     "Tool completed: %s, success=%s",
@@ -566,12 +622,14 @@ class AgentLoop:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        tool_choice: str | None = None,
     ) -> AssistantTurn:
         """Retry bounded empty model responses without consuming a round."""
         for retry_number in range(self.max_empty_response_retries + 1):
             assistant_turn = self.provider.complete(
                 messages=messages,
                 tools=tools,
+                tool_choice=tool_choice,
             )
             if assistant_turn.tool_calls or (
                 assistant_turn.content

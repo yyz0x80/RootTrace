@@ -66,6 +66,16 @@ def test_provider_accumulates_exact_usage() -> None:
     assert provider.completion_tokens == 10
 
 
+def test_provider_forwards_tool_choice_when_requested() -> None:
+    """The provider must forward deterministic tool selection to the API."""
+    provider = make_provider([response_with_usage(1, 1)])
+
+    provider.complete(messages=[], tools=[], tool_choice="required")
+
+    create = provider._client.chat.completions.create
+    assert create.call_args.kwargs["tool_choice"] == "required"
+
+
 def test_provider_keeps_tokens_unknown_after_missing_usage() -> None:
     provider = make_provider(
         [

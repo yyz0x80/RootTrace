@@ -495,6 +495,20 @@ def test_validate_acceptance_coverage_warns_on_missing_verification():
     assert any("AC-2 has no direct acceptance check" in item for item in warnings)
 
 
+def test_explicit_verification_requires_direct_acceptance_checks() -> None:
+    """Requested verification must not rely on immutable regression tests alone."""
+    plan = _make_covered_plan()
+    plan.acceptance_probes = []
+    issue = _make_issue()
+    issue.verification_requirements = ["Verify the new behavior directly"]
+
+    with pytest.raises(
+        ValueError,
+        match="AC-1 has no direct acceptance check",
+    ):
+        validate_acceptance_coverage(plan, issue)
+
+
 def test_validate_acceptance_coverage_rejects_duplicate_issue_ids():
     """Reject duplicate AC IDs in the authoritative normalized issue."""
     with pytest.raises(

@@ -306,7 +306,8 @@ class TestWorkflowRunnerExecute:
             )
 
         assert result.final_status == CompletionState.FAILED
-        assert mock_agent_loop.run.call_count == 2
+        # With second chance fix, agent gets 2 repair attempts (initial + second chance)
+        assert mock_agent_loop.run.call_count == 3
         assert mock_verifier.call_count == 1
 
     def test_repair_attempt_preserves_baseline_checks(self):
@@ -461,9 +462,12 @@ class TestWorkflowRunnerExecute:
         """Test that repair failures expose the last deterministic report."""
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_agent_loop.force_tool_selection = False
+        # With the second chance fix, the agent gets 2 attempts before stopping
+        # First attempt gets second chance, second attempt triggers agent error
         mock_agent_loop.run.side_effect = [
             "Initial implementation complete",
             AgentLoopError("Repair agent stopped"),
+            AgentLoopError("Repair agent stopped again"),
         ]
         failed_report = VerificationReport(passed=False)
         failed_report.failure_type = FailureType.CODE_FAILURE
@@ -516,7 +520,8 @@ class TestWorkflowRunnerExecute:
         error = exc_info.value
         assert error.failure_type == "AGENT_ERROR"
         assert error.verification_report == failed_report.to_dict()
-        assert error.verification_report["retry_count"] == 1
+        # With second chance, retry_count should be 2 (attempt 1 + second chance)
+        assert error.verification_report["retry_count"] == 2
 
     def test_workflow_runner_uses_tiered_verification(self):
         """Test that WorkflowRunner uses tiered verification in production path."""
@@ -640,8 +645,8 @@ class TestWorkflowRunnerExecute:
             )
 
         assert isinstance(result, WorkflowResult)
-        # Should attempt initial + 1 repair (then stop due to scope gate violation)
-        assert mock_agent_loop.run.call_count == 2
+        # Should attempt initial + 2 repairs (initial repair + second chance, then stop due to scope gate violation)
+        assert mock_agent_loop.run.call_count == 3
         assert mock_verifier.call_count == 1
 
     def test_execute_repeated_failure_stops_early(self):
@@ -700,10 +705,13 @@ class TestWorkflowRunnerExecute:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
+            # The repair changes the patch, so repeated verification stops the loop.
             mock_generate_patch.side_effect = [
                 "diff before repair",
-                "diff after repair",
-                "diff after repair",
+                "diff after repair 1",
+                "diff after repair 2",
+                "diff after repair 3",
+                "final patch",
             ]
 
             result = runner.execute(
@@ -715,7 +723,6 @@ class TestWorkflowRunnerExecute:
         assert isinstance(result, WorkflowResult)
         assert result.final_status == CompletionState.FAILED
         assert result.verification_report["passed"] is False
-        # Should stop after 2 attempts (initial + 1 repair that repeats)
         assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 2
 
@@ -810,12 +817,15 @@ class TestWorkflowRunnerExecute:
             # Mock scope gate to allow changes
             mock_scope_check.return_value = ScopeGateResult(allowed=True)
             mock_get_changes.return_value = mock_changes
+            # Two changed repairs consume the configured repair budget.
             mock_generate_patch.side_effect = [
                 "diff before first repair",
                 "diff after first repair",
                 "diff after first repair",
                 "diff after second repair",
                 "diff after second repair",
+                "diff after second repair",
+                "final patch",
             ]
 
             result = runner.execute(
@@ -827,7 +837,6 @@ class TestWorkflowRunnerExecute:
         assert isinstance(result, WorkflowResult)
         assert result.final_status == CompletionState.FAILED
         assert result.verification_report["passed"] is False
-        # Initial + MAX_REPAIR_ATTEMPTS (2) = 3 total
         assert mock_agent_loop.run.call_count == 3
         assert mock_verifier.call_count == 3
 

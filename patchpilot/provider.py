@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from time import sleep
+from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError, RateLimitError
@@ -115,14 +116,16 @@ class LLMProvider:
 
     def complete(
         self,
-        messages: list[dict],
-        tools: list[dict],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: str | None = None,
     ) -> AssistantTurn:
         """Complete a conversation turn with the LLM.
 
         Args:
             messages: List of message dictionaries with role and content
             tools: List of tool schemas available for the model to call
+            tool_choice: Optional OpenAI-compatible tool selection mode.
 
         Returns:
             AssistantTurn containing the response content and any tool calls
@@ -136,11 +139,15 @@ class LLMProvider:
 
         for attempt in range(max_retries):
             try:
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    tools=tools,
-                )
+                api_params: dict[str, Any] = {
+                    "model": self._model,
+                    "messages": messages,
+                    "tools": tools,
+                }
+                if tool_choice is not None:
+                    api_params["tool_choice"] = tool_choice
+
+                response = self._client.chat.completions.create(**api_params)
 
                 message = response.choices[0].message
                 content = message.content

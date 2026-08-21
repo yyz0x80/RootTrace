@@ -516,6 +516,51 @@ def test_complete_ac_mapping_warns_without_direct_probe() -> None:
     assert any("no direct acceptance check" in item for item in result.validation_warnings)
 
 
+def test_complete_ac_mapping_rejects_unverified_explicit_requirement() -> None:
+    """An explicit verification request requires executable direct evidence."""
+    plan = ChangePlan(
+        base_commit="abc123",
+        repository_match=True,
+        relevant_files=["src/main.py"],
+        planned_changes=[
+            PlannedChange(
+                path="src/main.py",
+                action=ChangeAction.MODIFY,
+                description="Fix behavior",
+                acceptance_criteria=["AC-1"],
+                criterion_ids=["AC-1"],
+            ),
+        ],
+        risk_level="low",
+        criterion_plans=[
+            CriterionPlan(
+                criterion_id="AC-1",
+                disposition=CriterionPlanDetail.TO_IMPLEMENT,
+                relevant_source_files=["src/main.py"],
+            ),
+        ],
+    )
+    issue = NormalizedIssue(
+        title="Test",
+        task_type="feature",
+        problem_statement="Fix behavior",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-1",
+                description="Return the corrected result",
+                kind="behavior",
+            ),
+        ],
+        verification_requirements=["Verify the corrected result directly"],
+    )
+
+    with pytest.raises(
+        PlanPostProcessError,
+        match="no direct acceptance check",
+    ):
+        _complete_ac_mapping(plan, issue)
+
+
 def test_post_process_plan_integration() -> None:
     """Test complete post-processing pipeline."""
     plan = ChangePlan(

@@ -635,6 +635,8 @@ class WorkflowRunner:
             WorkflowRunnerSetupError: If workspace or sandbox setup fails
             WorkflowRunnerExecutionError: If agent execution fails critically
         """
+        self.agent_loop.enforce_completion_gate = True
+
         # Generate a stable run_id for this workflow execution
         run_id = str(uuid.uuid4())
         execution_start_time = time.time()
@@ -879,6 +881,7 @@ class WorkflowRunner:
 
             # Step 13: Repair loop if verification failed
             previous_repair_fingerprints: set[str] = set()
+            allow_unchanged_failure_retry = False
             approved_files_set = (
                 {change.path for change in change_plan.planned_changes}
                 if change_plan
@@ -911,13 +914,19 @@ class WorkflowRunner:
                     candidate.fingerprint for candidate in selection.repair_candidates
                 }
 
-                if current_repair_fingerprints == previous_repair_fingerprints:
+                repeated_failures = bool(
+                    previous_repair_fingerprints
+                    and current_repair_fingerprints
+                    == previous_repair_fingerprints
+                )
+                if repeated_failures and not allow_unchanged_failure_retry:
                     logger.warning(
                         "Same repairable failures repeated. Stopping repair loop to avoid futile attempts."
                     )
                     ExecuteLogger.log_repair_stopped("Same repairable failures repeated")
                     break
 
+                allow_unchanged_failure_retry = False
                 previous_repair_fingerprints = current_repair_fingerprints
 
                 # Check for unrecoverable errors from excluded failures
@@ -969,6 +978,12 @@ class WorkflowRunner:
                     normalized_issue=normalized_issue,
                     selection=selection,
                 )
+                if retry_count > 1 and repeated_failures:
+                    repair_prompt += (
+                        "\n\nThe previous repair attempt made no source changes. "
+                        "Inspect the demonstrated failure, edit an allowed source "
+                        "file, and run the required verification commands."
+                    )
 
                 # Run agent with repair prompt
                 execute_callback.set_trace_context(
@@ -978,7 +993,11 @@ class WorkflowRunner:
                 repair_agent_error: AgentLoopError | None = None
 
                 # Enable forced tool selection for repair rounds
-                original_force_tool_selection = getattr(self.agent_loop, 'force_tool_selection', False)
+                original_force_tool_selection = getattr(
+                    self.agent_loop,
+                    "force_tool_selection",
+                    False,
+                )
                 self.agent_loop.force_tool_selection = True
 
                 try:
@@ -1000,23 +1019,16 @@ class WorkflowRunner:
                     repair_changes,
                 )
                 if repaired_patch == current_patch:
-                    # If there are repair candidates but agent made no changes on first attempt, give a second chance
-                    if selection.repair_candidates and retry_count == 0:
+                    if (
+                        selection.repair_candidates
+                        and retry_count == 1
+                        and retry_count < self.max_repair_attempts
+                    ):
                         logger.warning(
                             "Repair agent had repair candidates but made no changes on attempt %d, retrying with stronger prompt",
-                            retry_count + 1,
-                        )
-                        # Increment retry count and continue to next attempt
-                        retry_count += 1
-                        report.retry_count = retry_count
-                        ExecuteLogger.log_repair_attempt(retry_count, self.max_repair_attempts)
-                        logger.info(
-                            "Retrying repair attempt %d/%d with %d repairable failures",
                             retry_count,
-                            self.max_repair_attempts,
-                            len(selection.repair_candidates),
                         )
-                        # Skip the normal retry_count increment below and jump to repair prompt building
+                        allow_unchanged_failure_retry = True
                         continue
 
                     logger.warning(

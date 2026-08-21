@@ -1,5 +1,6 @@
 """Tests for the planning module."""
 
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -747,8 +748,8 @@ def test_create_plan_with_repository_context():
     prompt = mock_generate.call_args[0][0]
     assert "src/main.py" in prompt
     assert "tracked_files" in prompt
-    assert '"acceptance_probes": [' not in prompt
-    assert '"structural_checks": [' not in prompt
+    assert '"acceptance_probes": [' in prompt
+    assert '"structural_checks": [' in prompt
 
 
 def test_create_plan_keeps_safe_plan_with_incomplete_acceptance_coverage():
@@ -830,6 +831,79 @@ def test_create_plan_keeps_safe_plan_with_incomplete_acceptance_coverage():
     assert plan.base_commit == "abc123"
     assert plan.planned_changes[0].criterion_ids == ["AC-1"]
     assert len(prompts) == 1
+
+
+def test_create_plan_repairs_missing_explicit_direct_verification() -> None:
+    """Explicit verification requests trigger a bounded direct-check repair."""
+    issue = NormalizedIssue(
+        title="Fix behavior",
+        task_type="bug",
+        problem_statement="The behavior is incorrect.",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-1",
+                description="The function returns a truthy result",
+                kind="behavior",
+            ),
+        ],
+        verification_requirements=["Verify the corrected behavior directly"],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["src/main.py"],
+        python_files=["src/main.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=["src/main.py"],
+    )
+    base_plan = {
+        "repository_match": True,
+        "relevant_files": ["src/main.py"],
+        "planned_changes": [
+            {
+                "path": "src/main.py",
+                "action": "modify",
+                "description": "Fix behavior",
+                "acceptance_criteria": ["AC-1"],
+                "criterion_ids": ["AC-1"],
+            }
+        ],
+        "planned_tests": [],
+        "criterion_plans": [
+            {
+                "criterion_id": "AC-1",
+                "disposition": "to_implement",
+                "relevant_source_files": ["src/main.py"],
+            }
+        ],
+        "out_of_scope": [],
+        "risk_level": "low",
+    }
+    repaired_plan = {
+        **base_plan,
+        "acceptance_probes": [
+            {
+                "probe_id": "probe-ac-1",
+                "module": "src.main",
+                "target": "run",
+                "probe_type": "function_io",
+                "criterion_ids": ["AC-1"],
+                "assertion": "truthy",
+            }
+        ],
+    }
+    responses = iter([json.dumps(base_plan), json.dumps(repaired_plan)])
+    prompts: list[str] = []
+
+    def generate(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    plan = create_plan(issue, repository_context, generate)
+
+    assert len(prompts) == 2
+    assert "no direct acceptance check" in prompts[1]
+    assert plan.acceptance_probes[0].criterion_ids == ["AC-1"]
 
 
 def test_create_plan_does_not_retry_scope_violation():
@@ -970,5 +1044,5 @@ def test_create_plan_repairs_sequential_schema_errors():
 
     assert plan.risk_level == "low"
     assert len(prompts) == 3
-    assert "Do not generate acceptance_probes or structural_checks" in prompts[2]
+    assert "add validated declarative acceptance_probes" in prompts[2]
     assert "call_relationship" in prompts[2]

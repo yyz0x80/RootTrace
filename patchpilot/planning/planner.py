@@ -132,8 +132,11 @@ Rules:
 16. Existing pytest commands provide regression coverage. Do not invent test paths.
 17. Constraints are execution boundaries, not acceptance criteria. Do not invent
     source changes merely to implement a read-only or security constraint.
-18. Do not generate acceptance_probes or structural_checks. Specialized verification
-    is an optional harness concern and must not make a safe implementation plan fail.
+18. When verification_requirements is non-empty, every required behavior criterion
+    must have a declarative acceptance_probe and every required structural criterion
+    must have a structural_check. These checks run outside the generated patch.
+19. Use only repository-owned modules, callables, and files in direct checks. Do not
+    invent fixtures, executable code strings, shell commands, or test modifications.
 
 Required structure:
 
@@ -164,6 +167,33 @@ Required structure:
       "disposition": "to_implement|to_preserve|already_satisfied|cannot_verify",
       "relevant_source_files": ["file1.py", "file2.py"],
       "baseline_evidence": "Explanation if already_satisfied"
+    }}
+  ],
+  "acceptance_probes": [
+    {{
+      "probe_id": "probe-ac-1",
+      "module": "package.module",
+      "target": "callable_name",
+      "probe_type": "function_io|exception|state_change|invariant|return_structure",
+      "criterion_ids": ["AC-1"],
+      "constructor_args": [],
+      "constructor_kwargs": {{}},
+      "arguments": [],
+      "keyword_arguments": {{}},
+      "assertion": "equals|attribute_equals|raises|truthy|falsy",
+      "expected": null,
+      "attribute": "",
+      "exception": ""
+    }}
+  ],
+  "structural_checks": [
+    {{
+      "check_id": "struct-ac-2",
+      "check_type": "function_exists|method_exists|dataclass_field|method_parameter",
+      "target": "symbol_name",
+      "parameters": {{}},
+      "criterion_ids": ["AC-2"],
+      "file_path": "path/to/module.py"
     }}
   ],
   "out_of_scope": [],
@@ -268,8 +298,9 @@ Return one corrected JSON object only. Every acceptance criterion should have a
 criterion_plan with explicit disposition (to_implement, to_preserve, already_satisfied,
 or cannot_verify). For "already_satisfied", provide baseline_evidence. For structural
 criteria, specify relevant_source_files. "to_implement" criteria should map to at least
-one planned source-code change. Do not generate acceptance_probes or structural_checks;
-the harness treats specialized verification as optional evidence.
+one planned source-code change. When the issue has explicit verification requirements,
+add validated declarative acceptance_probes for behavior criteria and structural_checks
+for structural criteria. Do not modify tests to provide this evidence.
 Existing tests are read-only. Create a new test file only for an explicit required
 target_test_change artifact; never modify or delete an existing test.
 Preserve repository_match=false when the issue does not match the repository; do not

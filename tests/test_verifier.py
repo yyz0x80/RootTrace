@@ -159,6 +159,44 @@ def test_verify_ruff_fails_no_fail_fast() -> None:
     assert sandbox_mock.run.call_count == 2
 
 
+def test_post_patch_failure_is_primary_over_baseline_failure() -> None:
+    """A new code regression must remain the report's primary failure."""
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=1,
+            stdout="F821 Undefined name `Optional`",
+            stderr="",
+            duration_seconds=0.1,
+        ),
+        passing_result("python -m pytest -q -p no:cacheprovider"),
+    ]
+    baseline_failure = CheckReport(
+        method="pytest",
+        phase="baseline",
+        level="BASELINE_REGRESSION",
+        command="python -m pytest -q -p no:cacheprovider",
+        passed=False,
+        exit_code=1,
+        duration_seconds=0.1,
+        failure_type="TEST_FAILURE",
+        tier="optional",
+    )
+    baseline_report = VerificationReport(
+        passed=False,
+        checks=[baseline_failure],
+    )
+
+    report = Verifier(sandbox=sandbox_mock).verify_post_patch(
+        run_id="post-patch-primary-failure",
+        baseline_report=baseline_report,
+    )
+
+    assert report.failed_level == "LEVEL_1_LINT"
+    assert report.failure_type == "CODE_FAILURE"
+
+
 def test_verify_target_test_fails_no_fail_fast() -> None:
     """Test verify does not fail fast when target tests fail in post-patch phase."""
     sandbox_mock = MagicMock()

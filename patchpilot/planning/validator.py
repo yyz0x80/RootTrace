@@ -69,7 +69,8 @@ def validate_acceptance_coverage(
     Validation rules:
     - Hard failure: AC ID duplicates in plan
     - Warning: Acceptance metadata is incomplete or inconsistent
-    - Warning: AC has no direct specialized verification
+    - Hard failure: Explicit verification requirements lack direct checks
+    - Warning: AC has no direct specialized verification otherwise
 
     Acceptance metadata controls evidence quality, not write authorization. A safe
     source plan remains executable when optional evidence cannot be compiled.
@@ -210,10 +211,13 @@ def validate_acceptance_coverage(
             )
         
         if criterion.required and criterion_id not in direct_ids:
-            warnings.append(
+            message = (
                 f"Required acceptance criterion {criterion_id} has no direct "
                 "acceptance check"
             )
+            if issue.verification_requirements:
+                raise ValueError(message)
+            warnings.append(message)
         
         if (
             criterion_plan is not None

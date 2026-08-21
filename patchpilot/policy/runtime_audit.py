@@ -97,6 +97,7 @@ def _should_ignore_file(file_path: str) -> bool:
     """
     # Check if any part of the path matches ignored directories
     ignored_directories = {
+        ".patchpilot_checks",
         "__pycache__",
         ".pytest_cache",
         ".ruff_cache",
