@@ -426,8 +426,8 @@ def test_classify_ambiguities_no_ordering() -> None:
     assert processed == plan
 
 
-def test_complete_ac_mapping_unknown_ac_failure() -> None:
-    """Test that unknown AC references now hard fail instead of auto-correction."""
+def test_complete_ac_mapping_warns_on_unknown_ac() -> None:
+    """Keep safe source plans while reporting unknown AC mappings."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -466,13 +466,13 @@ def test_complete_ac_mapping_unknown_ac_failure() -> None:
         implementation_notes=[],
     )
 
-    # Should now hard fail instead of auto-correcting
-    with pytest.raises(PlanPostProcessError, match="unknown acceptance criteria"):
-        _complete_ac_mapping(plan, issue)
+    result = _complete_ac_mapping(plan, issue)
+
+    assert any("unknown acceptance criterion IDs" in item for item in result.validation_warnings)
 
 
-def test_complete_ac_mapping_requires_direct_probe() -> None:
-    """Reject a required behavior criterion without a direct probe."""
+def test_complete_ac_mapping_warns_without_direct_probe() -> None:
+    """Keep a safe source plan when optional direct evidence is unavailable."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -511,8 +511,9 @@ def test_complete_ac_mapping_requires_direct_probe() -> None:
         implementation_notes=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="no direct acceptance check"):
-        _complete_ac_mapping(plan, issue)
+    result = _complete_ac_mapping(plan, issue)
+
+    assert any("no direct acceptance check" in item for item in result.validation_warnings)
 
 
 def test_post_process_plan_integration() -> None:
@@ -655,8 +656,8 @@ def test_post_process_plan_blocks_required_test_artifact() -> None:
         post_process_plan(plan, issue, repository_context)
 
 
-def test_post_process_plan_rejects_non_repository_probe_module() -> None:
-    """Prevent declarative probes from invoking arbitrary installed modules."""
+def test_post_process_plan_drops_non_repository_probe_module() -> None:
+    """Drop an unsafe optional probe without blocking the source plan."""
     plan = ChangePlan(
         risk_level="low",
         acceptance_probes=[
@@ -683,12 +684,14 @@ def test_post_process_plan_rejects_non_repository_probe_module() -> None:
         keyword_matches=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="not repository-owned"):
-        post_process_plan(plan, issue, repository_context)
+    result = post_process_plan(plan, issue, repository_context)
+
+    assert result.acceptance_probes == []
+    assert any("not repository-owned" in item for item in result.validation_warnings)
 
 
-def test_post_process_plan_rejects_probe_for_structural_criterion() -> None:
-    """Keep structural and behavioral direct evidence separate."""
+def test_post_process_plan_drops_probe_for_structural_criterion() -> None:
+    """Drop mismatched evidence while keeping the implementation plan."""
     plan = ChangePlan(
         risk_level="low",
         acceptance_probes=[
@@ -724,12 +727,14 @@ def test_post_process_plan_rejects_probe_for_structural_criterion() -> None:
         keyword_matches=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="must use a structural check"):
-        post_process_plan(plan, issue, context)
+    result = post_process_plan(plan, issue, context, skip_ac_validation=True)
+
+    assert result.acceptance_probes == []
+    assert any("must use a structural check" in item for item in result.validation_warnings)
 
 
-def test_post_process_plan_rejects_incomplete_probe_call() -> None:
-    """Reject probes that omit required existing callable parameters."""
+def test_post_process_plan_drops_incomplete_probe_call() -> None:
+    """Drop optional probes that cannot invoke the target callable."""
     plan = ChangePlan(
         risk_level="low",
         acceptance_probes=[
@@ -775,16 +780,20 @@ def test_post_process_plan_rejects_incomplete_probe_call() -> None:
         ],
     )
 
-    with pytest.raises(PlanPostProcessError, match="required call parameters: name"):
-        post_process_plan(plan, issue, context)
+    result = post_process_plan(plan, issue, context, skip_ac_validation=True)
+
+    assert result.acceptance_probes == []
+    assert any("required call parameters: name" in item for item in result.validation_warnings)
 
     plan.acceptance_probes[0].arguments = ["name"]
-    with pytest.raises(PlanPostProcessError, match="attribute must be relative"):
-        post_process_plan(plan, issue, context)
+    result = post_process_plan(plan, issue, context, skip_ac_validation=True)
+
+    assert result.acceptance_probes == []
+    assert any("attribute must be relative" in item for item in result.validation_warnings)
 
 
-def test_post_process_plan_rejects_unrequested_annotation() -> None:
-    """Do not let structural checks strengthen the requested API contract."""
+def test_post_process_plan_drops_unrequested_annotation() -> None:
+    """Drop a structural check that strengthens the requested API contract."""
     plan = ChangePlan(
         risk_level="low",
         structural_checks=[
@@ -824,5 +833,7 @@ def test_post_process_plan_rejects_unrequested_annotation() -> None:
         keyword_matches=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="no mapped criterion requires"):
-        post_process_plan(plan, issue, context)
+    result = post_process_plan(plan, issue, context, skip_ac_validation=True)
+
+    assert result.structural_checks == []
+    assert any("no mapped criterion requires" in item for item in result.validation_warnings)

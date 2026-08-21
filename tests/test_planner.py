@@ -746,10 +746,12 @@ def test_create_plan_with_repository_context():
     prompt = mock_generate.call_args[0][0]
     assert "src/main.py" in prompt
     assert "tracked_files" in prompt
+    assert '"acceptance_probes": [' not in prompt
+    assert '"structural_checks": [' not in prompt
 
 
-def test_create_plan_retries_missing_acceptance_coverage_once():
-    """Retry an incomplete plan with the exact missing AC diagnostic."""
+def test_create_plan_keeps_safe_plan_with_incomplete_acceptance_coverage():
+    """Do not retry a safe source plan only to improve evidence metadata."""
     issue = NormalizedIssue(
         title="Fix behavior",
         task_type="bug",
@@ -816,25 +818,17 @@ def test_create_plan_retries_missing_acceptance_coverage_once():
   "out_of_scope": [],
   "risk_level": "low"
 }"""
-    repaired = incomplete.replace(
-        '"criterion_ids": ["AC-1"]',
-        '"criterion_ids": ["AC-1", "AC-2"]',
-        1,
-    )
     prompts: list[str] = []
-    responses = iter([incomplete, repaired])
 
     def mock_generate(prompt: str) -> str:
         prompts.append(prompt)
-        return next(responses)
+        return incomplete
 
     plan = create_plan(issue, repository_context, mock_generate)
 
     assert plan.base_commit == "abc123"
-    assert plan.planned_changes[0].criterion_ids == ["AC-1", "AC-2"]
-    assert len(prompts) == 2
-    assert "AC-2 has no planned source change" in prompts[1]
-    assert "read-only" in prompts[1]
+    assert plan.planned_changes[0].criterion_ids == ["AC-1"]
+    assert len(prompts) == 1
 
 
 def test_create_plan_does_not_retry_scope_violation():
@@ -884,7 +878,7 @@ def test_create_plan_does_not_retry_scope_violation():
 
 
 def test_create_plan_raises_plan_generation_error_after_failed_retry():
-    """A plan that remains incomplete should exhaust bounded repairs."""
+    """A change-required plan without source changes should be repaired."""
     issue = NormalizedIssue(
         title="Fix behavior",
         task_type="bug",
@@ -975,5 +969,5 @@ def test_create_plan_repairs_sequential_schema_errors():
 
     assert plan.risk_level == "low"
     assert len(prompts) == 3
-    assert "acceptance_probes.assertion field must be exactly one of" in prompts[2]
+    assert "Do not generate acceptance_probes or structural_checks" in prompts[2]
     assert "call_relationship" in prompts[2]

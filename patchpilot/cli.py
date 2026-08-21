@@ -678,7 +678,13 @@ def handle_prepare(args) -> None:
             )
             sys.exit(1)
 
-        ExecuteLogger.log_plan_validation(allowed=True)
+        plan = plan.model_copy(
+            update={"validation_warnings": scope_result.warnings}
+        )
+        ExecuteLogger.log_plan_validation(
+            allowed=True,
+            warnings=scope_result.warnings,
+        )
 
         # Step 8: Output artifacts
         artifact_paths = []

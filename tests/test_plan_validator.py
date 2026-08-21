@@ -463,36 +463,36 @@ def test_validate_acceptance_coverage_success():
     )
 
 
-def test_validate_acceptance_coverage_rejects_unknown_id():
-    """Reject plan mappings that reference an AC absent from the issue."""
+def test_validate_acceptance_coverage_warns_on_unknown_id():
+    """Keep safe plans while warning about unknown evidence mappings."""
     plan = _make_covered_plan()
     plan.planned_tests[0].acceptance_criteria.append("AC-99")
     plan.planned_tests[0].criterion_ids.append("AC-99")
 
-    with pytest.raises(
-        ValueError,
-        match="unknown acceptance criterion IDs: AC-99",
-    ):
-        validate_acceptance_coverage(plan, _make_issue())
+    warnings = validate_acceptance_coverage(plan, _make_issue())
+
+    assert any("unknown acceptance criterion IDs: AC-99" in item for item in warnings)
 
 
-def test_validate_acceptance_coverage_requires_source_change():
-    """Reject implementation criteria without planned source changes."""
+def test_validate_acceptance_coverage_warns_on_missing_source_mapping():
+    """Report incomplete AC mapping without blocking source authorization."""
     plan = _make_covered_plan()
     plan.planned_changes[0].acceptance_criteria.remove("AC-2")
     plan.planned_changes[0].criterion_ids.remove("AC-2")
 
-    with pytest.raises(ValueError, match="AC-2 has no planned source change"):
-        validate_acceptance_coverage(plan, _make_issue())
+    warnings = validate_acceptance_coverage(plan, _make_issue())
+
+    assert any("AC-2 has no planned source change" in item for item in warnings)
 
 
-def test_validate_acceptance_coverage_requires_verification():
-    """Reject required criteria without a direct acceptance check."""
+def test_validate_acceptance_coverage_warns_on_missing_verification():
+    """Report missing optional direct evidence without blocking execution."""
     plan = _make_covered_plan()
     plan.acceptance_probes = [plan.acceptance_probes[0]]
 
-    with pytest.raises(ValueError, match="AC-2 has no direct acceptance check"):
-        validate_acceptance_coverage(plan, _make_issue())
+    warnings = validate_acceptance_coverage(plan, _make_issue())
+
+    assert any("AC-2 has no direct acceptance check" in item for item in warnings)
 
 
 def test_validate_acceptance_coverage_rejects_duplicate_issue_ids():
@@ -528,8 +528,8 @@ def test_validate_plan_checks_acceptance_coverage_when_issue_is_given():
     assert result.allowed is True
 
 
-def test_validate_acceptance_coverage_behavior_change_without_paths():
-    """Hard failure: behavior change claims IMPLEMENT but has no planned paths."""
+def test_validate_acceptance_coverage_warns_on_behavior_without_paths():
+    """Treat missing evidence paths as a non-blocking diagnostic."""
     plan = ChangePlan(
         relevant_files=["src/main.py"],
         planned_changes=[
@@ -572,12 +572,13 @@ def test_validate_acceptance_coverage_behavior_change_without_paths():
         ],
     )
 
-    with pytest.raises(ValueError, match="claims IMPLEMENT but has no planned source paths"):
-        validate_acceptance_coverage(plan, issue)
+    warnings = validate_acceptance_coverage(plan, issue)
+
+    assert any("claims IMPLEMENT but has no planned source paths" in item for item in warnings)
 
 
-def test_validate_acceptance_coverage_structural_without_paths():
-    """Hard failure: structural contract has no relevant planned paths."""
+def test_validate_acceptance_coverage_warns_on_structural_without_paths():
+    """Treat missing structural evidence paths as non-blocking."""
     plan = ChangePlan(
         relevant_files=["src/main.py"],
         planned_changes=[
@@ -620,12 +621,13 @@ def test_validate_acceptance_coverage_structural_without_paths():
         ],
     )
 
-    with pytest.raises(ValueError, match="has no relevant planned paths"):
-        validate_acceptance_coverage(plan, issue)
+    warnings = validate_acceptance_coverage(plan, issue)
+
+    assert any("has no relevant planned paths" in item for item in warnings)
 
 
-def test_validate_acceptance_coverage_unknown_criterion_in_plans():
-    """Hard failure: unknown criterion ID in criterion_plans."""
+def test_validate_acceptance_coverage_warns_on_missing_criterion_plan():
+    """Treat an unusable criterion plan as incomplete evidence."""
     plan = ChangePlan(
         relevant_files=["src/main.py"],
         planned_changes=[
@@ -667,8 +669,9 @@ def test_validate_acceptance_coverage_unknown_criterion_in_plans():
         ],
     )
 
-    with pytest.raises(ValueError, match="not found in criterion_plans"):
-        validate_acceptance_coverage(plan, issue)
+    warnings = validate_acceptance_coverage(plan, issue)
+
+    assert any("AC-1 has no criterion plan" in item for item in warnings)
 
 
 def test_validate_planned_changes_success():

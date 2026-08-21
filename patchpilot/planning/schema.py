@@ -166,6 +166,9 @@ class ChangePlan(BaseModel):
     verification_specs: list[VerificationSpec] = Field(default_factory=list)
     plan_disposition: PlanDisposition = PlanDisposition.CHANGE_REQUIRED
 
+    # Non-blocking diagnostics produced while compiling optional evidence.
+    validation_warnings: list[str] = Field(default_factory=list)
+
     # Specialized verification specifications
     acceptance_probes: list[AcceptanceProbeSpec] = Field(default_factory=list)
     structural_checks: list[StructuralCheckSpec] = Field(default_factory=list)

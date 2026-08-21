@@ -358,10 +358,10 @@ class ExecuteLogger:
                 logger.info("Violations:")
                 for i, violation in enumerate(violations, start=1):
                     logger.info("%d. %s", i, violation)
-            if warnings:
-                logger.info("Warnings:")
-                for i, warning in enumerate(warnings, start=1):
-                    logger.info("%d. %s", i, warning)
+        if warnings:
+            logger.info("Warnings:")
+            for i, warning in enumerate(warnings, start=1):
+                logger.info("%d. %s", i, warning)
 
     @staticmethod
     def log_artifacts(artifact_paths: list[str]) -> None:

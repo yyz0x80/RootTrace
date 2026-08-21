@@ -5,7 +5,11 @@ repository context and ensure consistency before execution.
 """
 
 from patchpilot.issue.schema import NormalizedIssue
-from patchpilot.planning.schema import ChangePlan, CriterionPlanDetail
+from patchpilot.planning.schema import (
+    ChangePlan,
+    CriterionPlanDetail,
+    PlanDisposition,
+)
 from patchpilot.planning.scope_gate import ScopeGateResult, check_scope
 from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.repository.schema import RepositoryContext
@@ -62,15 +66,13 @@ def validate_acceptance_coverage(
 ) -> list[str]:
     """Validate that the plan completely and consistently maps issue ACs.
 
-    New validation rules:
+    Validation rules:
     - Hard failure: AC ID duplicates in plan
-    - Hard failure: References to non-existent ACs
-    - Hard failure: Behavior change claims IMPLEMENT but has no planned paths
-    - Hard failure: Structural contract has no relevant planned paths
-    - Warning: AC has no direct verification specification
-    - No longer hard failure: Preservation AC lacks source mapping
-    - No longer hard failure: AC lacks existing direct test
-    - No longer hard failure: Multiple ACs share one source file
+    - Warning: Acceptance metadata is incomplete or inconsistent
+    - Warning: AC has no direct specialized verification
+
+    Acceptance metadata controls evidence quality, not write authorization. A safe
+    source plan remains executable when optional evidence cannot be compiled.
 
     Args:
         plan: Change plan whose AC references should be validated.
@@ -82,7 +84,7 @@ def validate_acceptance_coverage(
     Raises:
         ValueError: If hard validation failures are detected.
     """
-    warnings = []
+    warnings = list(plan.validation_warnings)
     
     # Extract known AC IDs from issue
     criterion_ids = [criterion.id for criterion in issue.acceptance_criteria]
@@ -92,6 +94,15 @@ def validate_acceptance_coverage(
     if len(criterion_ids) != len(known_ids):
         raise ValueError(
             "Normalized issue contains duplicate acceptance criterion IDs."
+        )
+
+    if (
+        plan.plan_disposition == PlanDisposition.CHANGE_REQUIRED
+        and any(criterion.required for criterion in issue.acceptance_criteria)
+        and not plan.planned_changes
+    ):
+        raise ValueError(
+            "A change_required plan must include at least one planned source change"
         )
     
     # Build maps of AC references in planned changes and regression tests.
@@ -135,28 +146,30 @@ def validate_acceptance_coverage(
     direct_ids = probe_ids | structural_ids
     referenced_ids |= direct_ids
     
-    # Hard failure: Check for references to non-existent ACs
+    # Unknown mappings cannot grant write access, so keep the safe source plan and
+    # exclude the mappings from acceptance evidence.
     unknown_ids = sorted(referenced_ids - known_ids)
     if unknown_ids:
-        raise ValueError(
-            f"Plan references unknown acceptance criterion IDs: {', '.join(unknown_ids)}"
+        warnings.append(
+            "Plan references unknown acceptance criterion IDs: "
+            + ", ".join(unknown_ids)
         )
 
     if plan.verification_specs:
-        raise ValueError(
+        warnings.append(
             "verification_specs are not executable; use acceptance_probes or "
             "structural_checks"
         )
 
     for probe in plan.acceptance_probes:
         if not probe.criterion_ids:
-            raise ValueError(
+            warnings.append(
                 f"Acceptance probe {probe.probe_id} has no criterion_ids"
             )
 
     for check in plan.structural_checks:
         if not check.criterion_ids:
-            raise ValueError(
+            warnings.append(
                 f"Structural check {check.check_id} has no criterion_ids"
             )
     
@@ -172,57 +185,47 @@ def validate_acceptance_coverage(
         criterion_plan = criterion_plan_map.get(criterion_id)
         
         if criterion_plan is None:
-            # Hard failure: Referenced AC not in criterion_plans
-            raise ValueError(
-                f"Acceptance criterion {criterion_id} not found in criterion_plans"
+            warnings.append(
+                f"Acceptance criterion {criterion_id} has no criterion plan"
             )
+            criterion_plan = None
         
-        # Hard failure: Behavior change claims IMPLEMENT but has no planned paths
         if (
-            criterion.kind == "behavior" and 
-            criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT and
-            not criterion_plan.relevant_source_files
+            criterion_plan is not None
+            and criterion.kind == "behavior"
+            and criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT
+            and not criterion_plan.relevant_source_files
         ):
-            raise ValueError(
+            warnings.append(
                 f"Behavior change {criterion_id} claims IMPLEMENT but has no planned source paths"
             )
         
-        # Hard failure: Structural contract has no relevant planned paths
         if (
-            criterion.kind == "structural" and 
-            not criterion_plan.relevant_source_files
+            criterion_plan is not None
+            and criterion.kind == "structural"
+            and not criterion_plan.relevant_source_files
         ):
-            raise ValueError(
+            warnings.append(
                 f"Structural contract {criterion_id} has no relevant planned paths"
             )
         
         if criterion.required and criterion_id not in direct_ids:
-            raise ValueError(
+            warnings.append(
                 f"Required acceptance criterion {criterion_id} has no direct "
                 "acceptance check"
             )
-
-        if criterion.kind == "behavior" and criterion_id not in probe_ids:
-            raise ValueError(
-                f"Behavior criterion {criterion_id} requires an acceptance probe"
-            )
-
-        if criterion.kind == "structural" and criterion_id not in structural_ids:
-            raise ValueError(
-                f"Structural criterion {criterion_id} requires a structural check"
-            )
         
-        # Warning: AC has no planned source changes (no longer hard failure)
         if (
-            criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT
+            criterion_plan is not None
+            and criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT
             and criterion_id not in change_ids
         ):
-            raise ValueError(
+            warnings.append(
                 f"Required implementation criterion {criterion_id} has no "
                 "planned source change"
             )
     
-    return warnings
+    return list(dict.fromkeys(warnings))
 
 
 def validate_plan(

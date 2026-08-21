@@ -615,7 +615,11 @@ def test_prepare_writes_to_configured_output_dir(
         risk_level="low",
     )
 
-    mock_validate_plan.return_value = Mock(allowed=True, violations=[], warnings=[])
+    mock_validate_plan.return_value = Mock(
+        allowed=True,
+        violations=[],
+        warnings=["Direct acceptance evidence is unavailable"],
+    )
 
     # Mock Path and file operations
     from pathlib import Path
@@ -637,6 +641,10 @@ def test_prepare_writes_to_configured_output_dir(
         ]
         actual_calls = [call[0][0] for call in mock_save_json.call_args_list]
         assert actual_calls == expected_calls
+        saved_plan = json.loads(mock_save_json.call_args_list[2][0][1])
+        assert saved_plan["validation_warnings"] == [
+            "Direct acceptance evidence is unavailable"
+        ]
 
 
 def test_prepare_classifies_exhausted_plan_retry_as_plan_invalid(

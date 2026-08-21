@@ -116,8 +116,7 @@ Rules:
 8. Stay within the requested issue scope.
 9. CRITICAL: Test files (files under tests/ or starting with test_) are READ-ONLY.
    NEVER include test files in planned_changes. Tests should only be in planned_tests for verification.
-10. Test file modifications are FORBIDDEN. Use existing tests for regression coverage
-    and declarative acceptance probes for new behavior.
+10. Test file modifications are FORBIDDEN. Use existing tests for regression coverage.
 11. For each acceptance criterion, you must explicitly specify its disposition:
     - "to_implement": The criterion requires changes to be implemented
     - "to_preserve": The criterion must be preserved (no changes needed)
@@ -128,29 +127,12 @@ Rules:
 13. For structural criteria, you MUST specify relevant_source_files that contain
     the related source code.
 14. Preservation criteria ("to_preserve") may not have planned changes.
-15. Map every required criterion to direct deterministic evidence:
-    - behavior criteria require an acceptance_probe
-    - structural criteria require a structural_check
-    - preservation criteria require either kind of direct check
-16. Acceptance probes are declarative data. Never emit Python code, shell commands,
-    setup_code, teardown_code, or arbitrary expressions in a probe.
-17. Existing pytest commands are regression checks and are not direct evidence for
-    new behavior unless an existing exact test node already covers that behavior.
-18. Constraints are execution boundaries, not acceptance criteria. Do not invent
+15. Map each to_implement criterion to at least one planned source-code change.
+16. Existing pytest commands provide regression coverage. Do not invent test paths.
+17. Constraints are execution boundaries, not acceptance criteria. Do not invent
     source changes merely to implement a read-only or security constraint.
-19. For dataclass_field checks, target is the class name and parameters contain
-    field, annotation, require_default, and expected_default. For method_parameter
-    checks, parameters contain class, method, parameter, annotation,
-    require_default, and expected_default.
-20. Do not create acceptance probes for structural criteria or structural checks
-    for behavior criteria.
-21. Use python_callables from repository context to supply every existing required
-    constructor and call parameter in a probe.
-22. attribute is relative to the returned object. For a method returning Task, use
-    "description", never "Task.description".
-23. A structural check may require an annotation only when the mapped acceptance
-    criterion explicitly names that exact annotation. An optional argument does not
-    imply Optional[T]; it may be represented by a default value.
+18. Do not generate acceptance_probes or structural_checks. Specialized verification
+    is an optional harness concern and must not make a safe implementation plan fail.
 
 Required structure:
 
@@ -181,33 +163,6 @@ Required structure:
       "disposition": "to_implement|to_preserve|already_satisfied|cannot_verify",
       "relevant_source_files": ["file1.py", "file2.py"],
       "baseline_evidence": "Explanation if already_satisfied"
-    }}
-  ],
-  "acceptance_probes": [
-    {{
-      "probe_id": "probe-ac-1",
-      "module": "package.module",
-      "target": "ClassName.method_name",
-      "probe_type": "function_io|exception|state_change|invariant|return_structure",
-      "criterion_ids": ["AC-1"],
-      "constructor_args": [],
-      "constructor_kwargs": {{}},
-      "arguments": [],
-      "keyword_arguments": {{}},
-      "assertion": "equals|attribute_equals|raises|truthy|falsy",
-      "expected": null,
-      "attribute": "",
-      "exception": ""
-    }}
-  ],
-  "structural_checks": [
-    {{
-      "check_id": "struct-ac-1",
-      "check_type": "function_exists|signature_preserved|call_relationship|no_new_imports|method_exists|decorator_exists|dataclass_field|method_parameter",
-      "target": "ClassName or function_name",
-      "parameters": {{}},
-      "criterion_ids": ["AC-1"],
-      "file_path": "package/module.py"
     }}
   ],
   "out_of_scope": [],
@@ -308,15 +263,12 @@ Validation error:
 Previous response:
 {bounded_response}
 
-Return one corrected JSON object only. Every acceptance criterion must have a
+Return one corrected JSON object only. Every acceptance criterion should have a
 criterion_plan with explicit disposition (to_implement, to_preserve, already_satisfied,
 or cannot_verify). For "already_satisfied", provide baseline_evidence. For structural
-criteria, specify relevant_source_files. "to_implement" criteria must map to at least
-one planned source-code change and one direct declarative acceptance check. Behavior
-criteria require acceptance_probes and structural criteria require structural_checks.
-The acceptance_probes.assertion field must be exactly one of: equals,
-attribute_equals, raises, truthy, or falsy. Values such as call_relationship,
-dataclass_field, and method_parameter belong only in structural_checks.check_type.
+criteria, specify relevant_source_files. "to_implement" criteria should map to at least
+one planned source-code change. Do not generate acceptance_probes or structural_checks;
+the harness treats specialized verification as optional evidence.
 Files under tests/ and files named test_*.py are read-only and must never appear in
 planned_changes.
 Preserve repository_match=false when the issue does not match the repository; do not

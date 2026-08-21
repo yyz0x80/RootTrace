@@ -301,7 +301,7 @@ def _validate_acceptance_check_targets(
     issue: NormalizedIssue,
     repository_context: RepositoryContext,
 ) -> ChangePlan:
-    """Validate acceptance-check ownership, taxonomy, and callability."""
+    """Keep safe specialized checks and downgrade invalid ones to warnings."""
     tracked_files = set(repository_context.tracked_files)
     planned_files = {change.path for change in plan.planned_changes}
     available_files = tracked_files | planned_files
@@ -310,9 +310,12 @@ def _validate_acceptance_check_targets(
         (signature.module, signature.target): signature
         for signature in repository_context.python_callables
     }
-    errors = []
+    valid_probes = []
+    valid_structural_checks = []
+    warnings = list(plan.validation_warnings)
 
     for probe in plan.acceptance_probes:
+        errors = []
         module_path = probe.module.replace(".", "/")
         candidates = {
             f"{module_path}.py",
@@ -339,40 +342,48 @@ def _validate_acceptance_check_targets(
                 )
 
         signature = callables.get((probe.module, probe.target))
-        if signature is None:
-            continue
-        errors.extend(
-            _required_probe_parameter_errors(
-                probe.probe_id,
-                "constructor",
-                signature.constructor_parameters,
-                signature.required_constructor_parameters,
-                probe.constructor_args,
-                probe.constructor_kwargs,
+        if signature is not None:
+            errors.extend(
+                _required_probe_parameter_errors(
+                    probe.probe_id,
+                    "constructor",
+                    signature.constructor_parameters,
+                    signature.required_constructor_parameters,
+                    probe.constructor_args,
+                    probe.constructor_kwargs,
+                )
             )
-        )
-        errors.extend(
-            _required_probe_parameter_errors(
-                probe.probe_id,
-                "call",
-                signature.parameters,
-                signature.required_parameters,
-                probe.arguments,
-                probe.keyword_arguments,
+            errors.extend(
+                _required_probe_parameter_errors(
+                    probe.probe_id,
+                    "call",
+                    signature.parameters,
+                    signature.required_parameters,
+                    probe.arguments,
+                    probe.keyword_arguments,
+                )
             )
-        )
-        if (
-            probe.assertion == "attribute_equals"
-            and signature.return_annotation
-            and probe.attribute.split(".", maxsplit=1)[0]
-            == signature.return_annotation
-        ):
-            errors.append(
-                f"Acceptance probe {probe.probe_id} attribute must be relative "
-                f"to the returned {signature.return_annotation} object"
+            if (
+                probe.assertion == "attribute_equals"
+                and signature.return_annotation
+                and probe.attribute.split(".", maxsplit=1)[0]
+                == signature.return_annotation
+            ):
+                errors.append(
+                    f"Acceptance probe {probe.probe_id} attribute must be relative "
+                    f"to the returned {signature.return_annotation} object"
+                )
+
+        if errors:
+            warnings.append(
+                f"Dropped optional acceptance probe {probe.probe_id}: "
+                + "; ".join(dict.fromkeys(errors))
             )
+        else:
+            valid_probes.append(probe)
 
     for check in plan.structural_checks:
+        errors = []
         if available_files and check.file_path not in available_files:
             errors.append(
                 f"Structural check file does not exist in repository: "
@@ -405,9 +416,21 @@ def _validate_acceptance_check_targets(
                     f"{annotation!r}, but no mapped criterion requires it"
                 )
 
-    if errors:
-        raise PlanPostProcessError("; ".join(dict.fromkeys(errors)))
-    return plan
+        if errors:
+            warnings.append(
+                f"Dropped optional structural check {check.check_id}: "
+                + "; ".join(dict.fromkeys(errors))
+            )
+        else:
+            valid_structural_checks.append(check)
+
+    return plan.model_copy(
+        update={
+            "acceptance_probes": valid_probes,
+            "structural_checks": valid_structural_checks,
+            "validation_warnings": list(dict.fromkeys(warnings)),
+        }
+    )
 
 
 def _required_probe_parameter_errors(
@@ -588,8 +611,7 @@ def _complete_ac_mapping(
         return plan
 
     try:
-        validate_acceptance_coverage(plan, issue)
-        # Warnings are now handled by the validator, not as post-process errors
+        warnings = validate_acceptance_coverage(plan, issue)
     except ValueError as e:
         error_msg = str(e)
 
@@ -620,7 +642,7 @@ def _complete_ac_mapping(
         # Other validation errors should fail
         raise PlanPostProcessError(f"AC validation error: {e}") from e
 
-    return plan
+    return plan.model_copy(update={"validation_warnings": warnings})
 
 
 def post_process_plan(
