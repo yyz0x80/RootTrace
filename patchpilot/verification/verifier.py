@@ -392,6 +392,9 @@ class Verifier:
         report.verification_status = verification_status
         report.passed = passed
 
+        if baseline_report is not None:
+            report.merge_baseline(baseline_report)
+
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]
         if failed_checks:
@@ -631,6 +634,9 @@ class Verifier:
         )
         report.verification_status = verification_status
         report.passed = passed
+
+        if baseline_report is not None:
+            report.merge_baseline(baseline_report)
 
         # Set failure info if any check failed
         failed_checks = [check for check in checks if not check.passed]

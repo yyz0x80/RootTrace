@@ -9,6 +9,7 @@ from patchpilot.verification.config import (
     VerificationStrategy,
     VerificationTimeouts,
 )
+from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.verification.targets import (
     SelectedTest,
     SelectionReasonType,
@@ -445,6 +446,50 @@ def test_verify_post_patch_collects_all_evidence() -> None:
 
     # Verify all checks were called (complete evidence collection)
     assert sandbox_mock.run.call_count == 3
+
+
+def test_verify_post_patch_preserves_baseline_evidence() -> None:
+    """The final report should expose both verification phases."""
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        CommandResult(
+            command="ruff check --no-cache .",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+        ),
+        CommandResult(
+            command="python -m pytest -q -p no:cacheprovider",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.2,
+        ),
+    ]
+    baseline_check = CheckReport(
+        method="pytest",
+        phase="baseline",
+        level="BASELINE_REGRESSION",
+        command="python -m pytest -q -p no:cacheprovider",
+        passed=True,
+        exit_code=0,
+        duration_seconds=0.2,
+    )
+    baseline_report = VerificationReport(
+        run_id="baseline",
+        passed=True,
+        checks=[baseline_check],
+    )
+
+    report = Verifier(sandbox=sandbox_mock).verify_post_patch(
+        run_id="post-patch",
+        baseline_report=baseline_report,
+    )
+
+    assert report.get_baseline_checks() == [baseline_check]
+    assert len(report.get_post_patch_checks()) == 2
+    assert baseline_check in report.checks
 
 
 def test_tiered_verification_strict_policy_with_optional_failure() -> None:
