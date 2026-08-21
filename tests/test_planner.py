@@ -884,7 +884,7 @@ def test_create_plan_does_not_retry_scope_violation():
 
 
 def test_create_plan_raises_plan_generation_error_after_failed_retry():
-    """A plan that remains incomplete should have a stable error type."""
+    """A plan that remains incomplete should exhaust bounded repairs."""
     issue = NormalizedIssue(
         title="Fix behavior",
         task_type="bug",
@@ -909,9 +909,71 @@ def test_create_plan_raises_plan_generation_error_after_failed_retry():
   "out_of_scope": [],
   "risk_level": "low"
 }"""
-    generate = Mock(side_effect=[incomplete, incomplete])
+    generate = Mock(return_value=incomplete)
 
-    with pytest.raises(PlanGenerationError, match="after one repair"):
+    with pytest.raises(PlanGenerationError, match="after 2 repairs"):
         create_plan(issue, repository_context, generate)
 
-    assert generate.call_count == 2
+    assert generate.call_count == 3
+
+
+def test_create_plan_repairs_sequential_schema_errors():
+    """Give independent schema errors separate bounded repair attempts."""
+    issue = NormalizedIssue(
+        title="Fix behavior",
+        task_type="bug",
+        problem_statement="The behavior is incorrect.",
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["src/main.py"],
+        python_files=["src/main.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=["src/main.py"],
+    )
+    invalid_risk = """{
+  "repository_match": true,
+  "relevant_files": [],
+  "planned_changes": [],
+  "planned_tests": [],
+  "out_of_scope": [],
+  "risk_level": "tiny"
+}"""
+    invalid_assertion = """{
+  "repository_match": true,
+  "relevant_files": [],
+  "planned_changes": [],
+  "planned_tests": [],
+  "acceptance_probes": [{
+    "probe_id": "probe-1",
+    "module": "src.main",
+    "target": "run",
+    "probe_type": "function_io",
+    "criterion_ids": [],
+    "assertion": "call_relationship"
+  }],
+  "out_of_scope": [],
+  "risk_level": "low"
+}"""
+    valid = """{
+  "repository_match": true,
+  "relevant_files": [],
+  "planned_changes": [],
+  "planned_tests": [],
+  "out_of_scope": [],
+  "risk_level": "low"
+}"""
+    prompts: list[str] = []
+    responses = iter([invalid_risk, invalid_assertion, valid])
+
+    def generate(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    plan = create_plan(issue, repository_context, generate)
+
+    assert plan.risk_level == "low"
+    assert len(prompts) == 3
+    assert "acceptance_probes.assertion field must be exactly one of" in prompts[2]
+    assert "call_relationship" in prompts[2]

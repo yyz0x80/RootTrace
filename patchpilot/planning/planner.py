@@ -31,6 +31,7 @@ IGNORED_DIRS = {
 }
 
 MAX_PLAN_REPAIR_RESPONSE_CHARS = 5_000
+MAX_PLAN_REPAIR_ATTEMPTS = 2
 
 
 def _is_test_file(path: str) -> bool:
@@ -304,6 +305,9 @@ or cannot_verify). For "already_satisfied", provide baseline_evidence. For struc
 criteria, specify relevant_source_files. "to_implement" criteria must map to at least
 one planned source-code change and one direct declarative acceptance check. Behavior
 criteria require acceptance_probes and structural criteria require structural_checks.
+The acceptance_probes.assertion field must be exactly one of: equals,
+attribute_equals, raises, truthy, or falsy. Values such as call_relationship,
+dataclass_field, and method_parameter belong only in structural_checks.check_type.
 Files under tests/ and files named test_*.py are read-only and must never appear in
 planned_changes.
 Preserve repository_match=false when the issue does not match the repository; do not
@@ -319,44 +323,34 @@ def _generate_plan_with_repair(
     base_commit: str,
     repository_context: RepositoryContext,
 ) -> ChangePlan:
-    """Generate a plan and retry once with precise validation feedback."""
+    """Generate a plan with bounded repairs for sequential validation errors."""
     response = generate(prompt)
-    try:
-        plan = _parse_plan_response(response, base_commit)
-        plan = post_process_plan(
-            plan,
-            issue,
-            repository_context,
-            skip_ac_validation=True,
-        )
-        _validate_generated_plan_coverage(plan, issue)
-        return plan
-    except ValueError as error:
-        repair_prompt = _build_plan_repair_prompt(
-            original_prompt=prompt,
-            invalid_response=response,
-            error=error,
-        )
-        repaired_response = generate(repair_prompt)
+    for repair_attempt in range(MAX_PLAN_REPAIR_ATTEMPTS + 1):
         try:
-            repaired_plan = _parse_plan_response(
-                repaired_response,
-                base_commit,
-            )
-            # Skip AC validation on repair to allow scope gate to check violations first
-            repaired_plan = post_process_plan(
-                repaired_plan,
+            plan = _parse_plan_response(response, base_commit)
+            plan = post_process_plan(
+                plan,
                 issue,
                 repository_context,
                 skip_ac_validation=True,
             )
-            _validate_generated_plan_coverage(repaired_plan, issue)
-            return repaired_plan
-        except ValueError as repair_error:
-            raise PlanGenerationError(
-                "Planner returned an invalid plan after one repair: "
-                f"{repair_error}"
-            ) from repair_error
+            _validate_generated_plan_coverage(plan, issue)
+            return plan
+        except ValueError as error:
+            if repair_attempt == MAX_PLAN_REPAIR_ATTEMPTS:
+                raise PlanGenerationError(
+                    "Planner returned an invalid plan after "
+                    f"{MAX_PLAN_REPAIR_ATTEMPTS} repairs: {error}"
+                ) from error
+
+            repair_prompt = _build_plan_repair_prompt(
+                original_prompt=prompt,
+                invalid_response=response,
+                error=error,
+            )
+            response = generate(repair_prompt)
+
+    raise AssertionError("Unreachable planner repair state")
 
 
 def create_plan(
