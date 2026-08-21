@@ -689,7 +689,7 @@ def test_apply_baseline_delta_evaluation_unknown_tier_blocks():
 
 
 def test_apply_baseline_delta_evaluation_optional_regression_balanced():
-    """Test that OPTIONAL regression results in PARTIALLY_VERIFIED with BALANCED strategy."""
+    """Balanced verification should reject a deterministic regression."""
     report = VerificationReport(
         run_id="test-run",
         passed=True,
@@ -737,8 +737,8 @@ def test_apply_baseline_delta_evaluation_optional_regression_balanced():
     )
     
     status, passed = apply_baseline_delta_evaluation(report, VerificationStrategy.BALANCED.value)
-    assert status == "PARTIALLY_VERIFIED"
-    assert passed is True
+    assert status == "FAILED"
+    assert passed is False
 
 
 def test_apply_baseline_delta_evaluation_optional_regression_strict():

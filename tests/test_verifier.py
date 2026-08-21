@@ -19,6 +19,17 @@ from patchpilot.verification.targets import TestSelectionReason as SelectionReas
 from patchpilot.verification.verifier import Verifier
 
 
+def passing_result(command: str, duration_seconds: float = 1.0) -> CommandResult:
+    """Create a successful sandbox command result for verifier tests."""
+    return CommandResult(
+        command=command,
+        exit_code=0,
+        stdout="",
+        stderr="",
+        duration_seconds=duration_seconds,
+    )
+
+
 def test_verifier_initialization() -> None:
     """Test that Verifier initializes correctly with a sandbox."""
     sandbox_mock = MagicMock()
@@ -313,11 +324,9 @@ def test_verify_baseline_all_checks_pass() -> None:
     sandbox_mock = MagicMock()
     # Setup mock to return success for all commands
     sandbox_mock.run.side_effect = [
-        CommandResult(
-            command="python -m pytest -q -p no:cacheprovider",
-            exit_code=0,
-            stdout="",
-            stderr="",
+        passing_result("ruff check --no-cache ."),
+        passing_result(
+            "python -m pytest -q -p no:cacheprovider",
             duration_seconds=2.0,
         ),
     ]
@@ -327,11 +336,11 @@ def test_verify_baseline_all_checks_pass() -> None:
 
     assert report.passed is True
     assert report.run_id == "test-baseline-1"
-    assert len(report.checks) == 1
-    assert report.checks[0].level == "BASELINE_REGRESSION"
-    assert report.checks[0].method == "pytest"
-    assert report.checks[0].phase == "baseline"
-    assert report.checks[0].passed is True
+    assert len(report.checks) == 2
+    assert report.checks[0].level == "BASELINE_LINT"
+    assert report.checks[1].level == "BASELINE_REGRESSION"
+    assert all(check.phase == "baseline" for check in report.checks)
+    assert all(check.passed for check in report.checks)
 
 
 def test_verify_baseline_with_target_tests() -> None:
@@ -339,6 +348,7 @@ def test_verify_baseline_with_target_tests() -> None:
     sandbox_mock = MagicMock()
     # Setup mock to return success for all commands
     sandbox_mock.run.side_effect = [
+        passing_result("ruff check --no-cache ."),
         CommandResult(
             command="python -m pytest -q -p no:cacheprovider",
             exit_code=0,
@@ -363,37 +373,77 @@ def test_verify_baseline_with_target_tests() -> None:
     )
 
     assert report.passed is True
-    assert len(report.checks) == 2
-    assert report.checks[0].level == "BASELINE_REGRESSION"
-    assert report.checks[0].phase == "baseline"
-    assert report.checks[1].level == "BASELINE_TARGET"
-    assert report.checks[1].phase == "baseline"
-    assert report.checks[1].subject_ids == ["AC-1", "AC-2"]
-    assert report.checks[1].direct is True
+    assert len(report.checks) == 3
+    assert report.checks[1].level == "BASELINE_REGRESSION"
+    assert report.checks[2].level == "BASELINE_TARGET"
+    assert report.checks[2].phase == "baseline"
+    assert report.checks[2].subject_ids == ["AC-1", "AC-2"]
+    assert report.checks[2].direct is True
 
 
 def test_verify_baseline_regression_fails() -> None:
     """Test baseline verification when regression tests fail."""
     sandbox_mock = MagicMock()
     # Setup mock to return failure for regression
-    sandbox_mock.run.return_value = CommandResult(
-        command="python -m pytest -q -p no:cacheprovider",
-        exit_code=1,
-        stdout="FAILED tests/test_example.py::test_example",
-        stderr="AssertionError",
-        duration_seconds=2.0,
-    )
+    sandbox_mock.run.side_effect = [
+        passing_result("ruff check --no-cache ."),
+        CommandResult(
+            command="python -m pytest -q -p no:cacheprovider",
+            exit_code=1,
+            stdout="FAILED tests/test_example.py::test_example",
+            stderr="AssertionError",
+            duration_seconds=2.0,
+        ),
+    ]
 
     verifier = Verifier(sandbox=sandbox_mock)
     report = verifier.verify_baseline(run_id="test-baseline-3")
 
     assert report.passed is False
-    assert len(report.checks) == 1
-    assert report.checks[0].level == "BASELINE_REGRESSION"
-    assert report.checks[0].phase == "baseline"
-    assert report.checks[0].passed is False
+    assert len(report.checks) == 2
+    assert report.checks[1].level == "BASELINE_REGRESSION"
+    assert report.checks[1].phase == "baseline"
+    assert report.checks[1].passed is False
     assert report.failed_level == "BASELINE_REGRESSION"
     assert report.failure_type is not None
+
+
+def test_pre_existing_repository_failures_do_not_fail_patch() -> None:
+    """Unchanged baseline failures should remain diagnostic evidence."""
+    lint_failure = CommandResult(
+        command="ruff check --no-cache .",
+        exit_code=1,
+        stdout="",
+        stderr="E501 line too long",
+        duration_seconds=0.1,
+    )
+    regression_failure = CommandResult(
+        command="python -m pytest -q -p no:cacheprovider",
+        exit_code=1,
+        stdout="FAILED tests/test_legacy.py::test_existing",
+        stderr="AssertionError",
+        duration_seconds=0.2,
+    )
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        lint_failure,
+        regression_failure,
+        lint_failure,
+        regression_failure,
+    ]
+    verifier = Verifier(sandbox=sandbox_mock)
+    baseline_report = verifier.verify_baseline(run_id="baseline")
+
+    report = verifier.verify_post_patch_tiered(
+        run_id="post-patch",
+        target_selection=TargetTestSelection([], [], [], []),
+        baseline_report=baseline_report,
+    )
+
+    assert baseline_report.passed is False
+    assert report.verification_status == "VERIFIED"
+    assert report.passed is True
+    assert report.transition_summary["overall"]["pre_existing_failure"] == 2
 
 
 def test_verify_post_patch_collects_all_evidence() -> None:
@@ -519,6 +569,7 @@ def test_tiered_verification_strict_policy_with_optional_failure() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -625,6 +676,7 @@ def test_tiered_verification_balanced_policy_with_required_failure() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -710,6 +762,7 @@ def test_tiered_verification_required_failure_blocks_even_with_baseline_failure(
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -797,6 +850,7 @@ def test_tiered_verification_affected_regression_blocks() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -882,6 +936,7 @@ def test_tiered_verification_optional_pre_existing_allowed() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -969,6 +1024,7 @@ def test_tiered_verification_unknown_tier_failure_blocks() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -1181,68 +1237,8 @@ def test_tiered_verification_full_regression_in_optional_tier() -> None:
     assert len(regression_checks) > 0
     assert regression_checks[0].tier == "optional"
     
-    # Since all checks passed, should be VERIFIED
-    # But check the actual status
-    print(f"Debug: verification_status={report.verification_status}, passed={report.passed}")
-    print(f"Debug: tier_summary={report.tier_summary}")
-    print(f"Debug: transition_summary={report.transition_summary}")
-    assert report.verification_status in ("VERIFIED", "FAILED")
-
-    verifier = Verifier(
-        sandbox=sandbox_mock,
-        strategy=VerificationStrategy.BALANCED,
-    )
-    
-    # Create a baseline report to simulate baseline state
-    from patchpilot.verification.report import CheckReport, VerificationReport
-    baseline_report = VerificationReport(
-        run_id="baseline-test",
-        passed=True,
-        baseline_checks=[
-            CheckReport(
-                method="pytest",
-                phase="baseline",
-                level="BASELINE_REGRESSION",
-                command="python -m pytest -q -p no:cacheprovider",
-                passed=True,
-                exit_code=0,
-                duration_seconds=2.0,
-            ),
-            CheckReport(
-                method="pytest",
-                phase="baseline",
-                level="BASELINE_TARGET",
-                command="python -m pytest tests/test_required.py -q -p no:cacheprovider",
-                passed=True,
-                exit_code=0,
-                duration_seconds=1.5,
-                test_node="tests/test_required.py",
-                tier="required",
-            ),
-            CheckReport(
-                method="pytest",
-                phase="baseline",
-                level="BASELINE_TARGET",
-                command="python -m pytest tests/test_optional.py -q -p no:cacheprovider",
-                passed=True,
-                exit_code=0,
-                duration_seconds=1.5,
-                test_node="tests/test_optional.py",
-                tier="optional",
-            ),
-        ],
-    )
-    
-    report = verifier.verify_post_patch_tiered(
-        run_id="test-balanced-1",
-        target_selection=target_selection,
-        baseline_report=baseline_report,
-    )
-
-    assert report.verification_status == "FAILED"
-    assert report.passed is False
-    assert report.strategy == "balanced"
-    assert report.tier_summary["required"]["failed"] == 1
+    assert report.verification_status == "VERIFIED"
+    assert report.passed is True
 
 
 def test_tiered_verification_balanced_policy_with_affected_failure() -> None:
@@ -1272,6 +1268,7 @@ def test_tiered_verification_balanced_policy_with_affected_failure() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -1385,6 +1382,7 @@ def test_tiered_verification_balanced_policy_with_optional_failure() -> None:
             stderr="AssertionError",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -1493,6 +1491,7 @@ def test_tiered_verification_focused_policy_with_direct_tests_only() -> None:
             stderr="",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(
@@ -1684,6 +1683,7 @@ def test_tiered_verification_report_serialization() -> None:
             stderr="",
             duration_seconds=1.5,
         ),
+        passing_result("python -m pytest -q -p no:cacheprovider", 2.0),
     ]
 
     target_selection = TargetTestSelection(

@@ -116,6 +116,7 @@ class Verifier:
         self,
         run_id: str,
         target_tests: list[str] | None = None,
+        target_selection: TargetTestSelection | None = None,
         subject_ids: list[str] | None = None,
         change_plan: ChangePlan | None = None,
     ) -> VerificationReport:
@@ -133,6 +134,7 @@ class Verifier:
         Args:
             run_id: Unique identifier for this verification run
             target_tests: Optional list of specific test paths to run
+            target_selection: Optional classified tests for stable baseline matching
             subject_ids: Optional list of acceptance criteria IDs
             change_plan: Optional ChangePlan with specialized verification specs
 
@@ -141,13 +143,38 @@ class Verifier:
         """
         checks: list[CheckReport] = []
 
-        # Run regression tests to establish baseline
+        # Run repository-wide linting so post-patch lint failures can be
+        # distinguished from pre-existing quality debt.
+        ruff_command = "ruff check --no-cache ."
+        ruff_result = self.sandbox.run(
+            ruff_command,
+            timeout_seconds=self.timeouts.ruff,
+        )
+        ruff_check = self._create_check_report(
+            method="ruff",
+            phase="baseline",
+            level="BASELINE_LINT",
+            command=ruff_command,
+            result=ruff_result,
+            timeout_seconds=self.timeouts.ruff,
+            subject_ids=[],
+            direct=False,
+            test_node="",
+        )
+        ruff_check.tier = "required"
+        ruff_check.selection_reason = "Baseline repository lint"
+        if not ruff_check.passed:
+            ruff_check.failure_fingerprint = compute_failure_fingerprint(
+                ruff_check
+            )
+        checks.append(ruff_check)
+
+        # Run regression tests to establish baseline.
         regression_command = "python -m pytest -q -p no:cacheprovider"
         result = self.sandbox.run(
             regression_command,
             timeout_seconds=self.timeouts.regression_tests,
         )
-
         regression_check = self._create_check_report(
             method="pytest",
             phase="baseline",
@@ -159,16 +186,39 @@ class Verifier:
             direct=False,
             test_node="",  # Baseline regression doesn't target specific nodes
         )
+        regression_check.tier = "optional"
+        regression_check.selection_reason = "Baseline full regression suite"
         # Add failure fingerprint for baseline checks
         if not regression_check.passed:
             regression_check.failure_fingerprint = compute_failure_fingerprint(regression_check)
         checks.append(regression_check)
 
-        # Run target tests if specified
-        if target_tests:
-            targets = " ".join(
-                shlex.quote(test) for test in target_tests
+        # Run target tests individually when classified selection metadata is
+        # available. Stable per-test commands make baseline matching reliable.
+        selected_targets: list[tuple[str, str, bool]] = []
+        if target_selection is not None:
+            for selected_test in target_selection.selected_tests:
+                classification = selected_test.reason.classification
+                if classification == SelectionReasonType.DIRECT:
+                    tier = "required"
+                elif classification == SelectionReasonType.AFFECTED:
+                    tier = "affected"
+                else:
+                    tier = "optional"
+                selected_targets.append(
+                    (
+                        selected_test.test_id,
+                        tier,
+                        selected_test.is_direct_evidence,
+                    )
+                )
+        elif target_tests:
+            selected_targets.extend(
+                (test, "required", True) for test in target_tests
             )
+
+        for target, tier, direct in selected_targets:
+            targets = shlex.quote(target)
             target_command = f"python -m pytest {targets} -q -p no:cacheprovider"
             result = self.sandbox.run(
                 target_command,
@@ -183,9 +233,11 @@ class Verifier:
                 result=result,
                 timeout_seconds=self.timeouts.target_tests,
                 subject_ids=subject_ids or [],
-                direct=True,
-                test_node=target_tests[0] if target_tests else "",  # Use first test as node identifier
+                direct=direct,
+                test_node=target,
             )
+            target_check.tier = tier
+            target_check.selection_reason = "Baseline selected test"
             # Add failure fingerprint for baseline checks
             if not target_check.passed:
                 target_check.failure_fingerprint = compute_failure_fingerprint(target_check)
@@ -530,7 +582,7 @@ class Verifier:
             tier_results["required"]["passed"] += sum(1 for c in specialized_checks if c.passed)
             tier_results["required"]["failed"] += sum(1 for c in specialized_checks if not c.passed)
 
-        # Tier 3: OPTIONAL tests (remaining regression tests)
+        # Tier 3: OPTIONAL tests selected by dependency analysis.
         if optional_tests:
             optional_checks = self._execute_tier(
                 "optional",
@@ -542,33 +594,34 @@ class Verifier:
             )
             checks.extend(optional_checks)
 
-        # If no classified tests, fall back to full regression suite
-        if not required_tests and not affected_tests and not optional_tests:
-            regression_command = "python -m pytest -q -p no:cacheprovider"
-            regression_result = self.sandbox.run(
-                regression_command,
-                timeout_seconds=self.timeouts.regression_tests,
-            )
+        # Always attempt the same full-suite command used at baseline. Its
+        # result is evaluated as a delta, so unchanged historical failures do
+        # not make an otherwise correct patch fail.
+        regression_command = "python -m pytest -q -p no:cacheprovider"
+        regression_result = self.sandbox.run(
+            regression_command,
+            timeout_seconds=self.timeouts.regression_tests,
+        )
 
-            regression_check = self._create_check_report(
-                method="pytest",
-                phase="post_patch",
-                level="LEVEL_3_REGRESSION",
-                command=regression_command,
-                result=regression_result,
-                timeout_seconds=self.timeouts.regression_tests,
-                subject_ids=[],
-                direct=False,
-                test_node="",
-            )
-            regression_check.tier = "optional"
-            regression_check.selection_reason = "Fallback full regression suite (no classified tests)"
-            checks.append(regression_check)
-            tier_results["optional"]["total"] += 1
-            if regression_check.passed:
-                tier_results["optional"]["passed"] += 1
-            else:
-                tier_results["optional"]["failed"] += 1
+        regression_check = self._create_check_report(
+            method="pytest",
+            phase="post_patch",
+            level="LEVEL_3_REGRESSION",
+            command=regression_command,
+            result=regression_result,
+            timeout_seconds=self.timeouts.regression_tests,
+            subject_ids=[],
+            direct=False,
+            test_node="",
+        )
+        regression_check.tier = "optional"
+        regression_check.selection_reason = "Full regression suite"
+        checks.append(regression_check)
+        tier_results["optional"]["total"] += 1
+        if regression_check.passed:
+            tier_results["optional"]["passed"] += 1
+        else:
+            tier_results["optional"]["failed"] += 1
 
         # Level 4: Constraint audit (if policy information available)
         if change_plan:

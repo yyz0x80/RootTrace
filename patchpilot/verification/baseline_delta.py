@@ -332,23 +332,28 @@ def apply_baseline_delta_evaluation(
         # No report available, assume verification failed
         return "FAILED", False
 
-    # Deterministic quality and acceptance checks are always blocking when
-    # they fail after the patch. Baseline failures are not included in the
-    # report until after this evaluation has completed.
-    blocking_failures = [
-        check for check in report.checks
-        if not check.passed
-        and check.method
-        in (
-            "ruff",
-            "constraint_audit",
-            "acceptance_probe",
-            "structural_check",
-            "ast_check",
-            "mock_check",
-        )
-    ]
-    if blocking_failures:
+    # Constraint and direct acceptance failures always block the patch.
+    always_blocking_methods = {
+        "constraint_audit",
+        "acceptance_probe",
+        "structural_check",
+        "ast_check",
+        "mock_check",
+    }
+    if any(
+        not check.passed and check.method in always_blocking_methods
+        for check in report.checks
+    ):
+        return "FAILED", False
+
+    # Repository-wide Ruff is compared with baseline. Unchanged lint debt is
+    # reported but is not attributed to the patch.
+    if any(
+        not check.passed
+        and check.method == "ruff"
+        and check.transition != CheckTransition.PRE_EXISTING_FAILURE.value
+        for check in report.get_post_patch_checks()
+    ):
         return "FAILED", False
 
     # Get transition summary
@@ -359,22 +364,33 @@ def apply_baseline_delta_evaluation(
     affected = transition_summary.get("by_tier", {}).get("affected", {})
     optional = transition_summary.get("by_tier", {}).get("optional", {})
 
-    # Check for blocking transitions in REQUIRED tier
-    required_regression = required.get("regression", 0)
-    required_worsened = required.get("worsened", 0)
-    required_pre_existing = required.get("pre_existing_failure", 0)
-    required_new_or_uncompared = required.get("new_or_uncompared", 0)
-
-    # Check for blocking transitions in AFFECTED tier
+    # Check for blocking transitions in AFFECTED tier.
     affected_regression = affected.get("regression", 0)
     affected_worsened = affected.get("worsened", 0)
+    affected_uncompared = affected.get("new_or_uncompared", 0)
 
     # Check for OPTIONAL tier issues
     optional_regression = optional.get("regression", 0)
     optional_worsened = optional.get("worsened", 0)
 
-    # Check for failures in unknown/empty tiers - these should block VERIFIED
-    # to ensure all pytest failures are properly classified
+    if (
+        required.get("regression", 0) > 0
+        or required.get("worsened", 0) > 0
+    ):
+        return "FAILED", False
+
+    # Required tests express the task contract and must pass after the patch,
+    # regardless of whether they were already failing at baseline.
+    if any(
+        not check.passed
+        and check.method == "pytest"
+        and check.tier == "required"
+        for check in report.get_post_patch_checks()
+    ):
+        return "FAILED", False
+
+    # Check for failures in unknown or empty tiers. These cannot be safely
+    # attributed and therefore block a full verification result.
     unknown_tier_failures = 0
     for check in report.checks:
         if not check.passed and check.method == "pytest":
@@ -385,31 +401,32 @@ def apply_baseline_delta_evaluation(
     if unknown_tier_failures > 0:
         return "FAILED", False
 
-    # REQUIRED: any failure (including pre-existing) blocks VERIFIED
-    # Use transition_summary data which is already computed
-    if required_pre_existing > 0 or required_new_or_uncompared > 0:
-        return "FAILED", False
-
-    # REGRESSION and WORSENED in REQUIRED or AFFECTED block VERIFIED
-    if required_regression > 0 or required_worsened > 0:
-        return "FAILED", False
-    if affected_regression > 0 or affected_worsened > 0:
+    # New or worsened failures in tests connected to changed code block the
+    # patch. Unchanged pre-existing failures remain diagnostic only.
+    affected_uncompared_failures = any(
+        not check.passed
+        and check.method == "pytest"
+        and check.tier == "affected"
+        and check.transition == CheckTransition.NEW_OR_UNCOMPARED.value
+        for check in report.get_post_patch_checks()
+    )
+    if (
+        affected_regression > 0
+        or affected_worsened > 0
+        or (affected_uncompared > 0 and affected_uncompared_failures)
+    ):
         return "FAILED", False
 
     # PRE_EXISTING_FAILURE in AFFECTED should not block VERIFIED
     # (it was already failing before our changes)
     # No action needed - this is allowed
 
-    # Apply strategy-based handling of OPTIONAL regressions
-    if strategy == "strict":
-        # STRICT: Any regression blocks VERIFIED
+    # A deterministic repository-wide regression fails strict and balanced
+    # verification. Focused verification retains a partial result because it
+    # explicitly limits its confidence to required and affected checks.
+    if strategy in ("strict", "balanced"):
         if optional_regression > 0 or optional_worsened > 0:
             return "FAILED", False
-        return "VERIFIED", True
-    elif strategy == "balanced":
-        # BALANCED: OPTIONAL regression results in PARTIALLY_VERIFIED
-        if optional_regression > 0 or optional_worsened > 0:
-            return "PARTIALLY_VERIFIED", True
         return "VERIFIED", True
     elif strategy == "focused":
         # FOCUSED: OPTIONAL regressions don't block if REQUIRED/AFFECTED are clean

@@ -142,7 +142,7 @@ class VerificationStrategy(str, Enum):
 
     Strategies define how verification results across tiers determine overall success:
     - strict: Any new post-patch failure blocks VERIFIED
-    - balanced: REQUIRED and AFFECTED must pass; OPTIONAL failure results in PARTIALLY_VERIFIED
+    - balanced: Required, affected, and deterministic regression checks must pass
     - focused: REQUIRED tests must pass; missing broader tests prevent full-confidence VERIFIED
     """
 

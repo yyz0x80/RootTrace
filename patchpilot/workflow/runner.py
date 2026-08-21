@@ -507,6 +507,7 @@ class WorkflowRunner:
             return verifier.verify_baseline(
                 run_id=run_id,
                 target_tests=selection.tests,
+                target_selection=selection,
                 subject_ids=selection.acceptance_criteria,
                 change_plan=change_plan,
             )
