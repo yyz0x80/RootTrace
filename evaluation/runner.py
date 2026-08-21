@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ class TaskConfig:
     target_tests: list[str]
     score_commands: list[str]
     expected_phase: str = "execute"
+    regression_tests: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -83,6 +85,8 @@ class ScoreResult:
         scope_compliant: True if patch only changes allowed files, False otherwise
         public_tests_passed: True if all declared target_tests passed, False if any failed
         public_tests_applicable: True if target_tests were configured and run
+        regression_tests_passed: True if independent regression delta is safe
+        regression_tests_applicable: True if regression targets were configured
         changed_file_count: Number of files changed by the patch
         added_lines: Number of lines added by the patch
         deleted_lines: Number of lines deleted by the patch
@@ -106,6 +110,8 @@ class ScoreResult:
     scope_compliant: bool = True
     public_tests_passed: bool = True
     public_tests_applicable: bool = False
+    regression_tests_passed: bool = True
+    regression_tests_applicable: bool = False
     changed_file_count: int = 0
     added_lines: int = 0
     deleted_lines: int = 0
@@ -145,6 +151,7 @@ def load_task_config(task_dir: Path) -> TaskConfig:
         target_tests=data.get("target_tests", []),
         score_commands=data.get("score_commands", []),
         expected_phase=data.get("expected_phase", "execute"),
+        regression_tests=data.get("regression_tests", []),
     )
 
 
@@ -825,6 +832,8 @@ def run_public_tests(
             test_results.append({
                 "target": test_target,
                 "passed": passed,
+                "return_code": result.returncode,
+                "timed_out": False,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
             })
@@ -833,11 +842,101 @@ def run_public_tests(
             test_results.append({
                 "target": test_target,
                 "passed": False,
+                "return_code": None,
+                "timed_out": True,
                 "stdout": "",
                 "stderr": "Test execution timed out",
             })
     
     return all_passed, test_results
+
+
+def _failed_test_ids(result: dict[str, Any]) -> set[str]:
+    """Extract pytest node IDs from one command result."""
+    output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+    return set(
+        re.findall(r"^FAILED\s+(\S+?)(?:\s+-|$)", output, flags=re.MULTILINE)
+    )
+
+
+def _failure_signature(result: dict[str, Any]) -> tuple[str, ...]:
+    """Build a stable fallback signature for non-standard pytest failures."""
+    output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+    diagnostic_lines = {
+        line.strip()
+        for line in output.splitlines()
+        if line.strip()
+        and any(
+            marker in line
+            for marker in ("ERROR", "FAILED", "Error", "not found")
+        )
+        and not line.lstrip().startswith("=")
+    }
+    return tuple(sorted(diagnostic_lines))
+
+
+def classify_test_result_transition(
+    baseline: dict[str, Any] | None,
+    post_patch: dict[str, Any],
+) -> str:
+    """Classify one independent test command using baseline-delta semantics."""
+    if baseline is None:
+        return "NEW_OR_UNCOMPARED"
+    if baseline.get("timed_out") or post_patch.get("timed_out"):
+        return "UNVERIFIED"
+
+    baseline_passed = baseline.get("passed") is True
+    post_patch_passed = post_patch.get("passed") is True
+    if baseline_passed and post_patch_passed:
+        return "PRESERVED"
+    if not baseline_passed and post_patch_passed:
+        return "RESOLVED"
+    if baseline_passed and not post_patch_passed:
+        return "REGRESSION"
+
+    baseline_failures = _failed_test_ids(baseline)
+    post_patch_failures = _failed_test_ids(post_patch)
+    if baseline_failures and post_patch_failures:
+        if post_patch_failures == baseline_failures:
+            return "PRE_EXISTING_FAILURE"
+        if post_patch_failures < baseline_failures:
+            return "IMPROVED"
+        return "WORSENED"
+
+    if _failure_signature(baseline) == _failure_signature(post_patch):
+        return "PRE_EXISTING_FAILURE"
+    return "WORSENED"
+
+
+def compare_test_run_delta(
+    baseline_results: list[dict[str, Any]],
+    post_patch_results: list[dict[str, Any]],
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Compare independent regression commands and return delta safety."""
+    baseline_by_target = {
+        str(result.get("target")): result for result in baseline_results
+    }
+    transitions: list[dict[str, Any]] = []
+    safe_transitions = {
+        "PRESERVED",
+        "RESOLVED",
+        "PRE_EXISTING_FAILURE",
+        "IMPROVED",
+    }
+
+    for post_patch in post_patch_results:
+        target = str(post_patch.get("target"))
+        transition = classify_test_result_transition(
+            baseline_by_target.get(target),
+            post_patch,
+        )
+        transitions.append({"target": target, "transition": transition})
+
+    complete = len(post_patch_results) == len(baseline_results)
+    regression_safe = complete and bool(transitions) and all(
+        item["transition"] in safe_transitions for item in transitions
+    )
+    return regression_safe, transitions
 
 
 def execute_task(
@@ -1066,7 +1165,7 @@ def score_task(
     """Score a completed task by applying patch and running hidden tests.
 
     Scoring semantics:
-    - functional_correctness: 1 if patch applies and all hidden tests pass, 0 otherwise
+    - functional_correctness: 1 if patch, scope, public, regression, and hidden checks pass
     - outcome_accuracy: 1 if actual_status equals expected_status, 0 otherwise
     - For prepare-only tasks, functional_correctness is not applicable (set to 0)
     - For tasks with no hidden tests, hidden_tests_applicable is False
@@ -1115,6 +1214,8 @@ def score_task(
         scope_compliant=True,
         public_tests_passed=True,
         public_tests_applicable=bool(task_config.target_tests),
+        regression_tests_passed=not bool(task_config.regression_tests),
+        regression_tests_applicable=bool(task_config.regression_tests),
     )
     result.details["run_status"] = run_result.status
     if run_result.failure_type:
@@ -1164,6 +1265,16 @@ def score_task(
         fixture_path = evaluation_root / task_config.repository
         score_repo = temp_dir / "score_repo"
         materialize(fixture_path, score_repo, task_config.base_commit)
+
+        baseline_regression_results: list[dict[str, Any]] = []
+        if task_config.regression_tests:
+            _, baseline_regression_results = run_public_tests(
+                score_repo,
+                task_config.regression_tests,
+            )
+            result.details["baseline_regression_results"] = (
+                baseline_regression_results
+            )
 
         # Apply the patch when present. A patch is mandatory only for tasks
         # that declare hidden score commands.
@@ -1223,6 +1334,23 @@ def score_task(
                 result.functional_correctness = 0.0
                 result.details["public_test_failure"] = True
 
+        if task_config.regression_tests:
+            _, post_patch_regression_results = run_public_tests(
+                score_repo,
+                task_config.regression_tests,
+            )
+            regression_safe, regression_transitions = compare_test_run_delta(
+                baseline_regression_results,
+                post_patch_regression_results,
+            )
+            result.regression_tests_passed = regression_safe
+            result.details["post_patch_regression_results"] = (
+                post_patch_regression_results
+            )
+            result.details["regression_transitions"] = regression_transitions
+            if not regression_safe:
+                result.details["regression_failure"] = True
+
         # Run score commands (hidden tests) if configured
         if task_config.score_commands:
             all_passed = True
@@ -1246,13 +1374,24 @@ def score_task(
             
             # Functional correctness is 1 only if patch applied, scope compliant, 
             # public tests pass, and all hidden tests pass
-            if patch_applied and result.scope_compliant and result.public_tests_passed and all_passed:
+            if (
+                patch_applied
+                and result.scope_compliant
+                and result.public_tests_passed
+                and result.regression_tests_passed
+                and all_passed
+            ):
                 result.functional_correctness = 1.0
             else:
                 result.functional_correctness = 0.0
         else:
             # No hidden tests configured - functional correctness depends on patch applicability and scope
-            if patch_applied and result.scope_compliant and result.public_tests_passed:
+            if (
+                patch_applied
+                and result.scope_compliant
+                and result.public_tests_passed
+                and result.regression_tests_passed
+            ):
                 result.functional_correctness = 1.0
             else:
                 result.functional_correctness = 0.0
@@ -1294,6 +1433,10 @@ def save_score_result(run_dir: Path, score: ScoreResult) -> None:
                 "scope_compliant": score.scope_compliant,
                 "public_tests_passed": score.public_tests_passed,
                 "public_tests_applicable": score.public_tests_applicable,
+                "regression_tests_passed": score.regression_tests_passed,
+                "regression_tests_applicable": (
+                    score.regression_tests_applicable
+                ),
                 "changed_file_count": score.changed_file_count,
                 "added_lines": score.added_lines,
                 "deleted_lines": score.deleted_lines,
@@ -1483,6 +1626,8 @@ def aggregate_scores(
     scope_compliant_eligible = 0
     public_tests_passed_sum = 0
     public_tests_eligible = 0
+    independent_regression_passes = 0
+    independent_regression_eligible = 0
     total_changed_files = 0
     total_added_lines = 0
     total_deleted_lines = 0
@@ -1542,6 +1687,14 @@ def aggregate_scores(
             scope_compliant = task_score.get("scope_compliant", True)
             public_tests_passed = task_score.get("public_tests_passed", True)
             public_tests_applicable = task_score.get("public_tests_applicable", False)
+            regression_tests_passed = task_score.get(
+                "regression_tests_passed",
+                True,
+            )
+            regression_tests_applicable = task_score.get(
+                "regression_tests_applicable",
+                False,
+            )
             changed_file_count = task_score.get("changed_file_count", 0)
             added_lines = task_score.get("added_lines", 0)
             deleted_lines = task_score.get("deleted_lines", 0)
@@ -1557,6 +1710,8 @@ def aggregate_scores(
             scope_compliant = True  # Assume compliant for legacy
             public_tests_passed = True  # Assume passed for legacy
             public_tests_applicable = False  # Not tracked in legacy
+            regression_tests_passed = True  # Not tracked in legacy
+            regression_tests_applicable = False  # Not tracked in legacy
             changed_file_count = 0  # Not tracked in legacy
             added_lines = 0  # Not tracked in legacy
             deleted_lines = 0  # Not tracked in legacy
@@ -1610,6 +1765,11 @@ def aggregate_scores(
         # Outcome accuracy (separate from functional correctness)
         if actual_status == expected_status:
             outcome_match_sum += 1
+
+        if regression_tests_applicable and phase_reached == "execute":
+            independent_regression_eligible += 1
+            if regression_tests_passed:
+                independent_regression_passes += 1
 
         # Legacy metrics for backward compatibility
         if actual_status == expected_status:
@@ -1773,6 +1933,10 @@ def aggregate_scores(
         "public_tests_pass_rate": rate_metric(
             public_tests_passed_sum,
             public_tests_eligible,
+        ),
+        "independent_regression_safety_rate": rate_metric(
+            independent_regression_passes,
+            independent_regression_eligible,
         ),
         "total_changed_files": total_changed_files,
         "total_added_lines": total_added_lines,

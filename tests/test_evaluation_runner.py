@@ -374,6 +374,7 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
         score_commands=[
             "python -m pytest -q -p no:cacheprovider {task_dir}/hidden_check.py"
         ],
+        regression_tests=["."],
     )
     run_result = RunResult(
         task_id="relative-path-task",
@@ -401,6 +402,11 @@ def test_score_task_resolves_patch_and_hidden_test_paths(
     assert result.added_lines == 1
     assert result.deleted_lines == 1
     assert result.public_tests_applicable is True  # target_tests in config
+    assert result.regression_tests_applicable is True
+    assert result.regression_tests_passed is True
+    assert result.details["regression_transitions"] == [
+        {"target": ".", "transition": "PRESERVED"}
+    ]
 
 
 def test_score_task_preserves_failed_status_without_verification_report(
@@ -1408,6 +1414,55 @@ def test_public_tests_pass_and_fail(tmp_path: Path) -> None:
         assert results[0]["passed"] is True
     finally:
         subprocess.run = original_run
+
+
+def test_compare_test_run_delta_accepts_unchanged_historical_failure() -> None:
+    """The evaluator should not attribute an unchanged failure to the patch."""
+    failed_output = "FAILED tests/test_old.py::test_known - AssertionError"
+    baseline = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": failed_output,
+            "stderr": "",
+        }
+    ]
+    post_patch = [dict(baseline[0])]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is True
+    assert transitions == [
+        {"target": ".", "transition": "PRE_EXISTING_FAILURE"}
+    ]
+
+
+def test_compare_test_run_delta_rejects_new_failure() -> None:
+    """A newly failing test must remain a regression."""
+    baseline = [
+        {
+            "target": ".",
+            "passed": True,
+            "timed_out": False,
+            "stdout": "1 passed",
+            "stderr": "",
+        }
+    ]
+    post_patch = [
+        {
+            "target": ".",
+            "passed": False,
+            "timed_out": False,
+            "stdout": "FAILED tests/test_new.py::test_regression - AssertionError",
+            "stderr": "",
+        }
+    ]
+
+    safe, transitions = runner.compare_test_run_delta(baseline, post_patch)
+
+    assert safe is False
+    assert transitions == [{"target": ".", "transition": "REGRESSION"}]
 
 
 def test_minimality_analysis_empty_patch(tmp_path: Path) -> None:
