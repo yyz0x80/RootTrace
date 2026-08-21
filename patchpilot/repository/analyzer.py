@@ -10,12 +10,13 @@ and identify files relevant to the current issue, including:
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 from pathlib import Path
 
 from patchpilot.issue.schema import NormalizedIssue
-from patchpilot.repository.schema import RepositoryContext
+from patchpilot.repository.schema import PythonCallable, RepositoryContext
 
 # Configuration file names to detect
 _CONFIG_FILES = {
@@ -151,6 +152,146 @@ def _search_keyword(repo: Path, keyword: str) -> list[str]:
     return matches
 
 
+def _parameter_shape(
+    arguments: ast.arguments,
+    *,
+    skip_first: bool,
+) -> tuple[list[str], list[str]]:
+    """Return ordered and required parameter names for a callable."""
+    positional = [*arguments.posonlyargs, *arguments.args]
+    if skip_first and positional:
+        positional = positional[1:]
+    default_offset = len(positional) - len(arguments.defaults)
+    parameters = [argument.arg for argument in positional]
+    required = [
+        argument.arg
+        for index, argument in enumerate(positional)
+        if index < default_offset
+    ]
+    for argument, default in zip(
+        arguments.kwonlyargs,
+        arguments.kw_defaults,
+        strict=True,
+    ):
+        parameters.append(argument.arg)
+        if default is None:
+            required.append(argument.arg)
+    return parameters, required
+
+
+def _class_constructor_shape(
+    node: ast.ClassDef,
+) -> tuple[list[str], list[str]]:
+    """Return constructor parameters for a class or dataclass."""
+    for item in node.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "__init__":
+            return _parameter_shape(item.args, skip_first=True)
+
+    decorator_names = {
+        ast.unparse(decorator).split("(", maxsplit=1)[0]
+        for decorator in node.decorator_list
+    }
+    if not any(name.endswith("dataclass") for name in decorator_names):
+        return [], []
+
+    parameters = []
+    required = []
+    for item in node.body:
+        if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
+            continue
+        parameters.append(item.target.id)
+        if item.value is None:
+            required.append(item.target.id)
+    return parameters, required
+
+
+def _analyze_python_callables(repo: Path, python_files: list[str]) -> list[PythonCallable]:
+    """Collect callable signatures used to validate declarative probes."""
+    callables = []
+    for relative_path in python_files:
+        path = repo / relative_path
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        module = relative_path.removesuffix(".py").replace("/", ".")
+        if module.endswith(".__init__"):
+            module = module.removesuffix(".__init__")
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parameters, required = _parameter_shape(node.args, skip_first=False)
+                callables.append(
+                    PythonCallable(
+                        module=module,
+                        target=node.name,
+                        parameters=parameters,
+                        required_parameters=required,
+                        return_annotation=(
+                            ast.unparse(node.returns) if node.returns else ""
+                        ),
+                    )
+                )
+                continue
+            if not isinstance(node, ast.ClassDef):
+                continue
+            constructor_parameters, required_constructor = _class_constructor_shape(node)
+            callables.append(
+                PythonCallable(
+                    module=module,
+                    target=node.name,
+                    parameters=constructor_parameters,
+                    required_parameters=required_constructor,
+                    return_annotation=node.name,
+                )
+            )
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if item.name == "__init__":
+                    continue
+                parameters, required = _parameter_shape(item.args, skip_first=True)
+                callables.append(
+                    PythonCallable(
+                        module=module,
+                        target=f"{node.name}.{item.name}",
+                        parameters=parameters,
+                        required_parameters=required,
+                        constructor_parameters=constructor_parameters,
+                        required_constructor_parameters=required_constructor,
+                        return_annotation=(
+                            ast.unparse(item.returns) if item.returns else ""
+                        ),
+                    )
+                )
+    return callables
+
+
+def _analyze_python_noncallables(repo: Path, python_files: list[str]) -> list[str]:
+    """Collect known data attributes that cannot be invoked by a probe."""
+    targets = []
+    for relative_path in python_files:
+        try:
+            tree = ast.parse((repo / relative_path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        module = relative_path.removesuffix(".py").replace("/", ".")
+        if module.endswith(".__init__"):
+            module = module.removesuffix(".__init__")
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    target = item.target if isinstance(item, ast.AnnAssign) else None
+                    if isinstance(target, ast.Name):
+                        targets.append(f"{module}:{node.name}.{target.id}")
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                targets.append(f"{module}:{node.target.id}")
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        targets.append(f"{module}:{target.id}")
+    return targets
+
+
 def analyze_repository(
     repo: Path,
     issue: NormalizedIssue,
@@ -219,4 +360,6 @@ def analyze_repository(
         test_files=test_files,
         config_files=config_files,
         keyword_matches=keyword_matches,
+        python_callables=_analyze_python_callables(repo, python_files),
+        python_noncallable_targets=_analyze_python_noncallables(repo, python_files),
     )

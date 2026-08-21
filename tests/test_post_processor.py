@@ -28,8 +28,9 @@ from patchpilot.planning.schema import (
     CriterionPlanDetail,
     PlannedChange,
     PlannedTest,
+    StructuralCheckSpec,
 )
-from patchpilot.repository.schema import RepositoryContext
+from patchpilot.repository.schema import PythonCallable, RepositoryContext
 
 
 def test_is_test_file() -> None:
@@ -684,3 +685,144 @@ def test_post_process_plan_rejects_non_repository_probe_module() -> None:
 
     with pytest.raises(PlanPostProcessError, match="not repository-owned"):
         post_process_plan(plan, issue, repository_context)
+
+
+def test_post_process_plan_rejects_probe_for_structural_criterion() -> None:
+    """Keep structural and behavioral direct evidence separate."""
+    plan = ChangePlan(
+        risk_level="low",
+        acceptance_probes=[
+            AcceptanceProbeSpec(
+                probe_id="probe-field",
+                module="models",
+                target="Item",
+                probe_type="invariant",
+                criterion_ids=["AC-1"],
+                arguments=["name"],
+                assertion="truthy",
+            )
+        ],
+    )
+    issue = NormalizedIssue(
+        title="Add field",
+        task_type="feature",
+        problem_statement="Add a field.",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-1",
+                description="Add `note: str` to Item.",
+                kind="structural",
+            )
+        ],
+    )
+    context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["models.py"],
+        python_files=["models.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    with pytest.raises(PlanPostProcessError, match="must use a structural check"):
+        post_process_plan(plan, issue, context)
+
+
+def test_post_process_plan_rejects_incomplete_probe_call() -> None:
+    """Reject probes that omit required existing callable parameters."""
+    plan = ChangePlan(
+        risk_level="low",
+        acceptance_probes=[
+            AcceptanceProbeSpec(
+                probe_id="probe-create",
+                module="service",
+                target="Service.create",
+                probe_type="function_io",
+                criterion_ids=["AC-1"],
+                assertion="attribute_equals",
+                attribute="Item.note",
+                expected="",
+            )
+        ],
+    )
+    issue = NormalizedIssue(
+        title="Default note",
+        task_type="feature",
+        problem_statement="Default notes to empty text.",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-1",
+                description="The note defaults to empty text.",
+                kind="behavior",
+            )
+        ],
+    )
+    context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["service.py"],
+        python_files=["service.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+        python_callables=[
+            PythonCallable(
+                module="service",
+                target="Service.create",
+                parameters=["name", "note"],
+                required_parameters=["name"],
+                return_annotation="Item",
+            )
+        ],
+    )
+
+    with pytest.raises(PlanPostProcessError, match="required call parameters: name"):
+        post_process_plan(plan, issue, context)
+
+    plan.acceptance_probes[0].arguments = ["name"]
+    with pytest.raises(PlanPostProcessError, match="attribute must be relative"):
+        post_process_plan(plan, issue, context)
+
+
+def test_post_process_plan_rejects_unrequested_annotation() -> None:
+    """Do not let structural checks strengthen the requested API contract."""
+    plan = ChangePlan(
+        risk_level="low",
+        structural_checks=[
+            StructuralCheckSpec(
+                check_id="check-parameter",
+                check_type="method_parameter",
+                target="Service.create",
+                parameters={
+                    "class": "Service",
+                    "method": "create",
+                    "parameter": "note",
+                    "annotation": "Optional[str]",
+                },
+                criterion_ids=["AC-1"],
+                file_path="service.py",
+            )
+        ],
+    )
+    issue = NormalizedIssue(
+        title="Optional note argument",
+        task_type="feature",
+        problem_statement="The note argument may be omitted.",
+        acceptance_criteria=[
+            AcceptanceCriterion(
+                id="AC-1",
+                description="Service.create accepts an optional note parameter.",
+                kind="structural",
+            )
+        ],
+    )
+    context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["service.py"],
+        python_files=["service.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    with pytest.raises(PlanPostProcessError, match="no mapped criterion requires"):
+        post_process_plan(plan, issue, context)

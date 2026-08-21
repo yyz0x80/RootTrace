@@ -109,13 +109,21 @@ def compute_failure_fingerprint(check: CheckReport) -> str | dict[str, str]:
 
     # For other methods, use the original single fingerprint approach
     summary = check.summary or {}
+    failure_detail = (
+        summary.get("error")
+        or summary.get("message")
+        or summary.get("relevant_output")
+        or summary.get("output")
+        or ""
+    )
 
     # Build fingerprint from failure characteristics
     components = [
         check.failure_type or "unknown",
         summary.get("error_type") or "unknown",
         # Extract key error patterns from output
-        _extract_error_pattern(summary.get("relevant_output", "")),
+        _extract_error_pattern(str(failure_detail)),
+        _normalize_failure_detail(str(failure_detail)),
         # Use failed tests as part of fingerprint if available
         ",".join(sorted(summary.get("failed_tests", []))) if summary.get("failed_tests") else "",
     ]
@@ -126,6 +134,11 @@ def compute_failure_fingerprint(check: CheckReport) -> str | dict[str, str]:
 
     # Hash for stable compact identifier
     return hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+
+
+def _normalize_failure_detail(detail: str) -> str:
+    """Normalize bounded error text for stable failure comparison."""
+    return " ".join(detail.split())[:500]
 
 
 def _compute_pytest_failure_mapping(check: CheckReport) -> dict[str, str]:
@@ -488,6 +501,15 @@ def _analyze_pytest_failure_transition(
         else:
             # Cannot reliably generate fingerprint: UNVERIFIED
             return CheckTransition.UNVERIFIED.value, baseline_check_id
+
+    if baseline_map and not post_patch_map:
+        post_patch_fingerprint = _compute_overall_fingerprint(post_patch_check)
+        if post_patch_fingerprint:
+            return CheckTransition.WORSENED.value, baseline_check_id
+        return CheckTransition.UNVERIFIED.value, baseline_check_id
+
+    if not baseline_map and post_patch_map:
+        return CheckTransition.REGRESSION.value, baseline_check_id
 
     resolved_tests = []
     regressed_tests = []

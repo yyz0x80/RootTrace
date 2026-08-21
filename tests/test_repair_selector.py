@@ -414,7 +414,7 @@ class TestRepairSelectorSelectCandidates:
                 tier="required",
                 transition=CheckTransition.NEW_OR_UNCOMPARED.value,
                 failure_fingerprint="scope123",
-                summary={"relevant_output": "Error in /tmp/unapproved_file.py"},
+                summary={"required_files": ["src/unapproved_file.py"]},
             )
         )
         selector = RepairSelector(approved_files={"src/approved.py"})
@@ -427,6 +427,41 @@ class TestRepairSelectorSelectCandidates:
         assert len(selection.excluded_failures) == 1
         assert selection.excluded_failures[0].reason == "Failure requires files outside approved change plan"
         assert selection.excluded_failures[0].is_blocking is True
+
+    def test_unstructured_probe_error_remains_repairable(self):
+        """Do not infer out-of-scope requirements from missing file names."""
+        change_plan = ChangePlan(
+            planned_changes=[
+                PlannedChange(
+                    path="src/approved.py",
+                    action="modify",
+                    description="Fix behavior",
+                )
+            ],
+            risk_level="low",
+        )
+        report = VerificationReport(passed=False)
+        report.add_check(
+            CheckReport(
+                method="acceptance_probe",
+                phase="post_patch",
+                level="SPECIALIZED_PROBE",
+                command="probe:behavior",
+                passed=False,
+                exit_code=1,
+                duration_seconds=0.1,
+                failure_type="probe_failure",
+                tier="required",
+                transition=CheckTransition.WORSENED.value,
+                summary={"error": "name 'Dependency' is not defined"},
+            )
+        )
+        selector = RepairSelector(approved_files={"src/approved.py"})
+
+        selection = selector.select_repair_candidates(report, change_plan)
+
+        assert selection.should_repair is True
+        assert selection.excluded_failures == []
 
 
 class TestRepairCandidate:

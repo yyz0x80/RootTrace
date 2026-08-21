@@ -129,6 +129,36 @@ def test_compute_failure_fingerprint_ruff_returns_string():
     assert len(fingerprint) == 16
 
 
+def test_probe_fingerprint_includes_error_detail():
+    """Different probe exceptions must not look pre-existing."""
+    baseline = CheckReport(
+        method="acceptance_probe",
+        phase="baseline",
+        level="SPECIALIZED_PROBE",
+        command="probe:behavior",
+        passed=False,
+        exit_code=1,
+        duration_seconds=0.1,
+        failure_type="probe_failure",
+        summary={"error": "missing required argument: name"},
+    )
+    post_patch = CheckReport(
+        method="acceptance_probe",
+        phase="post_patch",
+        level="SPECIALIZED_PROBE",
+        command="probe:behavior",
+        passed=False,
+        exit_code=1,
+        duration_seconds=0.1,
+        failure_type="probe_failure",
+        summary={"error": "name 'Dependency' is not defined"},
+    )
+
+    transition, _ = classify_transition(baseline, post_patch)
+
+    assert transition == CheckTransition.WORSENED.value
+
+
 def test_classify_transition_resolved():
     """Test FAIL → PASS transition classification."""
     baseline_check = CheckReport(
@@ -1531,6 +1561,44 @@ def test_empty_failure_maps_different_errors_return_worsened():
     # Different errors should return WORSENED
     assert transition == CheckTransition.WORSENED.value
     assert baseline_id == baseline_check.verification_id
+
+
+def test_failed_tests_to_collection_error_is_worsened():
+    """A post-patch collection error cannot resolve baseline test failures."""
+    baseline_check = CheckReport(
+        method="pytest",
+        phase="baseline",
+        level="BASELINE_REGRESSION",
+        command="python -m pytest -q -p no:cacheprovider",
+        passed=False,
+        exit_code=1,
+        duration_seconds=1.0,
+        failure_type="TEST_FAILURE",
+        summary={
+            "error_type": "AssertionError",
+            "failed_tests": ["tests/test_old.py::test_old"],
+            "full_output": "FAILED tests/test_old.py::test_old",
+        },
+    )
+    post_patch_check = CheckReport(
+        method="pytest",
+        phase="post_patch",
+        level="LEVEL_3_REGRESSION",
+        command="python -m pytest -q -p no:cacheprovider",
+        passed=False,
+        exit_code=2,
+        duration_seconds=1.0,
+        failure_type="CODE_FAILURE",
+        summary={
+            "error_type": "NameError",
+            "failed_tests": [],
+            "full_output": "ERROR collecting tests: NameError: missing name",
+        },
+    )
+
+    transition, _ = classify_transition(baseline_check, post_patch_check)
+
+    assert transition == CheckTransition.WORSENED.value
 
 
 def test_import_error_both_sides_empty_maps_same_error():

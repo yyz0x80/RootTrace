@@ -2,7 +2,19 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class PythonCallable(BaseModel):
+    """Describe a repository-owned callable for probe validation."""
+
+    module: str
+    target: str
+    parameters: list[str]
+    required_parameters: list[str]
+    constructor_parameters: list[str] = Field(default_factory=list)
+    required_constructor_parameters: list[str] = Field(default_factory=list)
+    return_annotation: str = ""
 
 
 class RepositoryPreflightResult(BaseModel):
@@ -36,3 +48,5 @@ class RepositoryContext(BaseModel):
     test_files: list[str]
     config_files: list[str]
     keyword_matches: list[str]
+    python_callables: list[PythonCallable] = Field(default_factory=list)
+    python_noncallable_targets: list[str] = Field(default_factory=list)

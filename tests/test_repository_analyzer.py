@@ -99,6 +99,46 @@ def test_identifies_python_files(tmp_path: Path):
     assert "pyproject.toml" not in context.python_files
 
 
+def test_analyzes_python_callable_signatures(tmp_path: Path):
+    """Collect required constructor and method parameters for probes."""
+    head_sha = _setup_git_repo(tmp_path)
+    (tmp_path / "main.py").write_text(
+        """from dataclasses import dataclass
+
+@dataclass
+class Item:
+    name: str
+    note: str = ""
+
+class Service:
+    def __init__(self, store: str):
+        self.store = store
+
+    def create(self, name: str, note: str = "") -> Item:
+        return Item(name, note)
+"""
+    )
+    issue = NormalizedIssue(
+        title="Add item notes",
+        task_type="feature",
+        problem_statement="Items need notes.",
+    )
+
+    context = analyze_repository(tmp_path, issue, head_sha)
+    signatures = {
+        (signature.module, signature.target): signature
+        for signature in context.python_callables
+    }
+
+    assert signatures[("main", "Item")].required_parameters == ["name"]
+    assert "main:Item.name" in context.python_noncallable_targets
+    assert "main:Item.note" in context.python_noncallable_targets
+    create = signatures[("main", "Service.create")]
+    assert create.required_constructor_parameters == ["store"]
+    assert create.required_parameters == ["name"]
+    assert create.return_annotation == "Item"
+
+
 def test_identifies_test_files(tmp_path: Path):
     """Correctly identify test files."""
     head_sha = _setup_git_repo(tmp_path)

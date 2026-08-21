@@ -16,6 +16,7 @@ ensuring that security boundaries are enforced regardless of model behavior.
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import PurePosixPath
 
@@ -297,12 +298,19 @@ def _validate_pytest_targets(
 
 def _validate_acceptance_check_targets(
     plan: ChangePlan,
+    issue: NormalizedIssue,
     repository_context: RepositoryContext,
 ) -> ChangePlan:
-    """Require acceptance checks to target repository-owned Python files."""
+    """Validate acceptance-check ownership, taxonomy, and callability."""
     tracked_files = set(repository_context.tracked_files)
     planned_files = {change.path for change in plan.planned_changes}
     available_files = tracked_files | planned_files
+    criteria = {criterion.id: criterion for criterion in issue.acceptance_criteria}
+    callables = {
+        (signature.module, signature.target): signature
+        for signature in repository_context.python_callables
+    }
+    errors = []
 
     for probe in plan.acceptance_probes:
         module_path = probe.module.replace(".", "/")
@@ -311,18 +319,123 @@ def _validate_acceptance_check_targets(
             f"{module_path}/__init__.py",
         }
         if available_files and candidates.isdisjoint(available_files):
-            raise PlanPostProcessError(
+            errors.append(
                 f"Acceptance probe module is not repository-owned: {probe.module}"
+            )
+        if (
+            f"{probe.module}:{probe.target}"
+            in repository_context.python_noncallable_targets
+        ):
+            errors.append(
+                f"Acceptance probe {probe.probe_id} target is not callable: "
+                f"{probe.target}"
+            )
+        for criterion_id in probe.criterion_ids:
+            criterion = criteria.get(criterion_id)
+            if criterion is not None and criterion.kind == "structural":
+                errors.append(
+                    f"Structural criterion {criterion_id} must use a structural "
+                    "check, not an acceptance probe"
+                )
+
+        signature = callables.get((probe.module, probe.target))
+        if signature is None:
+            continue
+        errors.extend(
+            _required_probe_parameter_errors(
+                probe.probe_id,
+                "constructor",
+                signature.constructor_parameters,
+                signature.required_constructor_parameters,
+                probe.constructor_args,
+                probe.constructor_kwargs,
+            )
+        )
+        errors.extend(
+            _required_probe_parameter_errors(
+                probe.probe_id,
+                "call",
+                signature.parameters,
+                signature.required_parameters,
+                probe.arguments,
+                probe.keyword_arguments,
+            )
+        )
+        if (
+            probe.assertion == "attribute_equals"
+            and signature.return_annotation
+            and probe.attribute.split(".", maxsplit=1)[0]
+            == signature.return_annotation
+        ):
+            errors.append(
+                f"Acceptance probe {probe.probe_id} attribute must be relative "
+                f"to the returned {signature.return_annotation} object"
             )
 
     for check in plan.structural_checks:
         if available_files and check.file_path not in available_files:
-            raise PlanPostProcessError(
+            errors.append(
                 f"Structural check file does not exist in repository: "
                 f"{check.file_path}"
             )
+        for criterion_id in check.criterion_ids:
+            criterion = criteria.get(criterion_id)
+            if criterion is not None and criterion.kind == "behavior":
+                errors.append(
+                    f"Behavior criterion {criterion_id} must use an acceptance "
+                    "probe, not a structural check"
+                )
+        annotation = (
+            check.parameters.get("annotation")
+            if check.check_type in {"dataclass_field", "method_parameter"}
+            else None
+        )
+        if isinstance(annotation, str) and annotation:
+            descriptions = [
+                criteria[criterion_id].description
+                for criterion_id in check.criterion_ids
+                if criterion_id in criteria
+            ]
+            if descriptions and not any(
+                _contains_explicit_annotation(description, annotation)
+                for description in descriptions
+            ):
+                errors.append(
+                    f"Structural check {check.check_id} requires annotation "
+                    f"{annotation!r}, but no mapped criterion requires it"
+                )
 
+    if errors:
+        raise PlanPostProcessError("; ".join(dict.fromkeys(errors)))
     return plan
+
+
+def _required_probe_parameter_errors(
+    probe_id: str,
+    parameter_group: str,
+    parameters: list[str],
+    required_parameters: list[str],
+    positional_values: list[object],
+    keyword_values: dict[str, object],
+) -> list[str]:
+    """Return errors for mandatory callable parameters omitted by a probe."""
+    supplied = set(parameters[: len(positional_values)]) | set(keyword_values)
+    missing = [name for name in required_parameters if name not in supplied]
+    if missing:
+        return [
+            (
+                f"Acceptance probe {probe_id} is missing required "
+                f"{parameter_group} parameters: {', '.join(missing)}"
+            )
+        ]
+    return []
+
+
+def _contains_explicit_annotation(description: str, annotation: str) -> bool:
+    """Return whether an AC explicitly names an exact type annotation."""
+    normalized_description = description.replace("`", "")
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(annotation)}(?![A-Za-z0-9_])"
+    return re.search(pattern, normalized_description, flags=re.IGNORECASE) is not None
 
 
 def _check_ambiguity(
@@ -568,7 +681,7 @@ def post_process_plan(
     plan = _validate_pytest_targets(plan, repository_context)
 
     # Step 5: Validate acceptance-check targets.
-    plan = _validate_acceptance_check_targets(plan, repository_context)
+    plan = _validate_acceptance_check_targets(plan, issue, repository_context)
 
     # Step 6: Check for ambiguous points
     plan = _check_ambiguity(plan, issue)

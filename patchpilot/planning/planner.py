@@ -142,6 +142,15 @@ Rules:
     field, annotation, require_default, and expected_default. For method_parameter
     checks, parameters contain class, method, parameter, annotation,
     require_default, and expected_default.
+20. Do not create acceptance probes for structural criteria or structural checks
+    for behavior criteria.
+21. Use python_callables from repository context to supply every existing required
+    constructor and call parameter in a probe.
+22. attribute is relative to the returned object. For a method returning Task, use
+    "description", never "Task.description".
+23. A structural check may require an annotation only when the mapped acceptance
+    criterion explicitly names that exact annotation. An optional argument does not
+    imply Optional[T]; it may be represented by a default value.
 
 Required structure:
 
@@ -375,6 +384,13 @@ def create_plan(
             "test_files": repository_context.test_files,
             "config_files": repository_context.config_files,
             "keyword_matches": repository_context.keyword_matches,
+            "python_callables": [
+                signature.model_dump()
+                for signature in repository_context.python_callables
+            ],
+            "python_noncallable_targets": (
+                repository_context.python_noncallable_targets
+            ),
         },
         indent=2,
     )

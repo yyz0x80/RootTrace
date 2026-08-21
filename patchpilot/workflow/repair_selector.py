@@ -283,18 +283,18 @@ class RepairSelector:
         if not change_plan or not self.approved_files:
             return False
 
-        # Extract file paths from failure output
+        # Only explicit structured metadata can establish that a repair
+        # requires files outside the approved plan. Human-readable output may
+        # omit source paths or mention read-only test files even when the root
+        # cause is in an approved source file.
         summary = check.summary or {}
-        relevant_output = summary.get("relevant_output", "")
-
-        # Check if any mentioned files are outside approved scope
-        for approved_file in self.approved_files:
-            if approved_file in relevant_output:
-                return False
-
-        # If no approved files are mentioned, it might be out of scope
-        # This is a conservative check - could be refined
-        return bool(relevant_output and self.approved_files)
+        required_files = summary.get("required_files")
+        if not isinstance(required_files, list) or not required_files:
+            return False
+        return any(
+            isinstance(path, str) and path not in self.approved_files
+            for path in required_files
+        )
 
     def _evaluate_required_failure(
         self,
