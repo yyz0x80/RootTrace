@@ -179,6 +179,76 @@ def test_normalize_issue_preserves_explicit_test_patch_requirement():
     assert result.artifact_requirements[0].kind == "target_test_change"
 
 
+def test_normalize_issue_repairs_acceptance_kind_on_execution_constraint():
+    """Infer a valid constraint kind when the model uses an AC kind."""
+    issue = RawIssue(
+        title="Add description",
+        body="Add a description without modifying tests.",
+        source="test",
+    )
+    call_count = 0
+
+    def mock_generate(prompt: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        return """{
+  "title": "Add description",
+  "task_type": "feature",
+  "problem_statement": "Tasks need descriptions.",
+  "acceptance_criteria": [],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "Do not modify tests.",
+      "kind": "preservation"
+    }
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert call_count == 1
+    assert result.constraints[0].kind == "WRITE_SCOPE"
+    assert result.constraints[0].description == "Do not modify tests."
+
+
+def test_normalize_issue_moves_misplaced_preservation_constraint_to_ac():
+    """Move a product preservation requirement out of constraints."""
+    issue = RawIssue(
+        title="Add description",
+        body="Add a description while preserving task titles.",
+        source="test",
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Add description",
+  "task_type": "feature",
+  "problem_statement": "Tasks need descriptions.",
+  "acceptance_criteria": [],
+  "constraints": [
+    {
+      "id": "C-1",
+      "description": "Existing task titles remain unchanged.",
+      "kind": "preservation"
+    }
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.constraints == []
+    assert len(result.acceptance_criteria) == 1
+    assert result.acceptance_criteria[0].id == "AC-1"
+    assert result.acceptance_criteria[0].kind == "preservation"
+
+
 def test_normalize_issue_handles_markdown_response():
     """Test normalize_issue when LLM returns markdown-wrapped JSON."""
     issue = RawIssue(

@@ -97,6 +97,9 @@ _TEST_TERMS = ("test", "tests", "pytest", "coverage", "assertion", "assertions")
 _VERIFICATION_TERMS = ("verify", "verifies", "verified", "cover", "covers", "exercise")
 _PATCH_DELIVERY_TERMS = ("in the patch", "in the pr", "in the commit", "must include")
 
+_CONSTRAINT_KINDS = {"READ_SCOPE", "WRITE_SCOPE", "COMMAND", "NETWORK", "OTHER"}
+_CRITERION_KINDS = {"behavior", "preservation", "structural"}
+
 
 _EXECUTION_BOUNDARY_MARKERS = (
     "do not access",
@@ -364,39 +367,57 @@ def _repair_description_lists(data: dict) -> dict:
             normalized_values.append(value)
         repaired[field_name] = normalized_values
 
-    # Handle constraints field separately for backward compatibility
-    if "constraints" in repaired:
-        constraints = repaired["constraints"]
-        if isinstance(constraints, list):
-            # If constraints are strings, migrate them to TaskConstraint objects
-            if all(isinstance(c, str) for c in constraints):
-                repaired["constraints"] = [
+    constraints = repaired.get("constraints")
+    if isinstance(constraints, list):
+        normalized_constraints = []
+        misplaced_criteria = []
+        for index, value in enumerate(constraints, start=1):
+            if isinstance(value, str):
+                normalized_constraints.append(
                     {
-                        "id": f"C-{i+1}",
-                        "description": c,
-                        "kind": _infer_constraint_kind(c),
+                        "id": f"C-{index}",
+                        "description": value,
+                        "kind": _infer_constraint_kind(value),
                     }
-                    for i, c in enumerate(constraints)
-                ]
-            # If constraints are already objects, ensure they have required fields
-            elif all(isinstance(c, dict) for c in constraints):
-                normalized_constraints = []
-                for i, c in enumerate(constraints, start=1):
-                    if isinstance(c, str):
-                        # Handle mixed string/object constraints
-                        normalized_constraints.append({
-                            "id": f"C-{i}",
-                            "description": c,
-                            "kind": _infer_constraint_kind(c),
-                        })
-                    elif isinstance(c, dict):
-                        # Ensure ID and kind are present
-                        if "id" not in c:
-                            c["id"] = f"C-{i}"
-                        if "kind" not in c:
-                            c["kind"] = _infer_constraint_kind(c.get("description", ""))
-                        normalized_constraints.append(c)
-                repaired["constraints"] = normalized_constraints
+                )
+                continue
+
+            if not isinstance(value, dict):
+                normalized_constraints.append(value)
+                continue
+
+            constraint = dict(value)
+            description = constraint.get("description", "")
+            kind = constraint.get("kind")
+            if (
+                kind in _CRITERION_KINDS
+                and isinstance(description, str)
+                and not _is_execution_constraint(description)
+            ):
+                misplaced_criteria.append(
+                    {
+                        "id": f"AC-MIGRATED-{index}",
+                        "description": description,
+                        "kind": kind,
+                        "required": constraint.get("required", True),
+                    }
+                )
+                continue
+
+            constraint.setdefault("id", f"C-{index}")
+            if kind not in _CONSTRAINT_KINDS:
+                constraint["kind"] = _infer_constraint_kind(
+                    description if isinstance(description, str) else ""
+                )
+            normalized_constraints.append(constraint)
+
+        repaired["constraints"] = normalized_constraints
+        acceptance_criteria = repaired.get("acceptance_criteria", [])
+        if misplaced_criteria and isinstance(acceptance_criteria, list):
+            repaired["acceptance_criteria"] = [
+                *acceptance_criteria,
+                *misplaced_criteria,
+            ]
 
     return repaired
 
