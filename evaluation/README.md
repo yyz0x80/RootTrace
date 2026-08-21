@@ -195,12 +195,12 @@ Each evaluation run writes the following automatic metrics to
 
 ### New separated metrics (schema 2.0)
 
-- `functional_correctness_rate`: Rate of tasks with passing hidden tests (functional correctness)
+- `functional_correctness_rate`: Rate of execute tasks expected to produce a verified or partially verified patch that pass all applicable functional checks
 - `outcome_accuracy_rate`: Rate of tasks where actual_status matches expected_status
-- `false_verified_rate`: Rate of tasks that reported VERIFIED but failed functional checks
-- `patch_applicability_rate`: Rate of tasks where patches applied successfully
-- `scope_compliance_rate`: Rate of tasks where patches only changed allowed files
-- `public_tests_pass_rate`: Rate of tasks where declared public tests passed
+- `false_verified_rate`: Rate of tasks that failed functional checks among tasks that actually reported VERIFIED
+- `patch_applicability_rate`: Rate of patch-required tasks where patches applied successfully
+- `scope_compliance_rate`: Rate of applied patches that only changed allowed files
+- `public_tests_pass_rate`: Rate of execute tasks with declared public tests where those tests passed
 - `independent_regression_safety_rate`: Rate of tasks whose independent baseline-to-post-patch regression comparison is safe
 - `partial_verification_rate`: Rate of verifier reports with incomplete deterministic coverage
 - `failed_verification_rate`: Rate of verifier reports with a canonical FAILED status
@@ -211,10 +211,10 @@ Each evaluation run writes the following automatic metrics to
 - `average_added_lines`: Average number of lines added per task (when applicable)
 - `average_deleted_lines`: Average number of lines deleted per task (when applicable)
 
-### Legacy metrics (for backward compatibility)
+### Diagnostic metrics
 
-- expected outcome match, verified task, verifier pass, acceptance criteria
-  coverage, regression pass, retry recovery, and unsafe action block rates;
+- verifier pass, partial verification, failed verification, acceptance criteria
+  coverage, retry recovery, and unsafe action block rates;
 - average execute duration;
 - average LLM call count and prompt, completion, and total token usage.
 
@@ -227,9 +227,7 @@ Cost is intentionally not calculated.
 ### Top-level aggregate fields
 
 - `average_functional_correctness`: Average functional correctness across all completed tasks
-- `average_outcome_accuracy`: Average outcome accuracy across all completed tasks
 - `schema_version`: "2.0" for new scoring schema
 
-The top-level average prioritizes functional correctness for patch-required tasks
-and outcome correctness for prepare-only/non-patch tasks, avoiding silent blending
-of hidden-test failure into half credit.
+Outcome accuracy is reported once as `metrics.outcome_accuracy_rate`; the
+duplicate top-level and legacy outcome fields are intentionally omitted.

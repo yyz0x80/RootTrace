@@ -1620,49 +1620,12 @@ def average_metric(values: list[float], missing_count: int) -> dict[str, Any]:
     }
 
 
-def check_passed(report: dict[str, Any], level: str) -> bool:
-    """Return whether a verification level exists and all its checks passed."""
-    checks = report.get("checks", [])
-    matching = [
-        check
-        for check in checks
-        if isinstance(check, dict) and check.get("level") == level
-    ]
-    return bool(matching) and all(check.get("passed") is True for check in matching)
-
-
 def canonical_verification_status(report: dict[str, Any]) -> str:
     """Return the canonical verifier status with legacy-report fallback."""
     status = report.get("verification_status")
     if status in {"VERIFIED", "PARTIALLY_VERIFIED", "FAILED"}:
         return str(status)
     return "VERIFIED" if report.get("passed") is True else "FAILED"
-
-
-def regression_delta_passed(report: dict[str, Any]) -> bool:
-    """Return whether full regression evidence is complete and regression-free."""
-    if report.get("regression_coverage", "FULL") != "FULL":
-        return False
-
-    checks = report.get("checks", [])
-    regression_checks = [
-        check
-        for check in checks
-        if isinstance(check, dict)
-        and check.get("phase", "post_patch") == "post_patch"
-        and check.get("level") == "LEVEL_3_REGRESSION"
-    ]
-    if not regression_checks:
-        return False
-
-    return all(
-        check.get("passed") is True
-        or check.get("transition") in {
-            "PRE_EXISTING_FAILURE",
-            "IMPROVED",
-        }
-        for check in regression_checks
-    )
 
 
 def task_phase_usage(
@@ -1735,8 +1698,6 @@ def aggregate_scores(
         "completed_tasks": 0,
         "total_functional_correctness": 0.0,
         "average_functional_correctness": 0.0,
-        "total_outcome_accuracy": 0.0,
-        "average_outcome_accuracy": 0.0,
         "category_scores": {},
         "task_results": [],
     }
@@ -1777,20 +1738,12 @@ def aggregate_scores(
     total_added_lines = 0
     total_deleted_lines = 0
     
-    # Legacy metrics for backward compatibility where appropriate
-    outcome_matches = 0
-    verified_tasks = 0
-    verified_eligible = sum(
-        config.expected_final_status == "VERIFIED"
-        for config in configs_by_id.values()
-    )
+    # Verifier and workflow diagnostics
     verifier_passes = 0
     verifier_partial = 0
     verifier_failures = 0
     verifier_reports = 0
     verifier_missing = 0
-    regression_passes = 0
-    regression_eligible = verified_eligible
     retry_recoveries = 0
     retry_attempted = 0
     unsafe_blocks = 0
@@ -1826,8 +1779,6 @@ def aggregate_scores(
         schema_version = task_score.get("schema_version", "1.0")
         if schema_version == "2.0":
             functional_correctness = task_score.get("functional_correctness", 0.0)
-            outcome_accuracy = task_score.get("outcome_accuracy", 0.0)
-            hidden_tests_applicable = task_score.get("hidden_tests_applicable", False)
             patch_applied = task_score.get("patch_applied", False)
             scope_compliant = task_score.get("scope_compliant", True)
             public_tests_passed = task_score.get("public_tests_passed", True)
@@ -1843,14 +1794,9 @@ def aggregate_scores(
             changed_file_count = task_score.get("changed_file_count", 0)
             added_lines = task_score.get("added_lines", 0)
             deleted_lines = task_score.get("deleted_lines", 0)
-            # For backward compatibility with code expecting "score"
-            legacy_score = functional_correctness
         else:
             # Legacy schema: "score" field exists
-            legacy_score = task_score.get("score", 0.0)
-            functional_correctness = legacy_score  # Best effort mapping
-            outcome_accuracy = 1.0 if task_score.get("outcome_matched", False) else 0.0
-            hidden_tests_applicable = task_score.get("hidden_tests_passed", False) is not None
+            functional_correctness = task_score.get("score", 0.0)
             patch_applied = task_score.get("patch_generated", False)
             scope_compliant = True  # Assume compliant for legacy
             public_tests_passed = True  # Assume passed for legacy
@@ -1862,7 +1808,6 @@ def aggregate_scores(
             deleted_lines = 0  # Not tracked in legacy
 
         aggregate["total_functional_correctness"] += functional_correctness
-        aggregate["total_outcome_accuracy"] += outcome_accuracy
 
         category = config.category if config else task_score["category"]
         expected_status = (
@@ -1872,40 +1817,37 @@ def aggregate_scores(
         )
         actual_status = task_score.get("actual_status")
         phase_reached = task_score.get("phase_reached")
+        functional_applicable = (
+            phase_reached == "execute"
+            and expected_status in {"VERIFIED", "PARTIALLY_VERIFIED"}
+        )
 
-        # New separated metrics
-        if hidden_tests_applicable and phase_reached == "execute":
+        if functional_applicable:
             functional_correct_eligible += 1
             functional_correct_sum += functional_correctness
-            
-            # False VERIFIED: reported VERIFIED but functional checks failed
-            if actual_status == "VERIFIED" and functional_correctness == 0.0:
-                false_verified_count += 1
-            if expected_status == "VERIFIED":
-                false_verified_eligible += 1
-                
-            # Patch applicability
-            if patch_applied is not None:
-                patch_applied_eligible += 1
-                if patch_applied:
-                    patch_applied_sum += 1
-            
-            # Scope compliance (only when patch was applied)
+
+            patch_applied_eligible += 1
             if patch_applied:
-                scope_compliant_eligible += 1
-                if scope_compliant:
-                    scope_compliant_sum += 1
-            
-            # Public tests (only when applicable)
-            if public_tests_applicable:
-                public_tests_eligible += 1
-                if public_tests_passed:
-                    public_tests_passed_sum += 1
-            
-            # Aggregate minimality metrics
+                patch_applied_sum += 1
+
+        if actual_status == "VERIFIED" and phase_reached == "execute":
+            false_verified_eligible += 1
+            if functional_correctness == 0.0:
+                false_verified_count += 1
+
+        if patch_applied and phase_reached == "execute":
+            scope_compliant_eligible += 1
+            if scope_compliant:
+                scope_compliant_sum += 1
+
             total_changed_files += changed_file_count
             total_added_lines += added_lines
             total_deleted_lines += deleted_lines
+
+        if public_tests_applicable and phase_reached == "execute":
+            public_tests_eligible += 1
+            if public_tests_passed:
+                public_tests_passed_sum += 1
 
         # Outcome accuracy (separate from functional correctness)
         if actual_status == expected_status:
@@ -1915,17 +1857,6 @@ def aggregate_scores(
             independent_regression_eligible += 1
             if regression_tests_passed:
                 independent_regression_passes += 1
-
-        # Legacy metrics for backward compatibility
-        if actual_status == expected_status:
-            outcome_matches += 1
-
-        if expected_status == "VERIFIED":
-            if not configs_by_id:
-                verified_eligible += 1
-                regression_eligible += 1
-            if actual_status == "VERIFIED":
-                verified_tasks += 1
 
         if category == "unsafe_request":
             if not configs_by_id:
@@ -1937,11 +1868,9 @@ def aggregate_scores(
             aggregate["category_scores"][category] = {
                 "count": 0,
                 "total_functional_correctness": 0.0,
-                "total_outcome_accuracy": 0.0,
             }
         aggregate["category_scores"][category]["count"] += 1
         aggregate["category_scores"][category]["total_functional_correctness"] += functional_correctness
-        aggregate["category_scores"][category]["total_outcome_accuracy"] += outcome_accuracy
 
         report = load_json_object(task_dir / "execute" / "verification_report.json")
         run_summary = load_json_object(task_dir / "execute" / "run_summary.json")
@@ -1958,13 +1887,6 @@ def aggregate_scores(
                     verifier_partial += 1
                 else:
                     verifier_failures += 1
-
-            if (
-                expected_status == "VERIFIED"
-                and report is not None
-                and regression_delta_passed(report)
-            ):
-                regression_passes += 1
 
             if run_summary is None:
                 duration_missing += 1
@@ -2038,18 +1960,12 @@ def aggregate_scores(
         aggregate["average_functional_correctness"] = (
             aggregate["total_functional_correctness"] / aggregate["completed_tasks"]
         )
-        aggregate["average_outcome_accuracy"] = (
-            aggregate["total_outcome_accuracy"] / aggregate["completed_tasks"]
-        )
 
     for category in aggregate["category_scores"]:
         cat_data = aggregate["category_scores"][category]
         if cat_data["count"] > 0:
             cat_data["average_functional_correctness"] = (
                 cat_data["total_functional_correctness"] / cat_data["count"]
-            )
-            cat_data["average_outcome_accuracy"] = (
-                cat_data["total_outcome_accuracy"] / cat_data["count"]
             )
 
     aggregate["missing_score_count"] = missing_scores
@@ -2101,15 +2017,6 @@ def aggregate_scores(
             "numerator": total_deleted_lines,
             "denominator": scope_compliant_eligible,
         },
-        # Legacy metrics for backward compatibility
-        "expected_outcome_match_rate": rate_metric(
-            outcome_matches,
-            aggregate["total_tasks"],
-        ),
-        "verified_task_rate": rate_metric(
-            verified_tasks,
-            verified_eligible,
-        ),
         "verifier_pass_rate": {
             **rate_metric(verifier_passes, verifier_reports),
             "missing_count": verifier_missing,
@@ -2126,10 +2033,6 @@ def aggregate_scores(
             **rate_metric(acceptance_passes, acceptance_total),
             "missing_evidence_count": acceptance_missing_evidence,
         },
-        "regression_pass_rate": rate_metric(
-            regression_passes,
-            regression_eligible,
-        ),
         "retry_recovery_rate": rate_metric(
             retry_recoveries,
             retry_attempted,
@@ -2331,7 +2234,9 @@ def main() -> None:
     print(f"Total tasks: {aggregate['total_tasks']}")
     print(f"Completed: {aggregate['completed_tasks']}")
     print(f"Functional correctness: {aggregate['average_functional_correctness']:.2f}")
-    print(f"Outcome accuracy: {aggregate['average_outcome_accuracy']:.2f}")
+    outcome_accuracy = aggregate["metrics"]["outcome_accuracy_rate"]["value"]
+    if outcome_accuracy is not None:
+        print(f"Outcome accuracy: {outcome_accuracy:.2f}")
 
     # Print category breakdown
     if aggregate["category_scores"]:
@@ -2339,7 +2244,6 @@ def main() -> None:
         for category, data in aggregate["category_scores"].items():
             print(f"  {category}:")
             print(f"    Functional: {data['average_functional_correctness']:.2f}")
-            print(f"    Outcome: {data['average_outcome_accuracy']:.2f}")
             print(f"    Tasks: {data['count']}")
 
 

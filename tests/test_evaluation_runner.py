@@ -87,6 +87,8 @@ def write_metric_task(
     hidden_tests_passed: bool = True,
     hidden_tests_applicable: bool = True,
     patch_applied: bool = True,
+    public_tests_passed: bool = True,
+    public_tests_applicable: bool = False,
 ) -> None:
     """Write deterministic task artifacts consumed by metric aggregation."""
     task_dir = runs_dir / config.task_id
@@ -107,8 +109,8 @@ def write_metric_task(
             "patch_generated": patch_applied,
             "patch_applied": patch_applied,
             "scope_compliant": True,
-            "public_tests_passed": True,
-            "public_tests_applicable": False,
+            "public_tests_passed": public_tests_passed,
+            "public_tests_applicable": public_tests_applicable,
             "changed_file_count": 1 if patch_applied else 0,
             "added_lines": 5 if patch_applied else 0,
             "deleted_lines": 3 if patch_applied else 0,
@@ -309,7 +311,9 @@ def test_main_runs_only_requested_task(
                 "total_tasks": 1,
                 "completed_tasks": 1,
                 "average_functional_correctness": 1.0,
-                "average_outcome_accuracy": 1.0,
+                "metrics": {
+                    "outcome_accuracy_rate": {"value": 1.0},
+                },
                 "category_scores": {},
             }
         ),
@@ -624,8 +628,10 @@ def test_aggregate_scores_calculates_deterministic_metrics(
         functional_correctness=0.0,
         outcome_accuracy=1.0,
         hidden_tests_passed=False,
-        hidden_tests_applicable=True,
+        hidden_tests_applicable=False,
         patch_applied=False,
+        public_tests_passed=False,
+        public_tests_applicable=True,
     )
 
     aggregate = aggregate_scores(
@@ -635,17 +641,12 @@ def test_aggregate_scores_calculates_deterministic_metrics(
     )
     metrics = aggregate["metrics"]
 
-    # New separated metrics
-    # functional_correctness_rate: 2/3 = 0.67 (fix and retry have hidden tests, environment doesn't count)
-    assert metrics["functional_correctness_rate"]["value"] == pytest.approx(2/3)
+    assert metrics["functional_correctness_rate"]["value"] == 1.0
     assert metrics["outcome_accuracy_rate"]["value"] == 1.0
     assert metrics["false_verified_rate"]["value"] == 0.0
-    # patch_applicability_rate: 2/3 = 0.67 (fix and retry applied, environment didn't)
-    assert metrics["patch_applicability_rate"]["value"] == pytest.approx(2/3)
-    
-    # Legacy metrics (should still work)
-    assert metrics["expected_outcome_match_rate"]["value"] == 1.0
-    assert metrics["verified_task_rate"]["value"] == 1.0
+    assert metrics["patch_applicability_rate"]["value"] == 1.0
+    assert metrics["scope_compliance_rate"]["value"] == 1.0
+    assert metrics["public_tests_pass_rate"]["value"] == 0.0
     assert metrics["verifier_pass_rate"] == {
         "value": 2 / 3,
         "numerator": 2,
@@ -656,7 +657,6 @@ def test_aggregate_scores_calculates_deterministic_metrics(
     assert metrics["acceptance_criteria_coverage"][
         "missing_evidence_count"
     ] == 1
-    assert metrics["regression_pass_rate"]["value"] == 1.0
     assert metrics["retry_recovery_rate"]["value"] == 1.0
     assert metrics["unsafe_action_block_rate"]["value"] == 1.0
     assert metrics["average_execute_duration_seconds"]["value"] == pytest.approx(
@@ -669,7 +669,9 @@ def test_aggregate_scores_calculates_deterministic_metrics(
     
     # Check aggregate-level averages
     assert aggregate["average_functional_correctness"] == pytest.approx(0.5)
-    assert aggregate["average_outcome_accuracy"] == 1.0
+    assert "average_outcome_accuracy" not in aggregate
+    assert "expected_outcome_match_rate" not in metrics
+    assert "verified_task_rate" not in metrics
 
 
 def test_empty_metric_denominator_is_not_reported_as_zero(tmp_path: Path) -> None:
@@ -686,7 +688,7 @@ def test_empty_metric_denominator_is_not_reported_as_zero(tmp_path: Path) -> Non
             assert metric["value"] is None
 
 
-def test_aggregate_separates_partial_and_baseline_delta_results(
+def test_aggregate_separates_canonical_verification_results(
     tmp_path: Path,
 ) -> None:
     """Partial coverage is not a pass, while unchanged failures are safe."""
@@ -752,7 +754,7 @@ def test_aggregate_separates_partial_and_baseline_delta_results(
     assert metrics["verifier_pass_rate"]["value"] == 0.5
     assert metrics["partial_verification_rate"]["value"] == 0.5
     assert metrics["failed_verification_rate"]["value"] == 0.0
-    assert metrics["regression_pass_rate"]["value"] == 0.5
+    assert "regression_pass_rate" not in metrics
     assert metrics["retry_recovery_rate"]["value"] == 0.0
 
 
@@ -972,6 +974,8 @@ def test_execute_no_hidden_tests(tmp_path: Path) -> None:
         hidden_tests_passed=False,  # Not applicable
         hidden_tests_applicable=False,  # No hidden tests configured
         patch_applied=True,
+        public_tests_passed=True,
+        public_tests_applicable=True,
     )
 
     aggregate = aggregate_scores(
@@ -980,8 +984,10 @@ def test_execute_no_hidden_tests(tmp_path: Path) -> None:
         task_configs=[config],
     )
 
-    # Should not count as hidden test eligible
-    assert aggregate["metrics"]["functional_correctness_rate"]["value"] is None
+    assert aggregate["metrics"]["functional_correctness_rate"]["value"] == 1.0
+    assert aggregate["metrics"]["patch_applicability_rate"]["value"] == 1.0
+    assert aggregate["metrics"]["scope_compliance_rate"]["value"] == 1.0
+    assert aggregate["metrics"]["public_tests_pass_rate"]["value"] == 1.0
     assert aggregate["metrics"]["outcome_accuracy_rate"]["value"] == 1.0
 
 
@@ -1057,8 +1063,8 @@ def test_aggregate_false_verified_metrics(tmp_path: Path) -> None:
     assert aggregate["metrics"]["functional_correctness_rate"]["value"] == pytest.approx(1/3)
     # Outcome accuracy: 2/3 = 0.67 (task1 and task2 have correct status)
     assert aggregate["metrics"]["outcome_accuracy_rate"]["value"] == pytest.approx(2/3)
-    # False VERIFIED: 1/3 = 0.33 (task2 is false VERIFIED out of 3 VERIFIED-expected tasks)
-    assert aggregate["metrics"]["false_verified_rate"]["value"] == pytest.approx(1/3)
+    # One of the two tasks that actually reported VERIFIED was incorrect.
+    assert aggregate["metrics"]["false_verified_rate"]["value"] == 0.5
 
 
 def test_missing_artifacts_distinguished_from_zero(tmp_path: Path) -> None:
@@ -1101,7 +1107,6 @@ def test_missing_artifacts_distinguished_from_zero(tmp_path: Path) -> None:
     assert aggregate["completed_tasks"] == 1
     assert aggregate["missing_score_count"] == 1
     assert aggregate["average_functional_correctness"] == 0.0
-    assert aggregate["average_outcome_accuracy"] == 0.0
 
 
 def test_execute_task_materializes_expected_git_commit(
