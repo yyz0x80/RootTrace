@@ -680,7 +680,7 @@ def test_post_process_plan_requires_new_file_for_test_artifact() -> None:
         artifact_requirements=[
             ArtifactRequirement(
                 kind="target_test_change",
-                description="Update tests to verify the behavior.",
+                description="The patch must include tests for the behavior.",
             )
         ],
     )

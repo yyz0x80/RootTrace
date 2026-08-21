@@ -179,8 +179,8 @@ def test_normalize_issue_preserves_explicit_test_patch_requirement():
     assert result.artifact_requirements[0].kind == "target_test_change"
 
 
-def test_normalize_issue_recovers_update_tests_as_artifact_requirement():
-    """Treat an explicit request to update tests as a patch deliverable."""
+def test_normalize_issue_keeps_update_tests_as_verification_requirement():
+    """Allow ordinary test requests to use non-patch scratch verification."""
     issue = RawIssue(
         title="Add description",
         body="Update tests to verify the description field works correctly.",
@@ -208,8 +208,43 @@ def test_normalize_issue_recovers_update_tests_as_artifact_requirement():
     assert result.verification_requirements == [
         "Update tests to verify the description field works correctly"
     ]
-    assert len(result.artifact_requirements) == 1
-    assert result.artifact_requirements[0].kind == "target_test_change"
+    assert result.artifact_requirements == []
+
+
+def test_normalize_issue_demotes_inferred_test_artifact_without_patch_language():
+    """Correct a model that overstates an ordinary test verification request."""
+    issue = RawIssue(
+        title="Add description",
+        body="Update tests to verify the description field works correctly.",
+        source="test",
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Add description",
+  "task_type": "feature",
+  "problem_statement": "Tasks need descriptions.",
+  "acceptance_criteria": [],
+  "constraints": [],
+  "verification_requirements": [],
+  "artifact_requirements": [
+    {
+      "kind": "target_test_change",
+      "description": "Update tests to verify the description field",
+      "required": true
+    }
+  ],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.artifact_requirements == []
+    assert result.verification_requirements == [
+        "Update tests to verify the description field"
+    ]
 
 
 def test_normalize_issue_repairs_acceptance_kind_on_execution_constraint():

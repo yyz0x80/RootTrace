@@ -95,19 +95,13 @@ _DESCRIPTION_LIST_FIELDS = (
 
 _TEST_TERMS = ("test", "tests", "pytest", "coverage", "assertion", "assertions")
 _VERIFICATION_TERMS = ("verify", "verifies", "verified", "cover", "covers", "exercise")
-_PATCH_DELIVERY_TERMS = ("in the patch", "in the pr", "in the commit", "must include")
-_TEST_ARTIFACT_ACTION_TERMS = (
-    "add a test",
-    "add test",
-    "add tests",
-    "create a test",
-    "create test",
-    "create tests",
-    "update test",
-    "update tests",
-    "write a test",
-    "write test",
-    "write tests",
+_PATCH_DELIVERY_TERMS = (
+    "in the patch",
+    "in the pr",
+    "in the commit",
+    "patch must include",
+    "pr must include",
+    "commit must include",
 )
 
 _CONSTRAINT_KINDS = {"READ_SCOPE", "WRITE_SCOPE", "COMMAND", "NETWORK", "OTHER"}
@@ -264,8 +258,7 @@ def _requires_test_artifact(description: str) -> bool:
     """Return whether the text explicitly requires tests in the final patch."""
     normalized = " ".join(description.lower().split())
     return any(term in normalized for term in _TEST_TERMS) and any(
-        term in normalized
-        for term in (*_PATCH_DELIVERY_TERMS, *_TEST_ARTIFACT_ACTION_TERMS)
+        term in normalized for term in _PATCH_DELIVERY_TERMS
     )
 
 
@@ -278,7 +271,17 @@ def _separate_execution_constraints(
         c.description for c in issue.constraints
     ]
     verification_requirements = list(issue.verification_requirements)
-    artifact_requirements = list(issue.artifact_requirements)
+    artifact_requirements = []
+
+    for artifact in issue.artifact_requirements:
+        if (
+            artifact.kind == "target_test_change"
+            and not _requires_test_artifact(artifact.description)
+        ):
+            if artifact.description not in verification_requirements:
+                verification_requirements.append(artifact.description)
+            continue
+        artifact_requirements.append(artifact)
 
     for requirement in verification_requirements:
         if _requires_test_artifact(requirement) and not any(
