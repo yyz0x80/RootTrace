@@ -115,6 +115,7 @@ DEFAULT_IGNORE_PATTERNS = [
     ".pytest_cache/",
     ".ruff_cache/",
     ".mypy_cache/",
+    ".patchpilot_checks/",
     # macOS files
     ".DS_Store",
     ".AppleDouble",
@@ -675,6 +676,15 @@ class WorkflowRunner:
 
         # Step 5: Update agent loop tools to use temporary workspace
         self.agent_loop.update_workspace(self.workspace)
+        allowed_new_tests = set()
+        if change_plan is not None and change_plan.allow_new_test_files:
+            allowed_new_tests = {
+                change.path
+                for change in change_plan.planned_changes
+                if change.action.value == "create"
+                and not (workspace_path / change.path).exists()
+            }
+        self.agent_loop.configure_test_writes(allowed_new_tests)
 
         # Set up execute log callback for structured logging
         execute_callback = WorkflowExecuteLogCallback(trace_writer, run_id)
@@ -779,7 +789,16 @@ class WorkflowRunner:
 
             # Step 8: Coding Agent initial modification
             logger.info("Running coding agent for initial implementation")
-            initial_prompt = f"Implement the following plan:\n\n{plan}"
+            initial_prompt = (
+                "Implement the approved plan against the complete acceptance "
+                "requirements below.\n\n"
+                "<acceptance_requirements>\n"
+                f"{normalized_issue.model_dump_json(indent=2)}\n"
+                "</acceptance_requirements>\n\n"
+                "<approved_plan>\n"
+                f"{plan}\n"
+                "</approved_plan>"
+            )
             try:
                 self.agent_loop.run(
                     issue=initial_prompt,

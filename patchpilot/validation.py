@@ -9,8 +9,8 @@ agent execution to catch errors early, including:
 
 from __future__ import annotations
 
+import ast
 import logging
-import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,15 +27,6 @@ class SyntaxValidationError(ValidationError):
 def _display_path(file_path: Path, display_path: str | None) -> str:
     """Return a safe path for logs and model-facing validation errors."""
     return display_path or file_path.name
-
-
-def _replace_absolute_path(
-    message: str,
-    file_path: Path,
-    display_path: str,
-) -> str:
-    """Replace an internal absolute path with a workspace-relative path."""
-    return message.replace(str(file_path), display_path)
 
 
 def validate_python_syntax(
@@ -61,35 +52,22 @@ def validate_python_syntax(
         # Non-Python files are considered valid for syntax checking
         return True, ""
 
+    safe_path = _display_path(file_path, display_path)
     try:
-        result = subprocess.run(
-            ["python", "-m", "py_compile", str(file_path)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-
-        if result.returncode != 0:
-            safe_path = _display_path(file_path, display_path)
-            error_msg = _replace_absolute_path(
-                result.stderr or result.stdout,
-                file_path,
-                safe_path,
-            )
-            logger.warning(
-                "Syntax validation failed for %s: %s",
-                safe_path,
-                error_msg,
-            )
-            return False, f"Syntax error: {error_msg}"
-
+        source = file_path.read_text(encoding="utf-8")
+        ast.parse(source, filename=safe_path)
         return True, ""
-
-    except subprocess.TimeoutExpired:
-        return False, "Syntax validation timed out"
-    except (OSError, subprocess.SubprocessError) as e:
-        return False, f"Validation error: {e}"
+    except SyntaxError as error:
+        location = f"{safe_path}:{error.lineno or 0}:{error.offset or 0}"
+        error_msg = f"{location}: {error.msg}"
+        logger.warning(
+            "Syntax validation failed for %s: %s",
+            safe_path,
+            error_msg,
+        )
+        return False, f"Syntax error: {error_msg}"
+    except (OSError, UnicodeError) as error:
+        return False, f"Validation error: {error}"
 
 
 def validate_file_integrity(

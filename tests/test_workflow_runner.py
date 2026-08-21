@@ -171,6 +171,10 @@ class TestWorkflowRunnerExecute:
         assert result.verification_report["passed"] is True
         assert mock_agent_loop.run.call_count == 1
         assert mock_verifier.call_count == 1
+        initial_issue = mock_agent_loop.run.call_args.kwargs["issue"]
+        assert "<acceptance_requirements>" in initial_issue
+        assert "Fix the bug" in initial_issue
+        assert "<approved_plan>" in initial_issue
 
     def test_execute_with_repair_success(self):
         """Test execution that requires one repair attempt."""
@@ -2106,3 +2110,4 @@ class TestWorkflowRunnerExitCodes:
         # BLOCKED should result in exit code 1
         assert summary.exit_code == 1
         assert summary.final_status == "BLOCKED"
+        assert summary.failure_type == "SCOPE_VIOLATION"

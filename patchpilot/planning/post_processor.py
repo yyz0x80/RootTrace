@@ -3,7 +3,7 @@
 This module enforces security and validation rules programmatically rather than
 relying on LLM compliance with prompt instructions. It implements:
 
-1. Automatic test file migration from planned_changes to planned_tests
+1. Three-layer test artifact authorization
 2. Pytest target existence and test file validation
 3. Merging of multiple planned changes for the same file
 4. NEEDS_CLARIFICATION detection for non-empty ambiguous_points
@@ -132,6 +132,102 @@ def _migrate_test_files_to_tests(plan: ChangePlan) -> ChangePlan:
         update={
             "planned_changes": source_changes,
             "planned_tests": test_commands,
+        }
+    )
+
+
+def _compile_test_artifact_policy(
+    plan: ChangePlan,
+    issue: NormalizedIssue,
+    repository_context: RepositoryContext,
+) -> ChangePlan:
+    """Authorize only new test files required as explicit patch artifacts."""
+    allow_new_tests = any(
+        requirement.required and requirement.kind == "target_test_change"
+        for requirement in issue.artifact_requirements
+    )
+    tracked_files = set(repository_context.tracked_files)
+    source_changes: list[PlannedChange] = []
+    planned_tests = list(plan.planned_tests)
+    warnings = list(plan.validation_warnings)
+
+    for change in plan.planned_changes:
+        if not _is_test_file(change.path):
+            source_changes.append(change)
+            continue
+
+        if (
+            allow_new_tests
+            and change.action.value == "create"
+            and change.path not in tracked_files
+        ):
+            source_changes.append(change)
+            if not any(change.path in test.command for test in planned_tests):
+                planned_tests.append(
+                    PlannedTest(
+                        command=f"pytest {change.path} -q",
+                        purpose=f"Run the explicitly required new test: {change.path}",
+                        acceptance_criteria=change.acceptance_criteria,
+                        criterion_ids=change.criterion_ids,
+                    )
+                )
+            continue
+
+        warnings.append(
+            f"Removed forbidden existing or unrequested test change: {change.path}"
+        )
+        if not any(change.path in test.command for test in planned_tests):
+            planned_tests.append(
+                PlannedTest(
+                    command=f"pytest {change.path} -q",
+                    purpose=f"Run the existing immutable test: {change.path}",
+                    acceptance_criteria=change.acceptance_criteria,
+                    criterion_ids=change.criterion_ids,
+                )
+            )
+
+    if allow_new_tests and not any(
+        _is_test_file(change.path) and change.action.value == "create"
+        for change in source_changes
+    ):
+        raise PlanPostProcessError(
+            "A required target_test_change artifact must create one new test "
+            "file; existing repository tests remain immutable"
+        )
+
+    return plan.model_copy(
+        update={
+            "planned_changes": source_changes,
+            "planned_tests": planned_tests,
+            "allow_new_test_files": allow_new_tests,
+            "validation_warnings": list(dict.fromkeys(warnings)),
+        }
+    )
+
+
+def _downgrade_unverified_already_satisfied(plan: ChangePlan) -> ChangePlan:
+    """Require implementation when baseline satisfaction is not deterministic."""
+    criterion_plans = []
+    warnings = list(plan.validation_warnings)
+
+    for criterion_plan in plan.criterion_plans:
+        if criterion_plan.disposition == CriterionPlanDetail.ALREADY_SATISFIED:
+            criterion_plans.append(
+                criterion_plan.model_copy(
+                    update={"disposition": CriterionPlanDetail.TO_IMPLEMENT}
+                )
+            )
+            warnings.append(
+                "Downgraded unverified already_satisfied criterion "
+                f"{criterion_plan.criterion_id} to to_implement"
+            )
+        else:
+            criterion_plans.append(criterion_plan)
+
+    return plan.model_copy(
+        update={
+            "criterion_plans": criterion_plans,
+            "validation_warnings": list(dict.fromkeys(warnings)),
         }
     )
 
@@ -680,42 +776,35 @@ def post_process_plan(
     Raises:
         PlanPostProcessError: If post-processing fails with an unrecoverable error.
     """
-    unsupported_artifacts = [
-        requirement
-        for requirement in issue.artifact_requirements
-        if requirement.required and requirement.kind == "target_test_change"
-    ]
-    if unsupported_artifacts:
-        raise PlanPostProcessError(
-            "Required target-test changes conflict with the read-only test policy"
-        )
-
     # Step 1: Clean null baseline_evidence values
     plan = _clean_null_baseline_evidence(plan)
 
-    # Step 2: Migrate test files to planned_tests
-    plan = _migrate_test_files_to_tests(plan)
+    # Step 2: Compile the explicit three-layer test artifact policy.
+    plan = _compile_test_artifact_policy(plan, issue, repository_context)
 
-    # Step 3: Merge duplicate file changes
+    # Step 3: Do not let speculative baseline claims reduce implementation scope.
+    plan = _downgrade_unverified_already_satisfied(plan)
+
+    # Step 4: Merge duplicate file changes
     plan = _merge_duplicate_file_changes(plan)
 
-    # Step 4: Validate pytest targets
+    # Step 5: Validate pytest targets
     plan = _validate_pytest_targets(plan, repository_context)
 
-    # Step 5: Validate acceptance-check targets.
+    # Step 6: Validate acceptance-check targets.
     plan = _validate_acceptance_check_targets(plan, issue, repository_context)
 
-    # Step 6: Check for ambiguous points
+    # Step 7: Check for ambiguous points
     plan = _check_ambiguity(plan, issue)
 
-    # Step 7: Classify semantic ambiguities
+    # Step 8: Classify semantic ambiguities
     plan = _classify_ambiguities(plan, issue)
 
-    # Step 8: Validate criterion plans (skip if requested)
+    # Step 9: Validate criterion plans (skip if requested)
     if not skip_ac_validation:
         plan = _validate_criterion_plans(plan, issue)
 
-    # Step 9: Complete AC mapping validation (skip if requested)
+    # Step 10: Complete AC mapping validation (skip if requested)
     if not skip_ac_validation:
         plan = _complete_ac_mapping(plan, issue)
 

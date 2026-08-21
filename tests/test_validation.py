@@ -31,6 +31,7 @@ class TestValidatePythonSyntax:
         is_valid, error = validate_python_syntax(test_file)
         assert is_valid
         assert error == ""
+        assert not (temp_workspace / "__pycache__").exists()
 
     def test_invalid_python_syntax(self, temp_workspace):
         """Test validation of invalid Python file"""

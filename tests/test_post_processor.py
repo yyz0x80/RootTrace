@@ -629,9 +629,19 @@ def test_post_process_plan_with_ambiguity() -> None:
         post_process_plan(plan, issue, repository_context)
 
 
-def test_post_process_plan_blocks_required_test_artifact() -> None:
-    """Report a test deliverable that conflicts with read-only target tests."""
-    plan = ChangePlan(risk_level="low")
+def test_post_process_plan_authorizes_required_new_test_artifact() -> None:
+    """Authorize a new test file when the issue explicitly requires it."""
+    plan = ChangePlan(
+        risk_level="low",
+        relevant_files=["tests/test_new_behavior.py"],
+        planned_changes=[
+            PlannedChange(
+                path="tests/test_new_behavior.py",
+                action=ChangeAction.CREATE,
+                description="Add regression coverage",
+            )
+        ],
+    )
     issue = NormalizedIssue(
         title="Add tests",
         task_type="test",
@@ -652,8 +662,87 @@ def test_post_process_plan_blocks_required_test_artifact() -> None:
         keyword_matches=[],
     )
 
-    with pytest.raises(PlanPostProcessError, match="read-only test policy"):
-        post_process_plan(plan, issue, repository_context)
+    processed = post_process_plan(plan, issue, repository_context)
+
+    assert processed.allow_new_test_files
+    assert processed.planned_changes[0].path == "tests/test_new_behavior.py"
+    assert processed.planned_tests[0].command == (
+        "pytest tests/test_new_behavior.py -q"
+    )
+
+
+def test_post_process_plan_requires_new_file_for_test_artifact() -> None:
+    """Reject a required test deliverable when no new test is planned."""
+    issue = NormalizedIssue(
+        title="Add tests",
+        task_type="test",
+        problem_statement="Permanent regression coverage is required.",
+        artifact_requirements=[
+            ArtifactRequirement(
+                kind="target_test_change",
+                description="Update tests to verify the behavior.",
+            )
+        ],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["tests/test_existing.py"],
+        python_files=["tests/test_existing.py"],
+        test_files=["tests/test_existing.py"],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    with pytest.raises(PlanPostProcessError, match="must create one new test"):
+        post_process_plan(ChangePlan(risk_level="low"), issue, repository_context)
+
+
+def test_post_process_plan_downgrades_speculative_satisfaction() -> None:
+    """Require implementation when baseline evidence was only model asserted."""
+    plan = ChangePlan(
+        risk_level="low",
+        relevant_files=["src/service.py"],
+        planned_changes=[
+            PlannedChange(
+                path="src/service.py",
+                action=ChangeAction.MODIFY,
+                description="Propagate description",
+                criterion_ids=["AC-1"],
+            )
+        ],
+        criterion_plans=[
+            CriterionPlan(
+                criterion_id="AC-1",
+                disposition=CriterionPlanDetail.ALREADY_SATISFIED,
+                baseline_evidence="The field appears to exist.",
+            )
+        ],
+    )
+    issue = NormalizedIssue(
+        title="Require description",
+        task_type="feature",
+        problem_statement="Propagate a description value.",
+        acceptance_criteria=[
+            AcceptanceCriterion(id="AC-1", description="Description is propagated")
+        ],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=[],
+        python_files=[],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    processed = post_process_plan(plan, issue, repository_context)
+
+    assert processed.criterion_plans[0].disposition == (
+        CriterionPlanDetail.TO_IMPLEMENT
+    )
+    assert "Downgraded unverified already_satisfied" in (
+        processed.validation_warnings[0]
+    )
 
 
 def test_post_process_plan_drops_non_repository_probe_module() -> None:

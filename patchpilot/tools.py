@@ -11,9 +11,10 @@ Available tools:
 - read_file: Read file content with optional line ranges
 - edit_file: Edit files using exact text replacement
 - write_file: Write complete file content when exact replacement is unsuitable
+- write_scratch_test: Write an isolated, non-patch test for supplemental evidence
 - run_command: Execute allowed commands in the workspace
 
-The model-facing ACI intentionally exposes only two editing tools. Specialized
+The model-facing ACI exposes two patch-editing tools. Specialized
 line-based helpers remain available as Python methods for compatibility, but
 are not registered as model tools.
 
@@ -21,14 +22,16 @@ The tool system enforces security boundaries through input validation,
 output size limits, and workspace policy enforcement.
 """
 
+import ast
 import difflib
 import logging
+import re
 import shlex
 import subprocess
 import unicodedata
 from dataclasses import MISSING, dataclass, field, fields
 from fnmatch import fnmatch
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolFailureType, ToolResult
@@ -52,6 +55,7 @@ DEFAULT_IGNORE_PATTERNS = [
     ".pytest_cache/",
     ".ruff_cache/",
     ".mypy_cache/",
+    ".patchpilot_checks/",
     # macOS files
     ".DS_Store",
     ".AppleDouble",
@@ -473,6 +477,40 @@ class WriteFileInput(ToolInput):
 
 
 @dataclass
+class WriteScratchTestInput(ToolInput):
+    """Input for the isolated scratch-test writer."""
+
+    description: ClassVar[str] = (
+        "Write a temporary pytest file under .patchpilot_checks for behavior "
+        "that existing repository tests do not cover. Scratch tests are "
+        "supplemental verification only and are excluded from the final patch."
+    )
+    name: str = field(
+        metadata={
+            "description": (
+                "Short lowercase identifier using letters, numbers, and underscores."
+            )
+        }
+    )
+    content: str = field(
+        metadata={"description": "Complete Python pytest source for the scratch test."}
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise TypeError(f"name must be str, not {type(self.name).__name__}")
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name):
+            raise ValueError(
+                "name must start with a lowercase letter and contain only "
+                "lowercase letters, numbers, and underscores"
+            )
+        if not isinstance(self.content, str):
+            raise TypeError(f"content must be str, not {type(self.content).__name__}")
+        if not self.content.strip():
+            raise ValueError("content must not be empty")
+
+
+@dataclass
 class ToolDefinition:
     """Structured definition of a tool with schema"""
     name: str
@@ -616,6 +654,7 @@ class ToolRegistry:
         self.workspace = workspace
         self.policy_set = policy_set or get_builtin_policies()
         self.command_runner = command_runner
+        self._allowed_new_test_files: set[str] = set()
         # Dynamic tool registration storage
         self._tool_definitions: dict[str, ToolDefinition] = {}
         self._tool_handlers: dict[str, Any] = {}
@@ -665,6 +704,11 @@ class ToolRegistry:
             handler=self.write_file,
         )
         self.register_tool(
+            name="write_scratch_test",
+            input_class=WriteScratchTestInput,
+            handler=self.write_scratch_test,
+        )
+        self.register_tool(
             name="run_command",
             input_class=RunCommandInput,
             handler=self.run_command,
@@ -677,6 +721,35 @@ class ToolRegistry:
             workspace: New Workspace instance to use for path resolution
         """
         self.workspace = workspace
+
+    def configure_test_writes(self, allowed_new_files: set[str]) -> None:
+        """Set the plan-authorized new test files for the current run."""
+        self._allowed_new_test_files = {
+            str(PurePosixPath(path))
+            for path in allowed_new_files
+            if not self.workspace.resolve(path).exists()
+        }
+
+    @staticmethod
+    def _is_test_file(path: str) -> bool:
+        """Return whether a workspace-relative path is a Python test file."""
+        normalized = PurePosixPath(path)
+        return "tests" in normalized.parts or (
+            normalized.name.startswith("test_") and normalized.suffix == ".py"
+        )
+
+    def _assert_test_write_allowed(self, path: str) -> None:
+        """Protect existing tests while allowing approved new test artifacts."""
+        normalized = str(PurePosixPath(path))
+        if (
+            self._is_test_file(normalized)
+            and normalized not in self._allowed_new_test_files
+        ):
+            raise PermissionError(
+                "Modifying test files is not allowed: existing tests are immutable. "
+                "Only a new test file explicitly "
+                f"authorized by the approved plan may be written: {normalized}"
+            )
 
     def register_tool(
         self,
@@ -969,6 +1042,7 @@ class ToolRegistry:
             # Additional policy check if policy_evaluator is available
             if self.policy_evaluator:
                 self.policy_evaluator.assert_write_allowed(input_data.path)
+            self._assert_test_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1350,6 +1424,7 @@ class ToolRegistry:
             # Additional policy check if policy_evaluator is available
             if self.policy_evaluator:
                 self.policy_evaluator.assert_write_allowed(input_data.path)
+            self._assert_test_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1458,6 +1533,7 @@ class ToolRegistry:
             # Additional policy check if policy_evaluator is available
             if self.policy_evaluator:
                 self.policy_evaluator.assert_write_allowed(input_data.path)
+            self._assert_test_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1558,6 +1634,7 @@ class ToolRegistry:
             # Additional policy check if policy_evaluator is available
             if self.policy_evaluator:
                 self.policy_evaluator.assert_write_allowed(input_data.path)
+            self._assert_test_write_allowed(input_data.path)
         except (ValueError, PermissionError) as e:
             return ToolResult(ok=False, content=f"Path error: {e}")
 
@@ -1650,6 +1727,78 @@ class ToolRegistry:
 
             except OSError as e:
                 return ToolResult(ok=False, content=f"File creation failed: {e}")
+
+    def write_scratch_test(self, arguments: dict[str, Any]) -> ToolResult:
+        """Write a constrained scratch test that is excluded from the patch."""
+        try:
+            input_data = WriteScratchTestInput(**arguments)
+        except (TypeError, ValueError) as error:
+            return ToolResult(ok=False, content=f"Invalid input: {error}")
+
+        if len(input_data.content) > 50_000:
+            return ToolResult(ok=False, content="Scratch test exceeds 50000 characters")
+
+        try:
+            tree = ast.parse(input_data.content)
+        except SyntaxError as error:
+            return ToolResult(ok=False, content=f"Scratch test syntax error: {error}")
+
+        forbidden_imports = {
+            "ctypes",
+            "http",
+            "os",
+            "requests",
+            "shutil",
+            "socket",
+            "subprocess",
+            "urllib",
+        }
+        forbidden_calls = {
+            "__import__",
+            "compile",
+            "eval",
+            "exec",
+            "open",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                modules = (
+                    [alias.name for alias in node.names]
+                    if isinstance(node, ast.Import)
+                    else [node.module or ""]
+                )
+                if any(module.split(".", 1)[0] in forbidden_imports for module in modules):
+                    return ToolResult(
+                        ok=False,
+                        content="Scratch tests may not import process, network, or filesystem modules",
+                    )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in forbidden_calls
+            ):
+                return ToolResult(
+                    ok=False,
+                    content=f"Scratch tests may not call {node.func.id}",
+                )
+
+        relative_path = f".patchpilot_checks/test_{input_data.name}.py"
+        try:
+            resolved_path = self.workspace.assert_write_allowed(relative_path)
+            if self.policy_evaluator:
+                self.policy_evaluator.assert_write_allowed(relative_path)
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path.write_text(input_data.content, encoding="utf-8")
+        except (OSError, PermissionError, ValueError) as error:
+            return ToolResult(ok=False, content=f"Scratch test write failed: {error}")
+
+        return ToolResult(
+            ok=True,
+            content=(
+                f"Created isolated scratch test: {relative_path}\n"
+                f"Run: python -m pytest {relative_path} -q -p no:cacheprovider"
+            ),
+        )
 
     @staticmethod
     def _is_verification_command(args: list[str]) -> bool:

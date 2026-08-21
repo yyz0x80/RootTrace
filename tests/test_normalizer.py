@@ -179,6 +179,39 @@ def test_normalize_issue_preserves_explicit_test_patch_requirement():
     assert result.artifact_requirements[0].kind == "target_test_change"
 
 
+def test_normalize_issue_recovers_update_tests_as_artifact_requirement():
+    """Treat an explicit request to update tests as a patch deliverable."""
+    issue = RawIssue(
+        title="Add description",
+        body="Update tests to verify the description field works correctly.",
+        source="test",
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Add description",
+  "task_type": "feature",
+  "problem_statement": "Tasks need descriptions.",
+  "acceptance_criteria": [],
+  "constraints": [],
+  "verification_requirements": [
+    "Update tests to verify the description field works correctly"
+  ],
+  "artifact_requirements": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.verification_requirements == [
+        "Update tests to verify the description field works correctly"
+    ]
+    assert len(result.artifact_requirements) == 1
+    assert result.artifact_requirements[0].kind == "target_test_change"
+
+
 def test_normalize_issue_repairs_acceptance_kind_on_execution_constraint():
     """Infer a valid constraint kind when the model uses an AC kind."""
     issue = RawIssue(

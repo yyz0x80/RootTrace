@@ -683,9 +683,10 @@ def test_builtin_policies_contain_expected_restrictions():
     # Check that CI/CD workflows are forbidden
     assert ".github/workflows" in write_denied
 
-    # Check that test files are forbidden
-    assert "tests" in write_denied
-    assert "test_" in write_denied
+    # Test writes require repository and plan context, so ToolRegistry and the
+    # scope gate enforce them instead of the path-only built-in policy set.
+    assert "tests" not in write_denied
+    assert "test_" not in write_denied
 
 
 def test_database_migration_hints_constant():

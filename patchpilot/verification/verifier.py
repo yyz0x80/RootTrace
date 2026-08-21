@@ -630,6 +630,41 @@ class Verifier:
             )
             checks.extend(optional_checks)
 
+        scratch_dir = (
+            self.workspace_root / ".patchpilot_checks"
+            if self.workspace_root is not None
+            else None
+        )
+        if scratch_dir is not None and any(scratch_dir.glob("test_*.py")):
+            scratch_command = (
+                "python -m pytest .patchpilot_checks -q -p no:cacheprovider"
+            )
+            scratch_result = self.sandbox.run(
+                scratch_command,
+                timeout_seconds=self.timeouts.target_tests,
+            )
+            scratch_check = self._create_check_report(
+                method="agent_scratch_pytest",
+                phase="post_patch",
+                level="LEVEL_2_AGENT_SCRATCH",
+                command=scratch_command,
+                result=scratch_result,
+                timeout_seconds=self.timeouts.target_tests,
+                subject_ids=[],
+                direct=False,
+                test_node="",
+            )
+            scratch_check.tier = "optional"
+            scratch_check.selection_reason = (
+                "Agent-authored isolated scratch tests; supplemental evidence only"
+            )
+            checks.append(scratch_check)
+            tier_results["optional"]["total"] += 1
+            if scratch_check.passed:
+                tier_results["optional"]["passed"] += 1
+            else:
+                tier_results["optional"]["failed"] += 1
+
         # Always attempt the same full-suite command used at baseline. Its
         # result is evaluated as a delta, so unchanged historical failures do
         # not make an otherwise correct patch fail.

@@ -399,6 +399,27 @@ class TestValidateActualChanges:
         assert "test_utils.py" in str(exc_info.value)
         assert "Write denied" in str(exc_info.value)
 
+    def test_validate_actual_changes_allows_authorized_new_test(self):
+        """Test runtime scope accepts a planned new test artifact."""
+        plan = ChangePlan(
+            relevant_files=["tests/test_new_behavior.py"],
+            planned_changes=[
+                PlannedChange(
+                    path="tests/test_new_behavior.py",
+                    action="create",
+                    description="Add required regression coverage",
+                )
+            ],
+            risk_level="low",
+            allow_new_test_files=True,
+        )
+
+        validate_actual_changes(
+            plan,
+            [WorkspaceChange(path="tests/test_new_behavior.py", action="create")],
+            get_builtin_policies(),
+        )
+
     def test_validate_actual_changes_github_workflow_runtime(self):
         """Test validation rejects .github/workflows modifications at runtime."""
         plan = ChangePlan(

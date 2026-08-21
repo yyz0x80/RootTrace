@@ -346,6 +346,10 @@ class AgentLoop:
         """
         self.tools.update_workspace(workspace)
 
+    def configure_test_writes(self, allowed_new_files: set[str]) -> None:
+        """Apply harness-compiled test artifact permissions to editing tools."""
+        self.tools.configure_test_writes(allowed_new_files)
+
     def run(
         self,
         issue: str,
@@ -597,9 +601,15 @@ class AgentLoop:
             tool_schemas: Full list of available tool schemas
 
         Returns:
-            Filtered list containing read_file, edit_file, write_file, and run_command tools
+            Filtered list containing the bounded repair tools.
         """
-        repair_allowed_tools = {"read_file", "edit_file", "write_file", "run_command"}
+        repair_allowed_tools = {
+            "read_file",
+            "edit_file",
+            "write_file",
+            "write_scratch_test",
+            "run_command",
+        }
         return [
             schema
             for schema in tool_schemas

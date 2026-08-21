@@ -96,6 +96,19 @@ _DESCRIPTION_LIST_FIELDS = (
 _TEST_TERMS = ("test", "tests", "pytest", "coverage", "assertion", "assertions")
 _VERIFICATION_TERMS = ("verify", "verifies", "verified", "cover", "covers", "exercise")
 _PATCH_DELIVERY_TERMS = ("in the patch", "in the pr", "in the commit", "must include")
+_TEST_ARTIFACT_ACTION_TERMS = (
+    "add a test",
+    "add test",
+    "add tests",
+    "create a test",
+    "create test",
+    "create tests",
+    "update test",
+    "update tests",
+    "write a test",
+    "write test",
+    "write tests",
+)
 
 _CONSTRAINT_KINDS = {"READ_SCOPE", "WRITE_SCOPE", "COMMAND", "NETWORK", "OTHER"}
 _CRITERION_KINDS = {"behavior", "preservation", "structural"}
@@ -251,7 +264,8 @@ def _requires_test_artifact(description: str) -> bool:
     """Return whether the text explicitly requires tests in the final patch."""
     normalized = " ".join(description.lower().split())
     return any(term in normalized for term in _TEST_TERMS) and any(
-        term in normalized for term in _PATCH_DELIVERY_TERMS
+        term in normalized
+        for term in (*_PATCH_DELIVERY_TERMS, *_TEST_ARTIFACT_ACTION_TERMS)
     )
 
 
@@ -265,6 +279,20 @@ def _separate_execution_constraints(
     ]
     verification_requirements = list(issue.verification_requirements)
     artifact_requirements = list(issue.artifact_requirements)
+
+    for requirement in verification_requirements:
+        if _requires_test_artifact(requirement) and not any(
+            artifact.kind == "target_test_change"
+            and artifact.description == requirement
+            for artifact in artifact_requirements
+        ):
+            artifact_requirements.append(
+                ArtifactRequirement(
+                    kind="target_test_change",
+                    description=requirement,
+                    required=True,
+                )
+            )
 
     for criterion in issue.acceptance_criteria:
         if _is_execution_constraint(criterion.description):

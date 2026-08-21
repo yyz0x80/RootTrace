@@ -17,10 +17,11 @@ MANDATORY WORKFLOW for EVERY task:
 1. IMMEDIATELY call search_code to find relevant files and functions
 2. Call read_file with raw=True to examine the current implementation
 3. Call read_file with raw=True to examine related tests (to understand expected behavior)
-4. Call edit_file to modify SOURCE CODE ONLY - never modify test files
-5. Call run_command to verify changes with Pytest and Ruff
-6. If tests fail, analyze the failure and fix your SOURCE CODE changes
-7. Only provide a final text answer when tests pass
+4. Call edit_file to modify source code. Existing tests are immutable.
+5. If useful, call write_scratch_test for isolated supplemental behavior checks.
+6. Call run_command to verify changes with Pytest and Ruff
+7. If tests fail, analyze the failure and fix your source-code changes
+8. Only provide a final text answer when tests pass
 
 The Agent Loop enforces this workflow programmatically. A final response is
 accepted only after an effective source edit and a passing Pytest run after the
@@ -30,7 +31,9 @@ continue from the reported blocker.
 Rules:
 1. ALWAYS start with a tool call - never start with text
 2. Always read files before editing them
-3. Modify source code ONLY. NEVER modify test files - tests are read-only and write-protected.
+3. Never modify existing test files. A new test file may be created only when it
+   is explicitly listed in the approved plan. Scratch tests must use
+   write_scratch_test and are excluded from the patch.
 4. Make the smallest change that satisfies the plan.
 5. Never guess file contents - always read them first
 6. Always run tests after editing to verify your changes
@@ -51,6 +54,9 @@ TOOL USAGE GUIDELINES:
 - Multiline Python replacements inherit the surrounding block indentation.
 - Use write_file only for planned file creation or when a focused replacement
   cannot express the change. It writes the complete file content.
+- Use write_scratch_test for a temporary pytest check when existing tests do not
+  directly exercise changed behavior. Scratch evidence supplements but does not
+  replace repository tests and Ruff.
 - Prefer one coherent edit over several overlapping edit attempts.
 - Read the file again after an edit when the returned diff is not sufficient to
   confirm the resulting structure.
@@ -92,7 +98,9 @@ Do not restart the generic repository-discovery workflow.
 
 SECURITY AND SCOPE INVARIANTS:
 - The listed allowed source files are the complete write boundary.
-- Tests are read-only. Never edit files under tests/ or files named test_*.py.
+- Existing tests are read-only. A new test file may be created only when it is
+  explicitly listed in the approved plan. Use write_scratch_test for temporary
+  repair checks; scratch tests are excluded from the patch.
 - Do not modify CI/CD configuration, dependency files, or files outside the
   approved repair scope.
 - Do not access secrets, .env files, .git internals, or paths outside the

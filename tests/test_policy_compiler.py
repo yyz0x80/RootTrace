@@ -193,9 +193,8 @@ def test_evaluator_enforces_builtin_policies():
     with pytest.raises(PermissionError):
         evaluator.assert_write_allowed(".git/config")
 
-    # Should deny writes to tests directory
-    with pytest.raises(PermissionError):
-        evaluator.assert_write_allowed("tests/test_example.py")
+    # Test immutability is repository-aware and enforced by ToolRegistry.
+    evaluator.assert_write_allowed("tests/test_example.py")
 
 
 def test_evaluator_enforces_command_policy():

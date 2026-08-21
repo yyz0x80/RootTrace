@@ -189,6 +189,7 @@ class WorkflowResult(BaseModel):
             failure_type = decision.failure_type.value if decision.failure_type else None
         else:
             outcome_code = self.final_status.value
+            failure_type = self.verification_report.get("failure_type")
             required_evidence = [
                 item for item in self.acceptance_evidence if item.required
             ]

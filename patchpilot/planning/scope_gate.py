@@ -51,6 +51,14 @@ DATABASE_MIGRATION_HINTS = (
 )
 
 
+def is_test_file(file_path: str) -> bool:
+    """Return whether a workspace-relative path is a Python test file."""
+    path = PurePosixPath(file_path)
+    return "tests" in path.parts or (
+        path.name.startswith("test_") and path.suffix == ".py"
+    )
+
+
 def _should_ignore_file(file_path: str) -> bool:
     """Check if a file should be ignored during runtime validation.
 
@@ -108,14 +116,22 @@ def check_scope(
         )
 
     # 2. File-level security checks using PolicySet
-    for file in planned_files:
-        normalized = str(PurePosixPath(file))
+    for change in plan.planned_changes:
+        normalized = str(PurePosixPath(change.path))
 
         # Check write permissions using PolicyEvaluator
         try:
             policy_evaluator.assert_write_allowed(normalized)
         except PermissionError as e:
             violations.append(str(e))
+
+        if is_test_file(normalized) and not (
+            plan.allow_new_test_files and change.action.value == "create"
+        ):
+            violations.append(
+                "Existing tests are immutable and new test files require an "
+                f"explicit target_test_change artifact: {normalized}"
+            )
 
         # Check for database migration hints
         if any(
@@ -195,9 +211,17 @@ def validate_actual_changes(
         except PermissionError as e:
             raise RuntimeError(str(e))
 
-        # Check if the file was in the approved plan
         expected_action = planned.get(actual.path)
+        if is_test_file(actual.path) and not (
+            plan.allow_new_test_files
+            and expected_action == "create"
+            and actual.action == "create"
+        ):
+            raise RuntimeError(
+                f"Write denied for immutable existing test: {actual.path}"
+            )
 
+        # Check if the file was in the approved plan
         # File modified outside the approved plan
         if expected_action is None:
             raise RuntimeError(

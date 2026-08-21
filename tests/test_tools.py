@@ -1273,6 +1273,70 @@ class TestWriteFile:
         assert not result.ok
         assert "Modifying test files is not allowed" in result.content
 
+    def test_write_file_allows_plan_authorized_new_test(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Test that an explicitly authorized new test artifact can be created."""
+        tool_registry.configure_test_writes({"tests/test_new_behavior.py"})
+
+        result = tool_registry.write_file({
+            "path": "tests/test_new_behavior.py",
+            "content": "def test_new_behavior():\n    assert True\n",
+        })
+
+        assert result.ok
+        assert (temp_workspace.root / "tests/test_new_behavior.py").exists()
+
+    def test_authorization_does_not_unlock_existing_test(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Test that an existing test cannot masquerade as a new artifact."""
+        test_path = temp_workspace.root / "tests" / "test_existing.py"
+        test_path.parent.mkdir()
+        test_path.write_text("def test_existing():\n    assert True\n")
+        tool_registry.configure_test_writes({"tests/test_existing.py"})
+
+        result = tool_registry.write_file({
+            "path": "tests/test_existing.py",
+            "content": "def test_existing():\n    assert False\n",
+        })
+
+        assert not result.ok
+        assert "existing tests are immutable" in result.content
+
+    def test_write_scratch_test_isolated_from_patch_files(
+        self,
+        tool_registry,
+        temp_workspace,
+    ):
+        """Test that scratch tests use the dedicated ignored directory."""
+        result = tool_registry.write_scratch_test({
+            "name": "description_behavior",
+            "content": "def test_description_behavior():\n    assert True\n",
+        })
+
+        assert result.ok
+        scratch_path = (
+            temp_workspace.root
+            / ".patchpilot_checks"
+            / "test_description_behavior.py"
+        )
+        assert scratch_path.exists()
+
+    def test_write_scratch_test_rejects_process_access(self, tool_registry):
+        """Test that scratch tests cannot invoke host process APIs."""
+        result = tool_registry.write_scratch_test({
+            "name": "unsafe",
+            "content": "import subprocess\n",
+        })
+
+        assert not result.ok
+        assert "may not import" in result.content
+
     def test_write_file_github_workflows_rejected(self, tool_registry, temp_workspace):
         """Test that writing to .github/workflows is rejected"""
         result = tool_registry.write_file({
@@ -1676,7 +1740,7 @@ class TestToolSchema:
     def test_get_tool_schemas(self, tool_registry):
         """Test getting all tool schemas in OpenAI format"""
         schemas = tool_registry.get_tool_schemas()
-        assert len(schemas) == 5
+        assert len(schemas) == 6
         assert all(isinstance(schema, dict) for schema in schemas)
         assert all(schema["type"] == "function" for schema in schemas)
         tool_names = {schema["function"]["name"] for schema in schemas}
@@ -1685,6 +1749,7 @@ class TestToolSchema:
             "read_file",
             "edit_file",
             "write_file",
+            "write_scratch_test",
             "run_command",
         }
         assert "insert_text" not in tool_names

@@ -23,7 +23,7 @@ from patchpilot.issue.normalizer import normalize_issue
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.planner import PlanGenerationError, create_plan
 from patchpilot.planning.schema import ChangePlan
-from patchpilot.planning.scope_gate import check_scope
+from patchpilot.planning.scope_gate import check_scope, is_test_file
 from patchpilot.planning.validator import validate_plan
 from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.provider import (
@@ -1116,6 +1116,13 @@ def handle_execute(args) -> None:
         with open(plan_path, encoding="utf-8") as f:
             plan_data = json.load(f)
         plan = ChangePlan.model_validate(plan_data)
+        allow_new_test_files = any(
+            requirement.required and requirement.kind == "target_test_change"
+            for requirement in normalized_issue.artifact_requirements
+        )
+        plan = plan.model_copy(
+            update={"allow_new_test_files": allow_new_test_files}
+        )
         base_commit = plan.base_commit
 
         # Log precheck section
@@ -1146,6 +1153,36 @@ def handle_execute(args) -> None:
                 error_message=str(e),
             )
             print(f"Repository validation failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        scope_result = check_scope(plan, get_builtin_policies())
+        existing_test_creations = [
+            change.path
+            for change in plan.planned_changes
+            if is_test_file(change.path)
+            and change.action.value == "create"
+            and (repo_path / change.path).exists()
+        ]
+        if existing_test_creations:
+            scope_result.allowed = False
+            scope_result.violations.extend(
+                f"Existing test cannot be authorized as a new file: {path}"
+                for path in existing_test_creations
+            )
+        if not scope_result.allowed:
+            message = "Approved plan violates execution scope: " + "; ".join(
+                scope_result.violations
+            )
+            _save_failed_run_summary(
+                args=args,
+                started=started,
+                provider=provider,
+                base_commit=base_commit,
+                final_status="BLOCKED",
+                failure_type="POLICY_VIOLATION",
+                error_message=message,
+            )
+            print(message, file=sys.stderr)
             sys.exit(1)
 
         # Step 3: Verify repository baseline matches plan

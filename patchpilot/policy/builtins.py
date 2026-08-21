@@ -7,7 +7,6 @@ the minimum security boundaries that cannot be weakened by model constraints.
 Built-in constraints protect:
 - .env files (secrets and credentials)
 - .git directory internals
-- Test files (read-only for target repository)
 - CI/CD configuration files
 - System commands (sudo, git push, etc.)
 """
@@ -76,7 +75,10 @@ def _get_builtin_write_policies() -> list[CompiledPathPolicy]:
     - .env files (secrets)
     - .git directory internals
     - CI/CD configuration files (.github/workflows)
-    - Test files (test_*.py and tests/ directory) - Day 1 restriction
+
+    Existing-test immutability and explicitly authorized new tests depend on the
+    repository snapshot and approved plan, so they are enforced by ToolRegistry
+    and the scope gate rather than this path-only policy set.
 
     Returns:
         List of CompiledPathPolicy for write restrictions
@@ -104,22 +106,6 @@ def _get_builtin_write_policies() -> list[CompiledPathPolicy]:
             kind="WRITE_SCOPE",
             allowed_paths=set(),
             denied_paths={".github/workflows"},
-            is_allowlist=False,
-        ),
-        CompiledPathPolicy(
-            id="builtin-write-4",
-            description="Modifying test files is not allowed (Day 1 restriction)",
-            kind="WRITE_SCOPE",
-            allowed_paths=set(),
-            denied_paths={"tests"},
-            is_allowlist=False,
-        ),
-        CompiledPathPolicy(
-            id="builtin-write-5",
-            description="Modifying test files is not allowed (Day 1 restriction)",
-            kind="WRITE_SCOPE",
-            allowed_paths=set(),
-            denied_paths={"test_"},
             is_allowlist=False,
         ),
     ]

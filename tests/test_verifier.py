@@ -1273,6 +1273,40 @@ def test_tiered_verification_full_regression_in_optional_tier() -> None:
     assert report.passed is True
 
 
+def test_tiered_verification_runs_scratch_tests_as_supplemental(
+    tmp_path,
+) -> None:
+    """Test that isolated agent tests are visible but never direct evidence."""
+    scratch_dir = tmp_path / ".patchpilot_checks"
+    scratch_dir.mkdir()
+    (scratch_dir / "test_behavior.py").write_text(
+        "def test_behavior():\n    assert True\n"
+    )
+    sandbox_mock = MagicMock()
+    sandbox_mock.run.side_effect = [
+        passing_result("ruff check --no-cache ."),
+        passing_result(
+            "python -m pytest .patchpilot_checks -q -p no:cacheprovider"
+        ),
+        passing_result("python -m pytest -q -p no:cacheprovider"),
+    ]
+    verifier = Verifier(sandbox=sandbox_mock, workspace_root=tmp_path)
+
+    report = verifier.verify_post_patch_tiered(
+        run_id="scratch-test",
+        target_selection=TargetTestSelection([], [], [], []),
+    )
+
+    scratch_checks = [
+        check for check in report.checks
+        if check.method == "agent_scratch_pytest"
+    ]
+    assert len(scratch_checks) == 1
+    assert scratch_checks[0].passed
+    assert scratch_checks[0].tier == "optional"
+    assert not scratch_checks[0].direct
+
+
 def test_tiered_verification_balanced_policy_with_affected_failure() -> None:
     """Test balanced policy: AFFECTED failure blocks VERIFIED."""
     sandbox_mock = MagicMock()

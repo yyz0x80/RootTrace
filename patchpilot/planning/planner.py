@@ -114,9 +114,10 @@ Rules:
    repository_match=false
    and explain repository_mismatch_reason.
 8. Stay within the requested issue scope.
-9. CRITICAL: Test files (files under tests/ or starting with test_) are READ-ONLY.
-   NEVER include test files in planned_changes. Tests should only be in planned_tests for verification.
-10. Test file modifications are FORBIDDEN. Use existing tests for regression coverage.
+9. Existing test files are READ-ONLY and must never be modified or deleted.
+10. A new test file may appear in planned_changes with action="create" only when
+    artifact_requirements explicitly require a target_test_change. Otherwise use
+    existing tests for regression coverage.
 11. For each acceptance criterion, you must explicitly specify its disposition:
     - "to_implement": The criterion requires changes to be implemented
     - "to_preserve": The criterion must be preserved (no changes needed)
@@ -269,8 +270,8 @@ or cannot_verify). For "already_satisfied", provide baseline_evidence. For struc
 criteria, specify relevant_source_files. "to_implement" criteria should map to at least
 one planned source-code change. Do not generate acceptance_probes or structural_checks;
 the harness treats specialized verification as optional evidence.
-Files under tests/ and files named test_*.py are read-only and must never appear in
-planned_changes.
+Existing tests are read-only. Create a new test file only for an explicit required
+target_test_change artifact; never modify or delete an existing test.
 Preserve repository_match=false when the issue does not match the repository; do not
 invent a missing subsystem.
 """

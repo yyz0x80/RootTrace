@@ -169,6 +169,9 @@ class ChangePlan(BaseModel):
     # Non-blocking diagnostics produced while compiling optional evidence.
     validation_warnings: list[str] = Field(default_factory=list)
 
+    # Harness-owned permission compiled from explicit issue artifact requirements.
+    allow_new_test_files: bool = False
+
     # Specialized verification specifications
     acceptance_probes: list[AcceptanceProbeSpec] = Field(default_factory=list)
     structural_checks: list[StructuralCheckSpec] = Field(default_factory=list)
