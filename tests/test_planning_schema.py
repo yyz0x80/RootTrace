@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from patchpilot.planning.schema import (
+    AcceptanceProbeSpec,
     ChangeAction,
     ChangePlan,
     PlannedChange,
@@ -111,6 +112,20 @@ def test_change_plan_basic():
     assert plan.planned_changes == []
     assert plan.planned_tests == []
     assert plan.out_of_scope == []
+
+
+def test_acceptance_probe_is_declarative_only():
+    """Reject arbitrary code fields in an acceptance probe."""
+    with pytest.raises(ValidationError):
+        AcceptanceProbeSpec(
+            probe_id="probe-ac-1",
+            module="service",
+            target="Service.create",
+            probe_type="function_io",
+            criterion_ids=["AC-1"],
+            assertion="truthy",
+            steps=[{"code": "open('/etc/passwd').read()"}],
+        )
 
 
 def test_change_plan_full():

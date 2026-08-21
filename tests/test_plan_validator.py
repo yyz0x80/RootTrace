@@ -4,6 +4,7 @@ import pytest
 
 from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
 from patchpilot.planning.schema import (
+    AcceptanceProbeSpec,
     ChangePlan,
     CriterionPlan,
     CriterionPlanDetail,
@@ -440,6 +441,17 @@ def _make_covered_plan() -> ChangePlan:
                 relevant_source_files=["src/main.py"],
             ),
         ],
+        acceptance_probes=[
+            AcceptanceProbeSpec(
+                probe_id=f"probe-{criterion_id.lower()}",
+                module="src.main",
+                target="run",
+                probe_type="function_io",
+                criterion_ids=[criterion_id],
+                assertion="truthy",
+            )
+            for criterion_id in ("AC-1", "AC-2")
+        ],
     )
 
 
@@ -465,27 +477,22 @@ def test_validate_acceptance_coverage_rejects_unknown_id():
 
 
 def test_validate_acceptance_coverage_requires_source_change():
-    """No longer reject ACs without planned source implementation (warning only)."""
+    """Reject implementation criteria without planned source changes."""
     plan = _make_covered_plan()
     plan.planned_changes[0].acceptance_criteria.remove("AC-2")
     plan.planned_changes[0].criterion_ids.remove("AC-2")
 
-    # Should now generate warning instead of hard failure
-    warnings = validate_acceptance_coverage(plan, _make_issue())
-    assert len(warnings) > 0
-    assert any("AC-2" in warning and "source changes" in warning for warning in warnings)
+    with pytest.raises(ValueError, match="AC-2 has no planned source change"):
+        validate_acceptance_coverage(plan, _make_issue())
 
 
 def test_validate_acceptance_coverage_requires_verification():
-    """No longer reject ACs without planned verification (warning only)."""
+    """Reject required criteria without a direct acceptance check."""
     plan = _make_covered_plan()
-    plan.planned_tests[0].acceptance_criteria.remove("AC-2")
-    plan.planned_tests[0].criterion_ids.remove("AC-2")
+    plan.acceptance_probes = [plan.acceptance_probes[0]]
 
-    # Should now generate warning instead of hard failure
-    warnings = validate_acceptance_coverage(plan, _make_issue())
-    assert len(warnings) > 0
-    assert any("AC-2" in warning for warning in warnings)
+    with pytest.raises(ValueError, match="AC-2 has no direct acceptance check"):
+        validate_acceptance_coverage(plan, _make_issue())
 
 
 def test_validate_acceptance_coverage_rejects_duplicate_issue_ids():

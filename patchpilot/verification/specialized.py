@@ -24,12 +24,12 @@ from patchpilot.planning.schema import (
 )
 from patchpilot.verification.config import VerificationTimeouts
 from patchpilot.verification.probes.runner import ProbeRunner
-from patchpilot.verification.probes.schema import AcceptanceProbe, ProbeStep
 from patchpilot.verification.report import CheckReport
 from patchpilot.verification.structural.ast_checks import CheckType, StructuralCheck
 from patchpilot.verification.structural.runner import StructuralRunner
 
 if TYPE_CHECKING:
+    from patchpilot.sandbox.docker_runner import DockerSandbox
     from patchpilot.verification.probes.schema import ProbeExecutionResult
     from patchpilot.verification.structural.runner import StructuralReport
 
@@ -52,6 +52,7 @@ class SpecializedVerifier:
     def __init__(
         self,
         workspace_root: Path,
+        sandbox: DockerSandbox,
         timeouts: VerificationTimeouts | None = None,
     ) -> None:
         """Initialize the specialized verifier.
@@ -61,7 +62,7 @@ class SpecializedVerifier:
             timeouts: Optional VerificationTimeouts configuration (uses defaults if None)
         """
         self.workspace_root = workspace_root
-        self.probe_runner = ProbeRunner(workspace_root)
+        self.probe_runner = ProbeRunner(sandbox)
         self.structural_runner = StructuralRunner(workspace_root)
         self.timeouts = timeouts or VerificationTimeouts()
 
@@ -133,23 +134,17 @@ class SpecializedVerifier:
 
         for spec in probe_specs:
             # Validate spec has required information
-            if not spec.probe_id or not spec.target_function:
+            if not spec.probe_id or not spec.module or not spec.target:
                 # Skip invalid specs - they should not result in invented PASS
                 continue
-
-            # Convert spec to AcceptanceProbe
-            probe = self._spec_to_probe(spec)
-
-            # Get source code for the target function
-            source_code = self._get_source_code(spec.target_function)
 
             # Execute probe in the appropriate phase
             if phase == "baseline":
                 result: ProbeExecutionResult = (
-                    self.probe_runner.run_baseline_probe(probe, source_code)
+                    self.probe_runner.run_baseline_probe(spec)
                 )
             else:
-                result = self.probe_runner.run_post_patch_probe(probe, source_code)
+                result = self.probe_runner.run_post_patch_probe(spec)
 
             # Convert to CheckReport
             check_report = self._probe_result_to_check_report(
@@ -220,37 +215,6 @@ class SpecializedVerifier:
 
         return check_reports
 
-    def _spec_to_probe(self, spec: AcceptanceProbeSpec) -> AcceptanceProbe:
-        """Convert AcceptanceProbeSpec to AcceptanceProbe.
-
-        Args:
-            spec: AcceptanceProbeSpec from ChangePlan
-
-        Returns:
-            AcceptanceProbe object for execution
-        """
-        steps = [
-            ProbeStep(
-                description=step.get("description", ""),
-                code=step.get("code", ""),
-                expected_outcome=step.get("expected_outcome", "no_exception"),
-                tolerance=step.get("tolerance"),
-            )
-            for step in spec.steps
-        ]
-
-        return AcceptanceProbe(
-            id=spec.probe_id,
-            name=f"Probe for {spec.target_function}",
-            description=f"Acceptance probe for {spec.target_function}",
-            probe_type=spec.probe_type,
-            target_function=spec.target_function,
-            steps=steps,
-            setup_code=spec.setup_code,
-            teardown_code=spec.teardown_code,
-            subject_ids=spec.criterion_ids,
-        )
-
     def _spec_to_structural_check(
         self,
         spec: StructuralCheckSpec,
@@ -269,30 +233,6 @@ class SpecializedVerifier:
             parameters=spec.parameters,
             description=f"Structural check: {spec.check_type} on {spec.target}",
         )
-
-    def _get_source_code(self, target_function: str) -> str:
-        """Get source code for a target function.
-
-        This is a simplified implementation that searches for the function
-        in the workspace. In a production implementation, this would need
-        more sophisticated file discovery.
-
-        Args:
-            target_function: Name of the target function
-
-        Returns:
-            Source code as string, or empty string if not found
-        """
-        # Search for Python files containing the function
-        for py_file in self.workspace_root.rglob("*.py"):
-            try:
-                content = py_file.read_text(encoding="utf-8")
-                if f"def {target_function}" in content:
-                    return content
-            except (OSError, UnicodeDecodeError):
-                continue
-
-        return ""
 
     def _probe_result_to_check_report(
         self,

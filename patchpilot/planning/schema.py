@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ChangeAction(str, Enum):
@@ -84,19 +84,38 @@ class PlannedTest(BaseModel):
 
 
 class AcceptanceProbeSpec(BaseModel):
-    """Specification for an acceptance probe.
+    """Declarative behavior probe executed outside the generated patch."""
 
-    Acceptance probes are model-generated verification scripts that test
-    specific aspects of code changes without becoming part of the patch itself.
-    """
+    model_config = ConfigDict(extra="forbid")
 
     probe_id: str
-    target_function: str
+    module: str = Field(pattern=r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$")
+    target: str = Field(pattern=r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$")
     probe_type: Literal["function_io", "exception", "state_change", "invariant", "return_structure"]
     criterion_ids: list[str] = Field(default_factory=list)
-    steps: list[dict[str, Any]] = Field(default_factory=list)
-    setup_code: str = ""
-    teardown_code: str = ""
+    constructor_args: list[Any] = Field(default_factory=list)
+    constructor_kwargs: dict[str, Any] = Field(default_factory=dict)
+    arguments: list[Any] = Field(default_factory=list)
+    keyword_arguments: dict[str, Any] = Field(default_factory=dict)
+    assertion: Literal[
+        "equals",
+        "attribute_equals",
+        "raises",
+        "truthy",
+        "falsy",
+    ]
+    expected: Any = None
+    attribute: str = Field(default="", pattern=r"^$|^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$")
+    exception: str = Field(default="", pattern=r"^$|^[A-Za-z_]\w*$")
+
+    @model_validator(mode="after")
+    def validate_assertion_details(self) -> "AcceptanceProbeSpec":
+        """Require the operands used by the selected assertion."""
+        if self.assertion == "attribute_equals" and not self.attribute:
+            raise ValueError("attribute_equals probes require attribute")
+        if self.assertion == "raises" and not self.exception:
+            raise ValueError("raises probes require exception")
+        return self
 
 
 class StructuralCheckSpec(BaseModel):
@@ -113,6 +132,8 @@ class StructuralCheckSpec(BaseModel):
         "no_new_imports",
         "method_exists",
         "decorator_exists",
+        "dataclass_field",
+        "method_parameter",
     ]
     target: str
     parameters: dict[str, Any] = Field(default_factory=dict)

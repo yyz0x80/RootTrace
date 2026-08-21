@@ -94,7 +94,7 @@ def validate_acceptance_coverage(
             "Normalized issue contains duplicate acceptance criterion IDs."
         )
     
-    # Build maps of AC references in planned changes and tests
+    # Build maps of AC references in planned changes and regression tests.
     change_ids = {
         criterion_id
         for change in plan.planned_changes
@@ -121,6 +121,19 @@ def validate_acceptance_coverage(
     change_ids = change_ids | change_ids_from_acceptance
     test_ids = test_ids | test_ids_from_acceptance
     referenced_ids = change_ids | test_ids
+
+    probe_ids = {
+        criterion_id
+        for probe in plan.acceptance_probes
+        for criterion_id in probe.criterion_ids
+    }
+    structural_ids = {
+        criterion_id
+        for check in plan.structural_checks
+        for criterion_id in check.criterion_ids
+    }
+    direct_ids = probe_ids | structural_ids
+    referenced_ids |= direct_ids
     
     # Hard failure: Check for references to non-existent ACs
     unknown_ids = sorted(referenced_ids - known_ids)
@@ -128,6 +141,24 @@ def validate_acceptance_coverage(
         raise ValueError(
             f"Plan references unknown acceptance criterion IDs: {', '.join(unknown_ids)}"
         )
+
+    if plan.verification_specs:
+        raise ValueError(
+            "verification_specs are not executable; use acceptance_probes or "
+            "structural_checks"
+        )
+
+    for probe in plan.acceptance_probes:
+        if not probe.criterion_ids:
+            raise ValueError(
+                f"Acceptance probe {probe.probe_id} has no criterion_ids"
+            )
+
+    for check in plan.structural_checks:
+        if not check.criterion_ids:
+            raise ValueError(
+                f"Structural check {check.check_id} has no criterion_ids"
+            )
     
     # Build criterion plan lookup
     criterion_plan_map = {
@@ -165,18 +196,30 @@ def validate_acceptance_coverage(
                 f"Structural contract {criterion_id} has no relevant planned paths"
             )
         
-        # Warning: AC has no direct verification specification
-        if criterion_id not in test_ids:
-            warnings.append(
-                f"AC-{criterion_id} has no direct verification specification. "
-                "Execution may continue, but the criterion cannot become PASS."
+        if criterion.required and criterion_id not in direct_ids:
+            raise ValueError(
+                f"Required acceptance criterion {criterion_id} has no direct "
+                "acceptance check"
+            )
+
+        if criterion.kind == "behavior" and criterion_id not in probe_ids:
+            raise ValueError(
+                f"Behavior criterion {criterion_id} requires an acceptance probe"
+            )
+
+        if criterion.kind == "structural" and criterion_id not in structural_ids:
+            raise ValueError(
+                f"Structural criterion {criterion_id} requires a structural check"
             )
         
         # Warning: AC has no planned source changes (no longer hard failure)
-        if criterion_id not in change_ids:
-            warnings.append(
-                f"AC-{criterion_id} has no planned source changes. "
-                "This may indicate incomplete implementation planning."
+        if (
+            criterion_plan.disposition == CriterionPlanDetail.TO_IMPLEMENT
+            and criterion_id not in change_ids
+        ):
+            raise ValueError(
+                f"Required implementation criterion {criterion_id} has no "
+                "planned source change"
             )
     
     return warnings
@@ -215,23 +258,25 @@ def validate_plan(
     # Step 1: Validate plan consistency with repository
     validate_plan_against_repository(plan, repository_context)
 
-    # Step 2: Validate AC coverage and generate warnings
+    # Step 2: Validate planned changes (paths and actions)
+    validate_planned_changes(plan, repository_context)
+
+    # Step 3: Validate test targets
+    validate_test_targets(plan, repository_context)
+
+    # Step 4: Validate command support
+    validate_command_support(plan)
+
+    # Step 5: Check scope restrictions before acceptance completeness.
+    policy_set = get_builtin_policies()
+    scope_result = check_scope(plan, policy_set)
+    if not scope_result.allowed:
+        return scope_result
+
+    # Step 6: Validate direct acceptance coverage for an otherwise safe plan.
     coverage_warnings = []
     if issue is not None:
         coverage_warnings = validate_acceptance_coverage(plan, issue)
-
-    # Step 3: Validate planned changes (paths and actions)
-    validate_planned_changes(plan, repository_context)
-
-    # Step 4: Validate test targets
-    validate_test_targets(plan, repository_context)
-
-    # Step 5: Validate command support
-    validate_command_support(plan)
-
-    # Step 6: Check scope restrictions and security boundaries
-    policy_set = get_builtin_policies()
-    scope_result = check_scope(plan, policy_set)
 
     # Add coverage warnings to scope result
     scope_result.warnings.extend(coverage_warnings)

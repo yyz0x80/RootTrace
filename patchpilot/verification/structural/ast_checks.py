@@ -29,6 +29,8 @@ class CheckType(StrEnum):
     NO_NEW_IMPORTS = "no_new_imports"
     METHOD_EXISTS = "method_exists"
     DECORATOR_EXISTS = "decorator_exists"
+    DATACLASS_FIELD = "dataclass_field"
+    METHOD_PARAMETER = "method_parameter"
 
 
 @dataclass
@@ -354,6 +356,179 @@ class ASTChecker:
             message=f"Function '{function_name}' does not have decorator '{decorator_name}'",
             location=str(self.file_path),
         )
+
+    def check_dataclass_field(
+        self,
+        class_name: str,
+        field_name: str,
+        annotation: str = "",
+        expected_default: Any = None,
+        require_default: bool = False,
+    ) -> CheckResult:
+        """Check a dataclass field annotation and optional default value."""
+        check = StructuralCheck(
+            check_type=CheckType.DATACLASS_FIELD,
+            target=class_name,
+            parameters={
+                "field": field_name,
+                "annotation": annotation,
+                "expected_default": expected_default,
+                "require_default": require_default,
+            },
+            description=f"Check dataclass field '{class_name}.{field_name}'",
+        )
+        for node in self.tree.body:
+            if not isinstance(node, ast.ClassDef) or node.name != class_name:
+                continue
+            decorators = {self._get_decorator_name(item) for item in node.decorator_list}
+            if "dataclass" not in decorators:
+                return CheckResult(
+                    check=check,
+                    passed=False,
+                    message=f"Class '{class_name}' is not a dataclass",
+                    location=str(self.file_path),
+                )
+            for item in node.body:
+                if not isinstance(item, ast.AnnAssign):
+                    continue
+                if not isinstance(item.target, ast.Name) or item.target.id != field_name:
+                    continue
+                actual_annotation = ast.unparse(item.annotation)
+                if annotation and actual_annotation != annotation:
+                    return CheckResult(
+                        check=check,
+                        passed=False,
+                        message=(
+                            f"Field '{field_name}' annotation is {actual_annotation}, "
+                            f"expected {annotation}"
+                        ),
+                        location=str(self.file_path),
+                    )
+                if require_default:
+                    if item.value is None:
+                        return CheckResult(
+                            check=check,
+                            passed=False,
+                            message=f"Field '{field_name}' has no default",
+                            location=str(self.file_path),
+                        )
+                    try:
+                        actual_default = ast.literal_eval(item.value)
+                    except (ValueError, TypeError):
+                        actual_default = object()
+                    if actual_default != expected_default:
+                        return CheckResult(
+                            check=check,
+                            passed=False,
+                            message=(
+                                f"Field '{field_name}' default does not match "
+                                f"{expected_default!r}"
+                            ),
+                            location=str(self.file_path),
+                        )
+                return CheckResult(
+                    check=check,
+                    passed=True,
+                    message=f"Dataclass field '{class_name}.{field_name}' matches",
+                    location=str(self.file_path),
+                )
+        return CheckResult(
+            check=check,
+            passed=False,
+            message=f"Dataclass field '{class_name}.{field_name}' not found",
+            location=str(self.file_path),
+        )
+
+    def check_method_parameter(
+        self,
+        class_name: str,
+        method_name: str,
+        parameter_name: str,
+        annotation: str = "",
+        expected_default: Any = None,
+        require_default: bool = False,
+    ) -> CheckResult:
+        """Check a method parameter annotation and optional default value."""
+        check = StructuralCheck(
+            check_type=CheckType.METHOD_PARAMETER,
+            target=f"{class_name}.{method_name}",
+            parameters={
+                "class": class_name,
+                "method": method_name,
+                "parameter": parameter_name,
+                "annotation": annotation,
+                "expected_default": expected_default,
+                "require_default": require_default,
+            },
+            description=f"Check method parameter '{class_name}.{method_name}'",
+        )
+        method = self._find_method(class_name, method_name)
+        if method is None:
+            return CheckResult(
+                check=check,
+                passed=False,
+                message=f"Method '{class_name}.{method_name}' not found",
+                location=str(self.file_path),
+            )
+        arguments = list(method.args.args)
+        defaults: list[ast.expr | None] = [None] * (
+            len(arguments) - len(method.args.defaults)
+        ) + list(method.args.defaults)
+        for argument, default in zip(arguments, defaults, strict=True):
+            if argument.arg != parameter_name:
+                continue
+            actual_annotation = ast.unparse(argument.annotation) if argument.annotation else ""
+            if annotation and actual_annotation != annotation:
+                return CheckResult(
+                    check=check,
+                    passed=False,
+                    message=(
+                        f"Parameter '{parameter_name}' annotation is "
+                        f"{actual_annotation or 'missing'}, expected {annotation}"
+                    ),
+                    location=str(self.file_path),
+                )
+            if require_default:
+                try:
+                    actual_default = ast.literal_eval(default) if default is not None else object()
+                except (ValueError, TypeError):
+                    actual_default = object()
+                if actual_default != expected_default:
+                    return CheckResult(
+                        check=check,
+                        passed=False,
+                        message=(
+                            f"Parameter '{parameter_name}' default does not match "
+                            f"{expected_default!r}"
+                        ),
+                        location=str(self.file_path),
+                    )
+            return CheckResult(
+                check=check,
+                passed=True,
+                message=f"Method parameter '{class_name}.{method_name}.{parameter_name}' matches",
+                location=str(self.file_path),
+            )
+        return CheckResult(
+            check=check,
+            passed=False,
+            message=f"Parameter '{parameter_name}' not found",
+            location=str(self.file_path),
+        )
+
+    def _find_method(
+        self,
+        class_name: str,
+        method_name: str,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        """Find a method directly declared by a class."""
+        for node in self.tree.body:
+            if not isinstance(node, ast.ClassDef) or node.name != class_name:
+                continue
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name:
+                    return item
+        return None
 
     def _get_call_name(self, node: ast.Call) -> str | None:
         """Extract the name of a function call.

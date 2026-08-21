@@ -1,7 +1,12 @@
 """Tests for acceptance probe functionality."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
+from patchpilot.planning.schema import AcceptanceProbeSpec
+from patchpilot.sandbox.docker_runner import CommandResult
+from patchpilot.verification.probes.runner import ProbeRunner
 from patchpilot.verification.probes.schema import (
     AcceptanceProbe,
     ProbeExecutionResult,
@@ -216,3 +221,34 @@ class TestProbeType:
     def test_probe_type_is_string_enum(self):
         """Test that probe type is a string enum."""
         assert isinstance(ProbeType.FUNCTION_IO, str)
+
+
+def test_declarative_probe_runs_through_sandbox():
+    """Execute a frozen probe through the sandbox without creating files."""
+    sandbox = MagicMock()
+    sandbox.run.return_value = CommandResult(
+        command="probe",
+        exit_code=0,
+        stdout='{"passed": true, "actual": "details"}',
+        stderr="",
+        duration_seconds=0.01,
+    )
+    spec = AcceptanceProbeSpec(
+        probe_id="probe-description",
+        module="task_service",
+        target="TaskService.create_task",
+        probe_type="state_change",
+        criterion_ids=["AC-3"],
+        constructor_args=[],
+        arguments=["title", "details"],
+        assertion="attribute_equals",
+        attribute="description",
+        expected="details",
+    )
+
+    result = ProbeRunner(sandbox).run_probe(spec)
+
+    assert result.passed is True
+    command = sandbox.run.call_args.args[0]
+    assert command.startswith("python -c ")
+    assert "details" not in command

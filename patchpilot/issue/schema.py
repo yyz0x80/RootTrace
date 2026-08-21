@@ -42,6 +42,14 @@ class TaskConstraint(BaseModel):
     kind: ConstraintKind
 
 
+class ArtifactRequirement(BaseModel):
+    """Describe a file-level deliverable requested by the issue author."""
+
+    kind: Literal["target_test_change", "documentation", "configuration", "other"]
+    description: str
+    required: bool = Field(default=True)
+
+
 class NormalizedIssue(BaseModel):
     """Structured representation of a normalized issue for PatchPilot processing.
 
@@ -66,6 +74,10 @@ class NormalizedIssue(BaseModel):
     )
 
     constraints: list[TaskConstraint] = Field(default_factory=list)
+
+    verification_requirements: list[str] = Field(default_factory=list)
+
+    artifact_requirements: list[ArtifactRequirement] = Field(default_factory=list)
 
     ambiguous_points: list[str] = Field(default_factory=list)
 

@@ -13,7 +13,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from patchpilot.evidence.schema import AcceptanceEvidence, CompletionState
+from patchpilot.evidence.schema import (
+    AcceptanceEvidence,
+    CompletionState,
+    ConstraintStatus,
+    EvidenceStatus,
+)
 from patchpilot.workflow.completion import CompletionDecision
 
 
@@ -84,6 +89,8 @@ class RunSummary(BaseModel):
     constraint_violation_count: int = 0
     evidence_precision_hint: str = ""
     failure_type: str | None = None
+    pre_existing_failure_count: int = 0
+    new_regression_count: int = 0
     error_message: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
 
@@ -180,6 +187,27 @@ class WorkflowResult(BaseModel):
             constraint_violation_count = decision.constraint_violation_count
             evidence_precision_hint = decision.evidence_precision_hint
             failure_type = decision.failure_type.value if decision.failure_type else None
+        else:
+            outcome_code = self.final_status.value
+            required_evidence = [
+                item for item in self.acceptance_evidence if item.required
+            ]
+            criterion_pass_count = sum(
+                item.status == EvidenceStatus.PASS for item in required_evidence
+            )
+            criterion_unverified_count = sum(
+                item.status == EvidenceStatus.UNVERIFIED
+                for item in required_evidence
+            )
+            constraint_violation_count = sum(
+                item.constraint is not None
+                and item.constraint.status == ConstraintStatus.VIOLATED
+                for item in self.acceptance_evidence
+            )
+            if criterion_unverified_count:
+                evidence_precision_hint = (
+                    f"{criterion_unverified_count} required criteria unverified"
+                )
 
         return RunSummary(
             run_id=self.run_id,
@@ -203,5 +231,15 @@ class WorkflowResult(BaseModel):
             constraint_violation_count=constraint_violation_count,
             evidence_precision_hint=evidence_precision_hint,
             failure_type=failure_type,
+            pre_existing_failure_count=int(
+                self.verification_report.get("transition_summary", {})
+                .get("overall", {})
+                .get("pre_existing_failure", 0)
+            ),
+            new_regression_count=int(
+                self.verification_report.get("transition_summary", {})
+                .get("overall", {})
+                .get("regression", 0)
+            ),
             artifacts=artifacts,
         )

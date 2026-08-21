@@ -120,12 +120,16 @@ def _aggregate_behavior_change(
     baseline_checks = [
         check
         for check in report.get_baseline_checks()
-        if criterion_id in check.subject_ids and check.direct
+        if criterion_id in check.subject_ids
+        and check.direct
+        and check.method in ("acceptance_probe", "pytest")
     ]
     post_patch_checks = [
         check
         for check in report.get_post_patch_checks()
-        if criterion_id in check.subject_ids and check.direct
+        if criterion_id in check.subject_ids
+        and check.direct
+        and check.method in ("acceptance_probe", "pytest")
     ]
 
     # If no direct checks, return None (no evidence)
@@ -183,12 +187,16 @@ def _aggregate_behavior_preservation(
     baseline_checks = [
         check
         for check in report.get_baseline_checks()
-        if criterion_id in check.subject_ids and check.direct
+        if criterion_id in check.subject_ids
+        and check.direct
+        and check.method in ("acceptance_probe", "pytest")
     ]
     post_patch_checks = [
         check
         for check in report.get_post_patch_checks()
-        if criterion_id in check.subject_ids and check.direct
+        if criterion_id in check.subject_ids
+        and check.direct
+        and check.method in ("acceptance_probe", "pytest")
     ]
 
     # If no direct checks, return None (no evidence)
@@ -240,12 +248,12 @@ def _aggregate_structural_contract(
     Returns:
         StructuralContractEvidence with computed status, or None if no structural checks exist
     """
-    # Find specialized structural checks (acceptance_probe, structural_check, ast_check, mock_check)
+    # Structural contracts are evaluated from post-patch structural evidence.
     specialized_checks = [
         check
-        for check in report.checks
+        for check in report.get_post_patch_checks()
         if criterion_id in check.subject_ids
-        and check.method in ("acceptance_probe", "structural_check", "ast_check", "mock_check")
+        and check.method in ("structural_check", "ast_check", "mock_check")
     ]
 
     # Find pytest checks
@@ -266,10 +274,10 @@ def _aggregate_structural_contract(
         check_passed = all(check.passed for check in specialized_checks)
         if check_passed:
             status = StructuralContractStatus.PASS
-            explanation = "Specialized acceptance probe and/or structural checks passed."
+            explanation = "Post-patch structural checks passed."
         else:
             status = StructuralContractStatus.FAIL
-            explanation = "Specialized acceptance probe and/or structural checks failed."
+            explanation = "Post-patch structural checks failed."
     elif has_pytest_only:
         status = StructuralContractStatus.UNVERIFIED
         check_passed = False

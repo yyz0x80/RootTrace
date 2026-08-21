@@ -100,7 +100,7 @@ def _get_builtin_write_policies() -> list[CompiledPathPolicy]:
         ),
         CompiledPathPolicy(
             id="builtin-write-3",
-            description="System constraint: Cannot modify CI/CD workflows",
+            description="Modifying CI/CD workflows is not allowed",
             kind="WRITE_SCOPE",
             allowed_paths=set(),
             denied_paths={".github/workflows"},
@@ -108,7 +108,7 @@ def _get_builtin_write_policies() -> list[CompiledPathPolicy]:
         ),
         CompiledPathPolicy(
             id="builtin-write-4",
-            description="System constraint: Cannot modify test files (Day 1 restriction)",
+            description="Modifying test files is not allowed (Day 1 restriction)",
             kind="WRITE_SCOPE",
             allowed_paths=set(),
             denied_paths={"tests"},
@@ -116,7 +116,7 @@ def _get_builtin_write_policies() -> list[CompiledPathPolicy]:
         ),
         CompiledPathPolicy(
             id="builtin-write-5",
-            description="System constraint: Cannot modify test_*.py files (Day 1 restriction)",
+            description="Modifying test files is not allowed (Day 1 restriction)",
             kind="WRITE_SCOPE",
             allowed_paths=set(),
             denied_paths={"test_"},

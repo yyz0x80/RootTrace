@@ -107,6 +107,7 @@ class Verifier:
 
             self._specialized_verifier = SpecializedVerifier(
                 self.workspace_root,
+                self.sandbox,
                 timeouts=self.timeouts,
             )
 

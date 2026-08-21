@@ -56,7 +56,9 @@ def map_acceptance_evidence(
         planned_files = {
             change.path
             for change in plan.planned_changes
-            if criterion.id in change.acceptance_criteria
+            if criterion.id in (
+                set(change.criterion_ids) | set(change.acceptance_criteria)
+            )
         }
 
         # Step 2: Calculate intersection with actual changes

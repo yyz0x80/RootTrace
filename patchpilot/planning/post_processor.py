@@ -266,9 +266,14 @@ def _validate_pytest_targets(
         for arg in pytest_args:
             if arg.startswith("-"):
                 continue
+
+            if "::" in arg:
+                raise PlanPostProcessError(
+                    "Exact pytest nodes are not accepted in planned_tests; "
+                    "use a declarative acceptance check for direct evidence"
+                )
             
-            # Extract file path from :: syntax (e.g., tests/test_x.py::TestClass::test_y)
-            file_path = arg.split("::", maxsplit=1)[0]
+            file_path = arg
             
             # Check if target exists
             if file_path not in tracked_files and file_path not in tracked_dirs:
@@ -286,6 +291,36 @@ def _validate_pytest_targets(
                 raise PlanPostProcessError(
                     f"Pytest target must be a test file or test directory: {file_path}"
                 )
+
+    return plan
+
+
+def _validate_acceptance_check_targets(
+    plan: ChangePlan,
+    repository_context: RepositoryContext,
+) -> ChangePlan:
+    """Require acceptance checks to target repository-owned Python files."""
+    tracked_files = set(repository_context.tracked_files)
+    planned_files = {change.path for change in plan.planned_changes}
+    available_files = tracked_files | planned_files
+
+    for probe in plan.acceptance_probes:
+        module_path = probe.module.replace(".", "/")
+        candidates = {
+            f"{module_path}.py",
+            f"{module_path}/__init__.py",
+        }
+        if available_files and candidates.isdisjoint(available_files):
+            raise PlanPostProcessError(
+                f"Acceptance probe module is not repository-owned: {probe.module}"
+            )
+
+    for check in plan.structural_checks:
+        if available_files and check.file_path not in available_files:
+            raise PlanPostProcessError(
+                f"Structural check file does not exist in repository: "
+                f"{check.file_path}"
+            )
 
     return plan
 
@@ -510,6 +545,16 @@ def post_process_plan(
     Raises:
         PlanPostProcessError: If post-processing fails with an unrecoverable error.
     """
+    unsupported_artifacts = [
+        requirement
+        for requirement in issue.artifact_requirements
+        if requirement.required and requirement.kind == "target_test_change"
+    ]
+    if unsupported_artifacts:
+        raise PlanPostProcessError(
+            "Required target-test changes conflict with the read-only test policy"
+        )
+
     # Step 1: Clean null baseline_evidence values
     plan = _clean_null_baseline_evidence(plan)
 
@@ -522,17 +567,20 @@ def post_process_plan(
     # Step 4: Validate pytest targets
     plan = _validate_pytest_targets(plan, repository_context)
 
-    # Step 5: Check for ambiguous points
+    # Step 5: Validate acceptance-check targets.
+    plan = _validate_acceptance_check_targets(plan, repository_context)
+
+    # Step 6: Check for ambiguous points
     plan = _check_ambiguity(plan, issue)
 
-    # Step 6: Classify semantic ambiguities
+    # Step 7: Classify semantic ambiguities
     plan = _classify_ambiguities(plan, issue)
 
-    # Step 7: Validate criterion plans (skip if requested)
+    # Step 8: Validate criterion plans (skip if requested)
     if not skip_ac_validation:
         plan = _validate_criterion_plans(plan, issue)
 
-    # Step 8: Complete AC mapping validation (skip if requested)
+    # Step 9: Complete AC mapping validation (skip if requested)
     if not skip_ac_validation:
         plan = _complete_ac_mapping(plan, issue)
 

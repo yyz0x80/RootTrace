@@ -101,6 +101,84 @@ def test_normalize_issue_with_mock_generate():
     assert result.acceptance_criteria[0].kind == "behavior"
 
 
+def test_normalize_issue_separates_test_verification_from_product_criteria():
+    """Move test instructions into verification requirements."""
+    issue = RawIssue(
+        title="Add description",
+        body="Add a description field and update tests to verify it.",
+        source="test",
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Add description",
+  "task_type": "feature",
+  "problem_statement": "Tasks need descriptions.",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "Task includes a description field.",
+      "kind": "structural",
+      "required": true
+    },
+    {
+      "id": "AC-2",
+      "description": "Tests must verify the description field.",
+      "kind": "behavior",
+      "required": true
+    }
+  ],
+  "constraints": [],
+  "verification_requirements": [],
+  "artifact_requirements": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert [criterion.id for criterion in result.acceptance_criteria] == ["AC-1"]
+    assert result.verification_requirements == [
+        "Tests must verify the description field."
+    ]
+    assert result.artifact_requirements == []
+
+
+def test_normalize_issue_preserves_explicit_test_patch_requirement():
+    """Record an explicit request for tests in the final patch."""
+    issue = RawIssue(
+        title="Add coverage",
+        body="The patch must include tests that verify the behavior.",
+        source="test",
+    )
+
+    def mock_generate(prompt: str) -> str:
+        return """{
+  "title": "Add coverage",
+  "task_type": "test",
+  "problem_statement": "Permanent regression coverage is required.",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "description": "The patch must include tests that verify the behavior.",
+      "kind": "behavior",
+      "required": true
+    }
+  ],
+  "constraints": [],
+  "ambiguous_points": [],
+  "expected_test_areas": [],
+  "implementation_notes": []
+}"""
+
+    result = normalize_issue(issue, mock_generate)
+
+    assert result.acceptance_criteria == []
+    assert len(result.artifact_requirements) == 1
+    assert result.artifact_requirements[0].kind == "target_test_change"
+
+
 def test_normalize_issue_handles_markdown_response():
     """Test normalize_issue when LLM returns markdown-wrapped JSON."""
     issue = RawIssue(

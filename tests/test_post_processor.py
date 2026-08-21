@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from patchpilot.issue.schema import AcceptanceCriterion, NormalizedIssue
+from patchpilot.issue.schema import (
+    AcceptanceCriterion,
+    ArtifactRequirement,
+    NormalizedIssue,
+)
 from patchpilot.planning.post_processor import (
     PlanPostProcessError,
     _check_ambiguity,
@@ -17,6 +21,7 @@ from patchpilot.planning.post_processor import (
     post_process_plan,
 )
 from patchpilot.planning.schema import (
+    AcceptanceProbeSpec,
     ChangeAction,
     ChangePlan,
     CriterionPlan,
@@ -465,8 +470,8 @@ def test_complete_ac_mapping_unknown_ac_failure() -> None:
         _complete_ac_mapping(plan, issue)
 
 
-def test_complete_ac_mapping_missing_test_allowed() -> None:
-    """Test that missing test mappings no longer hard fail (GLM median case)."""
+def test_complete_ac_mapping_requires_direct_probe() -> None:
+    """Reject a required behavior criterion without a direct probe."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -505,9 +510,8 @@ def test_complete_ac_mapping_missing_test_allowed() -> None:
         implementation_notes=[],
     )
 
-    # Should now pass (validator will generate warning instead)
-    processed = _complete_ac_mapping(plan, issue)
-    assert processed == plan
+    with pytest.raises(PlanPostProcessError, match="no direct acceptance check"):
+        _complete_ac_mapping(plan, issue)
 
 
 def test_post_process_plan_integration() -> None:
@@ -541,6 +545,16 @@ def test_post_process_plan_integration() -> None:
                 disposition=CriterionPlanDetail.TO_IMPLEMENT,
                 relevant_source_files=["src/main.py"],
             ),
+        ],
+        acceptance_probes=[
+            AcceptanceProbeSpec(
+                probe_id="probe-ac-1",
+                module="src.main",
+                target="run",
+                probe_type="function_io",
+                criterion_ids=["AC-1"],
+                assertion="truthy",
+            )
         ],
     )
 
@@ -610,4 +624,63 @@ def test_post_process_plan_with_ambiguity() -> None:
     )
 
     with pytest.raises(PlanPostProcessError, match="ambiguous points"):
+        post_process_plan(plan, issue, repository_context)
+
+
+def test_post_process_plan_blocks_required_test_artifact() -> None:
+    """Report a test deliverable that conflicts with read-only target tests."""
+    plan = ChangePlan(risk_level="low")
+    issue = NormalizedIssue(
+        title="Add tests",
+        task_type="test",
+        problem_statement="The patch must contain tests.",
+        artifact_requirements=[
+            ArtifactRequirement(
+                kind="target_test_change",
+                description="The patch must include tests.",
+            )
+        ],
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=[],
+        python_files=[],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    with pytest.raises(PlanPostProcessError, match="read-only test policy"):
+        post_process_plan(plan, issue, repository_context)
+
+
+def test_post_process_plan_rejects_non_repository_probe_module() -> None:
+    """Prevent declarative probes from invoking arbitrary installed modules."""
+    plan = ChangePlan(
+        risk_level="low",
+        acceptance_probes=[
+            AcceptanceProbeSpec(
+                probe_id="probe-system",
+                module="os",
+                target="getcwd",
+                probe_type="function_io",
+                assertion="truthy",
+            )
+        ],
+    )
+    issue = NormalizedIssue(
+        title="Inspect cwd",
+        task_type="other",
+        problem_statement="Inspect the working directory.",
+    )
+    repository_context = RepositoryContext(
+        base_commit="abc123",
+        tracked_files=["service.py"],
+        python_files=["service.py"],
+        test_files=[],
+        config_files=[],
+        keyword_matches=[],
+    )
+
+    with pytest.raises(PlanPostProcessError, match="not repository-owned"):
         post_process_plan(plan, issue, repository_context)

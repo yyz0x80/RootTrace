@@ -193,16 +193,32 @@ Here is the plan:
       "path": "src/main.py",
       "action": "modify",
       "description": "Refactor function",
-      "acceptance_criteria": ["AC-1"]
+      "acceptance_criteria": ["AC-1"],
+      "criterion_ids": ["AC-1"]
     }
   ],
   "planned_tests": [
     {
       "command": "pytest tests/",
       "purpose": "Verify refactoring",
-      "acceptance_criteria": ["AC-1"]
+      "acceptance_criteria": [],
+      "criterion_ids": []
     }
   ],
+  "criterion_plans": [{
+    "criterion_id": "AC-1",
+    "disposition": "to_implement",
+    "relevant_source_files": ["src/main.py"],
+    "baseline_evidence": ""
+  }],
+  "acceptance_probes": [{
+    "probe_id": "probe-ac-1",
+    "module": "src.main",
+    "target": "run",
+    "probe_type": "function_io",
+    "criterion_ids": ["AC-1"],
+    "assertion": "truthy"
+  }],
   "out_of_scope": ["UI changes"],
   "risk_level": "medium"
 }
@@ -758,19 +774,51 @@ def test_create_plan_retries_missing_acceptance_coverage_once():
     "path": "src/main.py",
     "action": "modify",
     "description": "Fix first behavior",
-    "acceptance_criteria": ["AC-1"]
+    "acceptance_criteria": ["AC-1"],
+    "criterion_ids": ["AC-1"]
   }],
   "planned_tests": [{
     "command": "pytest tests/test_main.py",
     "purpose": "Verify behavior",
-    "acceptance_criteria": ["AC-1", "AC-2"]
+    "acceptance_criteria": [],
+    "criterion_ids": []
   }],
+  "criterion_plans": [
+    {
+      "criterion_id": "AC-1",
+      "disposition": "to_implement",
+      "relevant_source_files": ["src/main.py"]
+    },
+    {
+      "criterion_id": "AC-2",
+      "disposition": "to_implement",
+      "relevant_source_files": ["src/main.py"]
+    }
+  ],
+  "acceptance_probes": [
+    {
+      "probe_id": "probe-ac-1",
+      "module": "src.main",
+      "target": "run",
+      "probe_type": "function_io",
+      "criterion_ids": ["AC-1"],
+      "assertion": "truthy"
+    },
+    {
+      "probe_id": "probe-ac-2",
+      "module": "src.main",
+      "target": "run",
+      "probe_type": "function_io",
+      "criterion_ids": ["AC-2"],
+      "assertion": "truthy"
+    }
+  ],
   "out_of_scope": [],
   "risk_level": "low"
 }"""
     repaired = incomplete.replace(
-        '"acceptance_criteria": ["AC-1"]',
-        '"acceptance_criteria": ["AC-1", "AC-2"]',
+        '"criterion_ids": ["AC-1"]',
+        '"criterion_ids": ["AC-1", "AC-2"]',
         1,
     )
     prompts: list[str] = []
@@ -783,9 +831,9 @@ def test_create_plan_retries_missing_acceptance_coverage_once():
     plan = create_plan(issue, repository_context, mock_generate)
 
     assert plan.base_commit == "abc123"
-    assert plan.planned_changes[0].acceptance_criteria == ["AC-1", "AC-2"]
+    assert plan.planned_changes[0].criterion_ids == ["AC-1", "AC-2"]
     assert len(prompts) == 2
-    assert "missing planned source changes: AC-2" in prompts[1]
+    assert "AC-2 has no planned source change" in prompts[1]
     assert "read-only" in prompts[1]
 
 

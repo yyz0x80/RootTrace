@@ -4,6 +4,7 @@ from collections.abc import Callable
 from patchpilot.issue.loader import RawIssue
 from patchpilot.issue.schema import (
     AcceptanceCriterion,
+    ArtifactRequirement,
     NormalizedIssue,
     TaskConstraint,
 )
@@ -39,15 +40,18 @@ Important rules:
    - behavior: Final program behavior (e.g., "reject invalid input", "users can login")
    - preservation: Existing behavior must not regress (e.g., "keep function signature", "maintain backward compatibility")
    - structural: Required source code structure (e.g., "must call normalize_email", "use factory pattern")
-8. Verification instructions (how to test) are NOT acceptance criteria. Put them in implementation_notes.
-9. Constraints must have sequential IDs: C-1, C-2, C-3...
-10. Classify constraints by kind:
+8. Verification instructions (how to test) are NOT acceptance criteria. Put them in
+   verification_requirements.
+9. A request that a test, document, or configuration file must be included in the
+   final patch is an artifact requirement, not an acceptance criterion.
+10. Constraints must have sequential IDs: C-1, C-2, C-3...
+11. Classify constraints by kind:
     - READ_SCOPE: Restrictions on what files can be read
     - WRITE_SCOPE: Restrictions on what files can be modified
     - COMMAND: Restrictions on commands that can be run
     - NETWORK: Restrictions on network access
     - OTHER: Other execution boundary constraints
-11. Return JSON only. Do not return Markdown.
+12. Return JSON only. Do not return Markdown.
 
 Allowed task_type:
 bug, feature, test, refactor, dependency, other.
@@ -73,6 +77,8 @@ Required JSON shape:
       "kind": "READ_SCOPE|WRITE_SCOPE|COMMAND|NETWORK|OTHER"
     }
   ],
+  "verification_requirements": [],
+  "artifact_requirements": [],
   "ambiguous_points": [],
   "expected_test_areas": [],
   "implementation_notes": []
@@ -84,7 +90,12 @@ _DESCRIPTION_LIST_FIELDS = (
     "ambiguous_points",
     "expected_test_areas",
     "implementation_notes",
+    "verification_requirements",
 )
+
+_TEST_TERMS = ("test", "tests", "pytest", "coverage", "assertion", "assertions")
+_VERIFICATION_TERMS = ("verify", "verifies", "verified", "cover", "covers", "exercise")
+_PATCH_DELIVERY_TERMS = ("in the patch", "in the pr", "in the commit", "must include")
 
 
 _EXECUTION_BOUNDARY_MARKERS = (
@@ -225,6 +236,22 @@ def _is_execution_constraint(description: str) -> bool:
     return has_boundary and has_scope
 
 
+def _is_test_verification_instruction(description: str) -> bool:
+    """Return whether a criterion describes how behavior should be tested."""
+    normalized = " ".join(description.lower().split())
+    return any(term in normalized for term in _TEST_TERMS) and any(
+        term in normalized for term in _VERIFICATION_TERMS
+    )
+
+
+def _requires_test_artifact(description: str) -> bool:
+    """Return whether the text explicitly requires tests in the final patch."""
+    normalized = " ".join(description.lower().split())
+    return any(term in normalized for term in _TEST_TERMS) and any(
+        term in normalized for term in _PATCH_DELIVERY_TERMS
+    )
+
+
 def _separate_execution_constraints(
     issue: NormalizedIssue,
 ) -> NormalizedIssue:
@@ -233,11 +260,26 @@ def _separate_execution_constraints(
     constraint_descriptions = [
         c.description for c in issue.constraints
     ]
+    verification_requirements = list(issue.verification_requirements)
+    artifact_requirements = list(issue.artifact_requirements)
 
     for criterion in issue.acceptance_criteria:
         if _is_execution_constraint(criterion.description):
             if criterion.description not in constraint_descriptions:
                 constraint_descriptions.append(criterion.description)
+            continue
+
+        if _is_test_verification_instruction(criterion.description):
+            if criterion.description not in verification_requirements:
+                verification_requirements.append(criterion.description)
+            if _requires_test_artifact(criterion.description):
+                artifact_requirements.append(
+                    ArtifactRequirement(
+                        kind="target_test_change",
+                        description=criterion.description,
+                        required=criterion.required,
+                    )
+                )
             continue
 
         product_criteria.append(criterion)
@@ -254,6 +296,8 @@ def _separate_execution_constraints(
         update={
             "acceptance_criteria": normalized_criteria,
             "constraints": migrated_constraints,
+            "verification_requirements": verification_requirements,
+            "artifact_requirements": artifact_requirements,
         }
     )
 
@@ -411,7 +455,9 @@ Previous response:
 Return one corrected JSON object only. Preserve the issue meaning.
 - acceptance_criteria must have id, description, kind (behavior|preservation|structural), and required (boolean)
 - constraints must have id, description, and kind (READ_SCOPE|WRITE_SCOPE|COMMAND|NETWORK|OTHER)
-- Items in ambiguous_points, expected_test_areas, and implementation_notes must be JSON strings, not objects.
+- verification_requirements must contain verification instructions, not product behavior.
+- artifact_requirements must describe file-level deliverables that must enter the patch.
+- Items in ambiguous_points, expected_test_areas, implementation_notes, and verification_requirements must be JSON strings, not objects.
 """
 
 

@@ -158,6 +158,23 @@ class StructuralRunner:
                         check.target,
                         check.parameters.get("decorator", ""),
                     )
+                case CheckType.DATACLASS_FIELD:
+                    return checker.check_dataclass_field(
+                        check.target,
+                        check.parameters.get("field", ""),
+                        check.parameters.get("annotation", ""),
+                        check.parameters.get("expected_default"),
+                        check.parameters.get("require_default", False),
+                    )
+                case CheckType.METHOD_PARAMETER:
+                    return checker.check_method_parameter(
+                        check.parameters.get("class", ""),
+                        check.parameters.get("method", ""),
+                        check.parameters.get("parameter", ""),
+                        check.parameters.get("annotation", ""),
+                        check.parameters.get("expected_default"),
+                        check.parameters.get("require_default", False),
+                    )
                 case _:
                     return CheckResult(
                         check=check,
@@ -281,7 +298,7 @@ class StructuralRunner:
         return StructuralCheck(
             check_type=CheckType.NO_NEW_IMPORTS,
             target="imports",
-            parameters={"allowed_imports": list(allowed_imports)},
+            parameters={"allowed_imports": sorted(allowed_imports)},
             description="Check that no new imports are added",
         )
 

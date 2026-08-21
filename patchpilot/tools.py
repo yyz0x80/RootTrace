@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, Union, get_type_hints
 
 from patchpilot.models import ToolFailureType, ToolResult
+from patchpilot.policy.builtins import get_builtin_policies
 from patchpilot.policy.evaluator import PolicyEvaluator
 from patchpilot.policy.schema import PolicySet
 from patchpilot.validation import run_intermediate_validation
@@ -613,14 +614,14 @@ class ToolRegistry:
         command_runner: CommandRunnerProtocol | None = None,
     ):
         self.workspace = workspace
-        self.policy_set = policy_set
+        self.policy_set = policy_set or get_builtin_policies()
         self.command_runner = command_runner
         # Dynamic tool registration storage
         self._tool_definitions: dict[str, ToolDefinition] = {}
         self._tool_handlers: dict[str, Any] = {}
 
         # Initialize policy evaluator if policy_set is provided
-        self.policy_evaluator = PolicyEvaluator(policy_set) if policy_set else None
+        self.policy_evaluator = PolicyEvaluator(self.policy_set)
 
         # Register default tools
         self._register_default_tools()
@@ -1710,50 +1711,46 @@ class ToolRegistry:
         if not args:
             return ToolResult(ok=False, content="Empty command")
 
-        # Use PolicyEvaluator if available, otherwise use basic validation
+        # Enforce the narrow command grammar before evaluating extra policies.
+        base_command = args[0]
+        allowed_commands = {"pytest", "python", "ruff", "git"}
+        if base_command not in allowed_commands:
+            return ToolResult(
+                ok=False,
+                content=(
+                    f"Command '{base_command}' is not allowed. Allowed: "
+                    f"{', '.join(sorted(allowed_commands))}"
+                ),
+            )
+
+        if (
+            base_command == "python"
+            and args[:3] != ["python", "-m", "pytest"]
+        ):
+            return ToolResult(
+                ok=False,
+                content="Only 'python -m pytest' is allowed for python command",
+            )
+
+        if base_command == "git" and (
+            len(args) < 2 or args[1] not in {"diff", "status"}
+        ):
+            return ToolResult(
+                ok=False,
+                content="Only 'git diff' and 'git status' are allowed for git command",
+            )
+
+        if base_command == "ruff" and args[:2] != ["ruff", "check"]:
+            return ToolResult(
+                ok=False,
+                content="Only 'ruff check' is allowed for ruff command",
+            )
+
         if self.policy_evaluator:
             try:
                 self.policy_evaluator.assert_command_allowed(input_data.command)
             except PermissionError as e:
                 return ToolResult(ok=False, content=str(e))
-        else:
-            # Fallback to basic validation for backward compatibility
-            base_command = args[0]
-            ALLOWED_COMMANDS = {"pytest", "python", "ruff", "git"}
-            if base_command not in ALLOWED_COMMANDS:
-                return ToolResult(
-                    ok=False,
-                    content=f"Command '{base_command}' is not allowed. Allowed: {', '.join(sorted(ALLOWED_COMMANDS))}"
-                )
-
-            # Additional validation for specific commands
-            if base_command == "python":
-                # Only allow python -m pytest
-                if len(args) >= 2 and args[1] == "-m":
-                    if len(args) >= 3 and args[2] != "pytest":
-                        return ToolResult(
-                            ok=False,
-                            content="Only 'python -m pytest' is allowed for python command"
-                        )
-                else:
-                    return ToolResult(
-                        ok=False,
-                        content="Only 'python -m pytest' is allowed for python command"
-                    )
-
-            if base_command == "git" and len(args) >= 2 and args[1] not in {"diff", "status"}:
-                # Only allow git diff and git status
-                return ToolResult(
-                    ok=False,
-                    content="Only 'git diff' and 'git status' are allowed for git command"
-                )
-
-            if base_command == "ruff" and len(args) >= 2 and args[1] != "check":
-                # Only allow ruff check
-                return ToolResult(
-                    ok=False,
-                    content="Only 'ruff check' is allowed for ruff command"
-                )
 
         execution_args = self._canonicalize_command(args)
 

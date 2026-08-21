@@ -20,8 +20,22 @@ from patchpilot.planning.schema import (
     PlannedChange,
     StructuralCheckSpec,
 )
+from patchpilot.sandbox.docker_runner import CommandResult
 from patchpilot.verification.report import CheckReport, VerificationReport
 from patchpilot.verification.specialized import SpecializedVerifier
+
+
+def _passing_sandbox() -> MagicMock:
+    """Return a sandbox double that reports a passing declarative probe."""
+    sandbox = MagicMock()
+    sandbox.run.return_value = CommandResult(
+        command="probe",
+        exit_code=0,
+        stdout='{"passed": true, "actual": true}',
+        stderr="",
+        duration_seconds=0.01,
+    )
+    return sandbox
 
 
 def test_specialized_verifier_integration_with_change_plan():
@@ -44,16 +58,11 @@ def test_specialized_verifier_integration_with_change_plan():
             acceptance_probes=[
                 AcceptanceProbeSpec(
                     probe_id="probe_1",
-                    target_function="test_function",
+                    module="test_module",
+                    target="test_function",
                     probe_type="function_io",
                     criterion_ids=["ac_1"],
-                    steps=[
-                        {
-                            "description": "Test function returns True",
-                            "code": "assert test_function() == True",
-                            "expected_outcome": "no_exception",
-                        }
-                    ],
+                    assertion="truthy",
                 )
             ],
             structural_checks=[
@@ -68,7 +77,7 @@ def test_specialized_verifier_integration_with_change_plan():
         )
         
         # Create SpecializedVerifier
-        verifier = SpecializedVerifier(workspace_root)
+        verifier = SpecializedVerifier(workspace_root, _passing_sandbox())
         
         # Test that it detects specialized checks
         assert verifier.has_specialized_checks(change_plan)
@@ -102,7 +111,7 @@ def test_specialized_checks_without_change_plan():
         change_plan = ChangePlan(risk_level="low")
         
         # Create SpecializedVerifier
-        verifier = SpecializedVerifier(workspace_root)
+        verifier = SpecializedVerifier(workspace_root, _passing_sandbox())
         
         # Test that it doesn't detect specialized checks
         assert not verifier.has_specialized_checks(change_plan)
@@ -141,7 +150,7 @@ def test_specialized_check_report_format():
         )
         
         # Create SpecializedVerifier
-        verifier = SpecializedVerifier(workspace_root)
+        verifier = SpecializedVerifier(workspace_root, _passing_sandbox())
         
         # Execute specialized checks
         check_reports = verifier.execute_specialized_checks(
@@ -202,8 +211,8 @@ def test_specialized_checks_reach_verification_report():
     assert any(check.method == "structural_check" for check in report.checks)
 
 
-def test_specialized_checks_reach_evidence_aggregator():
-    """Test that specialized checks are processed by evidence aggregator."""
+def test_acceptance_probe_reaches_behavior_evidence():
+    """Map a runtime probe to behavior evidence, not structural evidence."""
     # Create VerificationReport with specialized checks
     report = VerificationReport(
         run_id="test_run",
@@ -233,9 +242,8 @@ def test_specialized_checks_reach_evidence_aggregator():
         report=report,
     )
     
-    # Verify evidence includes structural contract dimension
-    assert evidence.structural_contract is not None
-    assert evidence.structural_contract.has_specialized_check is True
+    assert evidence.behavior_change is not None
+    assert evidence.structural_contract is None
 
 
 def test_missing_specialized_checks_result_in_unverified():
@@ -274,8 +282,8 @@ def test_missing_specialized_checks_result_in_unverified():
     assert evidence.structural_contract.status == EvidenceStatus.UNVERIFIED
 
 
-def test_specialized_checks_in_evidence_mapper():
-    """Test that specialized checks are processed by evidence mapper."""
+def test_acceptance_probe_in_evidence_mapper():
+    """Map an acceptance probe into behavior evidence."""
     # Create NormalizedIssue with acceptance criteria
     issue = NormalizedIssue(
         title="Test Issue",
@@ -334,11 +342,11 @@ def test_specialized_checks_in_evidence_mapper():
         report=report,
     )
     
-    # Verify evidence includes specialized check information
+    # Verify the runtime probe contributes behavior evidence.
     assert len(evidence_list) == 1
     evidence = evidence_list[0]
-    assert evidence.structural_contract is not None
-    assert evidence.structural_contract.has_specialized_check is True
+    assert evidence.behavior_change is not None
+    assert evidence.structural_contract is None
 
 
 def test_constraint_audit_check_creation():

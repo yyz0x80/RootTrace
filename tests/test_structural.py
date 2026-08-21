@@ -155,6 +155,47 @@ class TestASTChecker:
         finally:
             file_path.unlink()
 
+    def test_check_dataclass_field_and_default(self, tmp_path):
+        """Verify dataclass field annotations and defaults."""
+        file_path = tmp_path / "task.py"
+        file_path.write_text(
+            "from dataclasses import dataclass\n\n"
+            "@dataclass\n"
+            "class Task:\n"
+            "    title: str\n"
+            "    description: str = ''\n"
+        )
+
+        result = ASTChecker(file_path).check_dataclass_field(
+            "Task",
+            "description",
+            "str",
+            "",
+            True,
+        )
+
+        assert result.passed is True
+
+    def test_check_method_parameter_and_default(self, tmp_path):
+        """Verify a method parameter annotation and default."""
+        file_path = tmp_path / "service.py"
+        file_path.write_text(
+            "class Service:\n"
+            "    def create(self, title: str, description: str = ''):\n"
+            "        return description\n"
+        )
+
+        result = ASTChecker(file_path).check_method_parameter(
+            "Service",
+            "create",
+            "description",
+            "str",
+            "",
+            True,
+        )
+
+        assert result.passed is True
+
     def test_check_call_relationship_success(self):
         """Test call relationship check when call exists."""
         with tempfile.NamedTemporaryFile(

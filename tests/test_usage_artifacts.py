@@ -6,7 +6,11 @@ import json
 from pathlib import Path
 
 from patchpilot.cli import _save_prepare_summary
-from patchpilot.evidence.schema import CompletionState
+from patchpilot.evidence.schema import (
+    AcceptanceEvidence,
+    CompletionState,
+    EvidenceStatus,
+)
 from patchpilot.workflow.result import WorkflowResult
 
 
@@ -61,3 +65,41 @@ def test_run_summary_includes_usage_and_evidence_artifact() -> None:
     assert summary.artifacts["acceptance_evidence"] == (
         "artifacts/acceptance_evidence.json"
     )
+
+
+def test_run_summary_derives_evidence_and_regression_counts() -> None:
+    """Populate summary metrics when the completion decision is not retained."""
+    result = WorkflowResult(
+        run_id="run-1",
+        final_status=CompletionState.PARTIALLY_VERIFIED,
+        acceptance_evidence=[
+            AcceptanceEvidence(
+                criterion_id="AC-1",
+                description="Verified behavior",
+                status=EvidenceStatus.PASS,
+                explanation="Probe passed.",
+            ),
+            AcceptanceEvidence(
+                criterion_id="AC-2",
+                description="Missing evidence",
+                status=EvidenceStatus.UNVERIFIED,
+                explanation="No direct check.",
+            ),
+        ],
+        verification_report={
+            "transition_summary": {
+                "overall": {
+                    "pre_existing_failure": 2,
+                    "regression": 1,
+                }
+            }
+        },
+    )
+
+    summary = result.to_run_summary()
+
+    assert summary.outcome_code == "PARTIALLY_VERIFIED"
+    assert summary.criterion_pass_count == 1
+    assert summary.criterion_unverified_count == 1
+    assert summary.pre_existing_failure_count == 2
+    assert summary.new_regression_count == 1
