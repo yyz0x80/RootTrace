@@ -62,6 +62,7 @@ def test_failed_run_summary_records_agent_failure(tmp_path: Path) -> None:
         failure_type="AGENT_ROUND_LIMIT",
         error_message="Agent exceeded the round limit",
         verification_report={"passed": False, "retry_count": 1},
+        partial_patch="diff --git a/task.py b/task.py\n",
     )
 
     summary = json.loads((tmp_path / "run_summary.json").read_text())
@@ -70,8 +71,10 @@ def test_failed_run_summary_records_agent_failure(tmp_path: Path) -> None:
     assert summary["error_message"] == "Agent exceeded the round limit"
     assert summary["retry_count"] == 1
     assert summary["artifacts"] == {
+        "patch": str(tmp_path / "patch.diff"),
         "verification_report": str(tmp_path / "verification_report.json")
     }
+    assert (tmp_path / "patch.diff").read_text().startswith("diff --git")
     report = json.loads(
         (tmp_path / "verification_report.json").read_text()
     )

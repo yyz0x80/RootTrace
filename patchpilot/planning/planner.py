@@ -8,9 +8,15 @@ import json
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
+from pydantic import BaseModel, ValidationError
+
 from patchpilot.issue.schema import NormalizedIssue
 from patchpilot.planning.post_processor import post_process_plan
-from patchpilot.planning.schema import ChangePlan
+from patchpilot.planning.schema import (
+    AcceptanceProbeSpec,
+    ChangePlan,
+    StructuralCheckSpec,
+)
 from patchpilot.planning.scope_gate import check_scope
 from patchpilot.planning.validator import validate_acceptance_coverage
 from patchpilot.policy.builtins import get_builtin_policies
@@ -132,11 +138,21 @@ Rules:
 16. Existing pytest commands provide regression coverage. Do not invent test paths.
 17. Constraints are execution boundaries, not acceptance criteria. Do not invent
     source changes merely to implement a read-only or security constraint.
-18. When verification_requirements is non-empty, every required behavior criterion
-    must have a declarative acceptance_probe and every required structural criterion
-    must have a structural_check. These checks run outside the generated patch.
+18. When verification_requirements is non-empty, add a declarative acceptance_probe
+    for each required behavior criterion and a structural_check for each required
+    structural criterion when repository context is sufficient. These checks run
+    outside the generated patch and never expand source write scope.
 19. Use only repository-owned modules, callables, and files in direct checks. Do not
     invent fixtures, executable code strings, shell commands, or test modifications.
+20. probe_type classifies the probe and must be exactly one of: function_io,
+    exception, state_change, invariant, return_structure.
+21. assertion evaluates the result and must be exactly one of: equals,
+    attribute_equals, raises, truthy, falsy. The value return_structure is only
+    a probe_type and must never be used as assertion.
+22. check_type must be exactly one of: function_exists, signature_preserved,
+    call_relationship, no_new_imports, method_exists, decorator_exists,
+    dataclass_field, method_parameter. Never use function_signature or a probe_type
+    such as function_io as check_type.
 
 Required structure:
 
@@ -174,13 +190,13 @@ Required structure:
       "probe_id": "probe-ac-1",
       "module": "package.module",
       "target": "callable_name",
-      "probe_type": "function_io|exception|state_change|invariant|return_structure",
+      "probe_type": "function_io",
       "criterion_ids": ["AC-1"],
       "constructor_args": [],
       "constructor_kwargs": {{}},
       "arguments": [],
       "keyword_arguments": {{}},
-      "assertion": "equals|attribute_equals|raises|truthy|falsy",
+      "assertion": "equals",
       "expected": null,
       "attribute": "",
       "exception": ""
@@ -189,7 +205,7 @@ Required structure:
   "structural_checks": [
     {{
       "check_id": "struct-ac-2",
-      "check_type": "function_exists|method_exists|dataclass_field|method_parameter",
+      "check_type": "dataclass_field",
       "target": "symbol_name",
       "parameters": {{}},
       "criterion_ids": ["AC-2"],
@@ -254,7 +270,176 @@ def _extract_json(text: str) -> dict:
                 clean_baseline_evidence(item)
 
     clean_baseline_evidence(parsed_json)
+    compile_optional_evidence(parsed_json)
     return parsed_json
+
+
+def _normalize_probe_assertions(data: dict) -> None:
+    """Repair unambiguous probe-type values placed in assertion fields.
+
+    Some tool-calling models copy a valid ``probe_type`` enum value into the
+    separate ``assertion`` field. The surrounding declarative operands provide
+    enough information to select the corresponding supported assertion without
+    executing or inventing code.
+    """
+    probes = data.get("acceptance_probes")
+    if not isinstance(probes, list):
+        return
+
+    probe_types = {
+        "function_io",
+        "exception",
+        "state_change",
+        "invariant",
+        "return_structure",
+    }
+    warnings = data.setdefault("validation_warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
+        data["validation_warnings"] = warnings
+
+    for index, probe in enumerate(probes):
+        if not isinstance(probe, dict):
+            continue
+        invalid_assertion = probe.get("assertion")
+        if invalid_assertion == "equals" and probe.get("attribute"):
+            probe["assertion"] = "attribute_equals"
+            probe_id = probe.get("probe_id") or f"index {index}"
+            warnings.append(
+                "Normalized acceptance probe "
+                f"{probe_id} assertion from 'equals' to 'attribute_equals' "
+                "because an attribute operand was provided"
+            )
+            continue
+        if invalid_assertion not in probe_types:
+            continue
+
+        if invalid_assertion == "exception":
+            normalized_assertion = "raises"
+        elif probe.get("attribute"):
+            normalized_assertion = "attribute_equals"
+        elif "expected" in probe:
+            normalized_assertion = "equals"
+        else:
+            normalized_assertion = "truthy"
+
+        probe["assertion"] = normalized_assertion
+        probe_id = probe.get("probe_id") or f"index {index}"
+        warnings.append(
+            "Normalized acceptance probe "
+            f"{probe_id} assertion from {invalid_assertion!r} "
+            f"to {normalized_assertion!r}"
+        )
+
+
+def compile_optional_evidence(data: dict) -> None:
+    """Compile model-authored verification metadata independently.
+
+    Acceptance probes and structural checks improve evidence quality but do not
+    authorize source changes. A malformed optional item therefore must not make
+    an otherwise valid implementation plan unusable. Known aliases are repaired;
+    items that still fail schema validation are dropped with an explicit warning.
+    """
+    _normalize_probe_assertions(data)
+    structural_aliases = {
+        "function_signature": "signature_preserved",
+    }
+    checks = data.get("structural_checks")
+    if isinstance(checks, list):
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            check_type = check.get("check_type")
+            normalized_type = structural_aliases.get(check_type)
+            if normalized_type is None:
+                continue
+            check["check_type"] = normalized_type
+            check_id = check.get("check_id") or "unknown"
+            _append_plan_warning(
+                data,
+                "Normalized optional structural check "
+                f"{check_id} check_type from {check_type!r} "
+                f"to {normalized_type!r}",
+            )
+
+    _compile_optional_items(
+        data,
+        field_name="acceptance_probes",
+        item_label="acceptance probe",
+        identifier_field="probe_id",
+        model_type=AcceptanceProbeSpec,
+    )
+    _compile_optional_items(
+        data,
+        field_name="structural_checks",
+        item_label="structural check",
+        identifier_field="check_id",
+        model_type=StructuralCheckSpec,
+    )
+
+
+def _compile_optional_items(
+    data: dict,
+    *,
+    field_name: str,
+    item_label: str,
+    identifier_field: str,
+    model_type: type[BaseModel],
+) -> None:
+    """Validate optional evidence items without rejecting the core plan."""
+    if field_name not in data:
+        return
+    raw_items = data.get(field_name, [])
+    if not isinstance(raw_items, list):
+        data[field_name] = []
+        _append_plan_warning(
+            data,
+            f"Dropped optional {field_name}: expected a JSON array",
+        )
+        return
+
+    compiled_items = []
+    for index, raw_item in enumerate(raw_items):
+        identifier = (
+            raw_item.get(identifier_field)
+            if isinstance(raw_item, dict)
+            else None
+        ) or f"index {index}"
+        try:
+            compiled_item = model_type.model_validate(raw_item)
+        except (TypeError, ValidationError) as error:
+            detail = _first_validation_error(error)
+            _append_plan_warning(
+                data,
+                f"Dropped optional {item_label} {identifier}: {detail}",
+            )
+            continue
+        compiled_items.append(compiled_item.model_dump(mode="json"))
+
+    data[field_name] = compiled_items
+
+
+def _first_validation_error(error: TypeError | ValidationError) -> str:
+    """Return a stable, bounded explanation for an invalid optional item."""
+    if isinstance(error, ValidationError):
+        first_error = error.errors(include_url=False)[0]
+        location = ".".join(str(part) for part in first_error["loc"])
+        message = first_error["msg"]
+        input_repr = repr(first_error.get("input"))
+        if len(input_repr) > 80:
+            input_repr = input_repr[:77] + "..."
+        message = f"{message} (received {input_repr})"
+        return f"invalid {location}: {message}" if location else message
+    return str(error)
+
+
+def _append_plan_warning(data: dict, warning: str) -> None:
+    """Append a warning while tolerating a malformed model-authored warning list."""
+    warnings = data.get("validation_warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        data["validation_warnings"] = warnings
+    warnings.append(warning)
 
 
 def _parse_plan_response(response: str, base_commit: str) -> ChangePlan:
@@ -267,13 +452,15 @@ def _parse_plan_response(response: str, base_commit: str) -> ChangePlan:
 def _validate_generated_plan_coverage(
     plan: ChangePlan,
     issue: NormalizedIssue,
-) -> None:
-    """Validate recoverable acceptance coverage errors in a model plan."""
+) -> ChangePlan:
+    """Validate acceptance coverage and retain non-blocking diagnostics."""
     # Security and scope violations are terminal decisions, not omissions the
     # model should be prompted to repair into a more detailed plan.
     policy_set = get_builtin_policies()
     if plan.repository_match and check_scope(plan, policy_set).allowed:
-        validate_acceptance_coverage(plan, issue)
+        warnings = validate_acceptance_coverage(plan, issue)
+        return plan.model_copy(update={"validation_warnings": warnings})
+    return plan
 
 
 def _build_plan_repair_prompt(
@@ -300,7 +487,9 @@ or cannot_verify). For "already_satisfied", provide baseline_evidence. For struc
 criteria, specify relevant_source_files. "to_implement" criteria should map to at least
 one planned source-code change. When the issue has explicit verification requirements,
 add validated declarative acceptance_probes for behavior criteria and structural_checks
-for structural criteria. Do not modify tests to provide this evidence.
+for structural criteria. A probe assertion must be equals, attribute_equals, raises,
+truthy, or falsy; return_structure is a probe_type, never an assertion. Do not modify
+tests to provide this evidence.
 Existing tests are read-only. Create a new test file only for an explicit required
 target_test_change artifact; never modify or delete an existing test.
 Preserve repository_match=false when the issue does not match the repository; do not
@@ -327,7 +516,7 @@ def _generate_plan_with_repair(
                 repository_context,
                 skip_ac_validation=True,
             )
-            _validate_generated_plan_coverage(plan, issue)
+            plan = _validate_generated_plan_coverage(plan, issue)
             return plan
         except ValueError as error:
             if repair_attempt == MAX_PLAN_REPAIR_ATTEMPTS:

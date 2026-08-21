@@ -54,6 +54,58 @@ class TestRepairSelectorSelectCandidates:
         assert len(selection.repair_candidates) == 0
         assert len(selection.excluded_failures) == 0
 
+    def test_baseline_failures_are_not_repair_candidates(self):
+        """Merged baseline diagnostics must not be sent to the repair agent."""
+        report = VerificationReport(passed=False)
+        report.add_check(
+            CheckReport(
+                method="structural_check",
+                phase="baseline",
+                level="SPECIALIZED_STRUCTURAL",
+                command="structural:method_parameter:.",
+                passed=False,
+                exit_code=1,
+                duration_seconds=0.0,
+                failure_type="structural_failure",
+                tier="required",
+                failure_fingerprint="baseline-check",
+            )
+        )
+
+        selection = RepairSelector(strategy="strict").select_repair_candidates(
+            report
+        )
+
+        assert selection.should_stop
+        assert not selection.repair_candidates
+
+    def test_scratch_failure_is_never_repairable(self):
+        """Supplemental agent tests remain non-blocking under strict strategy."""
+        report = VerificationReport(passed=False)
+        report.add_check(
+            CheckReport(
+                method="agent_scratch_pytest",
+                phase="post_patch",
+                level="LEVEL_2_AGENT_SCRATCH",
+                command="python -m pytest .patchpilot_checks -q",
+                passed=False,
+                exit_code=1,
+                duration_seconds=0.1,
+                failure_type="TEST_FAILURE",
+                tier="optional",
+                transition=CheckTransition.NEW_OR_UNCOMPARED.value,
+                failure_fingerprint="scratch-check",
+            )
+        )
+
+        selection = RepairSelector(strategy="strict").select_repair_candidates(
+            report
+        )
+
+        assert selection.should_stop
+        assert not selection.repair_candidates
+        assert "supplemental" in selection.excluded_failures[0].reason
+
     def test_required_target_failure_is_repairable(self):
         """Test that REQUIRED target failures are selected for repair."""
         report = VerificationReport(passed=False)

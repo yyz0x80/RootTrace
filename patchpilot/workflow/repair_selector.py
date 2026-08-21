@@ -140,7 +140,11 @@ class RepairSelector:
         selection = RepairSelection()
 
         # Get failed checks
-        failed_checks = report.get_failed_checks()
+        failed_checks = [
+            check
+            for check in report.get_failed_checks()
+            if check.phase != "baseline"
+        ]
 
         if not failed_checks:
             # No failures - no repair needed
@@ -188,6 +192,15 @@ class RepairSelector:
         tier = check.tier or "unknown"
         transition = check.transition or CheckTransition.NEW_OR_UNCOMPARED.value
         fingerprint = check.failure_fingerprint or ""
+
+        if check.method == "agent_scratch_pytest":
+            return ExcludedFailure(
+                check=check,
+                reason="Agent scratch tests are supplemental evidence only",
+                tier=tier,
+                transition=transition,
+                is_blocking=False,
+            )
 
         # Check for non-repairable failure types first
         if self._is_non_repairable_failure(check):

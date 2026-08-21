@@ -516,8 +516,8 @@ def test_complete_ac_mapping_warns_without_direct_probe() -> None:
     assert any("no direct acceptance check" in item for item in result.validation_warnings)
 
 
-def test_complete_ac_mapping_rejects_unverified_explicit_requirement() -> None:
-    """An explicit verification request requires executable direct evidence."""
+def test_complete_ac_mapping_warns_for_unverified_explicit_requirement() -> None:
+    """An explicit request keeps missing direct evidence visible but non-blocking."""
     plan = ChangePlan(
         base_commit="abc123",
         repository_match=True,
@@ -554,11 +554,12 @@ def test_complete_ac_mapping_rejects_unverified_explicit_requirement() -> None:
         verification_requirements=["Verify the corrected result directly"],
     )
 
-    with pytest.raises(
-        PlanPostProcessError,
-        match="no direct acceptance check",
-    ):
-        _complete_ac_mapping(plan, issue)
+    result = _complete_ac_mapping(plan, issue)
+
+    assert any(
+        "no direct acceptance check" in warning
+        for warning in result.validation_warnings
+    )
 
 
 def test_post_process_plan_integration() -> None:

@@ -9,6 +9,7 @@ from patchpilot.agent_loop import (
     AgentLoop,
     AgentLoopError,
     AgentLoopLimitError,
+    AgentNoProgressError,
     AgentState,
 )
 from patchpilot.models import (
@@ -305,6 +306,48 @@ class TestAgentLoopRun:
         ]
         assert any("Pytest" in message for message in gate_messages)
         assert any("Ruff" in message for message in gate_messages)
+
+    def test_completion_gate_stops_after_two_identical_blocked_completions(self):
+        """A stalled model must not consume the complete round budget."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_provider.complete.return_value = AssistantTurn(
+            content="No changes needed",
+            tool_calls=[],
+        )
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            max_rounds=16,
+            enforce_completion_gate=True,
+        )
+
+        with pytest.raises(AgentNoProgressError, match="without progress"):
+            agent_loop.run("Fix task.py")
+
+        assert mock_provider.complete.call_count == 2
+
+    def test_repair_completion_gate_allows_a_verified_no_op(self):
+        """Repair mode may finish without inventing a source edit."""
+        mock_provider = Mock()
+        mock_tools = Mock()
+        mock_tools.get_tool_schemas.return_value = []
+        mock_provider.complete.return_value = AssistantTurn(
+            content="The reported failure is not source-repairable",
+            tool_calls=[],
+        )
+        agent_loop = AgentLoop(
+            provider=mock_provider,
+            tools=mock_tools,
+            enforce_completion_gate=True,
+            require_edit_for_completion=False,
+        )
+
+        result = agent_loop.run("Inspect the failed verification")
+
+        assert result == "The reported failure is not source-repairable"
+        assert mock_provider.complete.call_count == 1
 
     def test_run_with_multiple_tool_calls(self):
         """Test execution of multiple tool calls in one round."""

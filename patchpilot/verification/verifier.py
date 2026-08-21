@@ -146,7 +146,7 @@ class Verifier:
 
         # Run repository-wide linting so post-patch lint failures can be
         # distinguished from pre-existing quality debt.
-        ruff_command = "ruff check --no-cache ."
+        ruff_command = "ruff check --no-cache --exclude .patchpilot_checks ."
         ruff_result = self.sandbox.run(
             ruff_command,
             timeout_seconds=self.timeouts.ruff,
@@ -339,7 +339,7 @@ class Verifier:
         checks: list[CheckReport] = []
 
         # Level 1: Ruff linting
-        ruff_command = "ruff check --no-cache ."
+        ruff_command = "ruff check --no-cache --exclude .patchpilot_checks ."
         ruff_result = self.sandbox.run(
             ruff_command,
             timeout_seconds=self.timeouts.ruff,
@@ -543,7 +543,7 @@ class Verifier:
         baseline_checks = baseline_report.get_baseline_checks() if baseline_report else []
 
         # Level 1: Ruff linting (always runs, marked as required since it's blocking)
-        ruff_command = "ruff check --no-cache ."
+        ruff_command = "ruff check --no-cache --exclude .patchpilot_checks ."
         ruff_result = self.sandbox.run(
             ruff_command,
             timeout_seconds=self.timeouts.ruff,

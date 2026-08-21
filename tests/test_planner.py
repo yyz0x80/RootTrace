@@ -10,6 +10,7 @@ from patchpilot.planning.planner import (
     IGNORED_DIRS,
     PlanGenerationError,
     _extract_json,
+    _parse_plan_response,
     create_plan,
     create_plan_with_path,
     get_repository_files,
@@ -121,6 +122,151 @@ def test_extract_json_with_surrounding_text():
     text = 'Here is the plan:\n{"key": "value"}\nThat is all.'
     result = _extract_json(text)
     assert result == {"key": "value"}
+
+
+def test_extract_json_normalizes_probe_type_used_as_assertion() -> None:
+    """Known probe-type values in assertion fields are repaired deterministically."""
+    result = _extract_json(
+        json.dumps(
+            {
+                "acceptance_probes": [
+                    {
+                        "probe_id": "probe-result",
+                        "module": "tasks",
+                        "target": "create_task",
+                        "probe_type": "return_structure",
+                        "assertion": "return_structure",
+                        "expected": {"description": ""},
+                    },
+                    {
+                        "probe_id": "probe-attribute",
+                        "module": "tasks",
+                        "target": "create_task",
+                        "probe_type": "state_change",
+                        "assertion": "state_change",
+                        "attribute": "description",
+                    },
+                    {
+                        "probe_id": "probe-error",
+                        "module": "tasks",
+                        "target": "create_task",
+                        "probe_type": "exception",
+                        "assertion": "exception",
+                        "exception": "ValueError",
+                    },
+                    {
+                        "probe_id": "probe-explicit-attribute",
+                        "module": "tasks",
+                        "target": "create_task",
+                        "probe_type": "return_structure",
+                        "assertion": "equals",
+                        "attribute": "description",
+                        "expected": "",
+                    },
+                ]
+            }
+        )
+    )
+
+    probes = result["acceptance_probes"]
+    assert probes[0]["assertion"] == "equals"
+    assert probes[1]["assertion"] == "attribute_equals"
+    assert probes[2]["assertion"] == "raises"
+    assert probes[3]["assertion"] == "attribute_equals"
+    assert len(result["validation_warnings"]) == 4
+    assert "return_structure" in result["validation_warnings"][0]
+
+
+def test_parse_plan_response_accepts_return_structure_assertion_mixup() -> None:
+    """The observed GLM enum mixup must not exhaust plan repair attempts."""
+    response = json.dumps(
+        {
+            "base_commit": "model-commit",
+            "repository_match": True,
+            "relevant_files": ["tasks.py"],
+            "planned_changes": [],
+            "planned_tests": [],
+            "out_of_scope": [],
+            "risk_level": "low",
+            "acceptance_probes": [
+                {
+                    "probe_id": "probe-description",
+                    "module": "tasks",
+                    "target": "TaskService.create_task",
+                    "probe_type": "return_structure",
+                    "criterion_ids": ["AC-3"],
+                    "assertion": "return_structure",
+                    "expected": {"description": ""},
+                }
+            ],
+        }
+    )
+
+    plan = _parse_plan_response(response, "authoritative-commit")
+
+    assert plan.base_commit == "authoritative-commit"
+    assert plan.acceptance_probes[0].assertion == "equals"
+    assert any("return_structure" in warning for warning in plan.validation_warnings)
+
+
+def test_parse_plan_response_compiles_structural_checks_independently() -> None:
+    """Malformed optional checks must not invalidate the implementation plan."""
+    response = json.dumps(
+        {
+            "repository_match": True,
+            "relevant_files": ["tasks.py"],
+            "planned_changes": [],
+            "planned_tests": [],
+            "out_of_scope": [],
+            "risk_level": "low",
+            "structural_checks": [
+                {
+                    "check_id": "check-signature",
+                    "check_type": "function_signature",
+                    "target": "create_task",
+                    "parameters": {"expected_params": ["description"]},
+                    "criterion_ids": ["AC-2"],
+                    "file_path": "tasks.py",
+                },
+                {
+                    "check_id": "check-wrong-category",
+                    "check_type": "function_io",
+                    "target": "create_task",
+                    "parameters": {},
+                    "criterion_ids": ["AC-3"],
+                    "file_path": "tasks.py",
+                },
+                {
+                    "check_id": "check-missing-field",
+                    "check_type": "dataclass_field",
+                    "target": "Task",
+                    "parameters": {},
+                    "criterion_ids": ["AC-1"],
+                    "file_path": "tasks.py",
+                },
+                {
+                    "check_id": "check-missing-method-operands",
+                    "check_type": "method_parameter",
+                    "target": "TaskService.create_task",
+                    "parameters": {},
+                    "criterion_ids": ["AC-2"],
+                    "file_path": "tasks.py",
+                },
+            ],
+        }
+    )
+
+    plan = _parse_plan_response(response, "authoritative-commit")
+
+    assert len(plan.structural_checks) == 1
+    assert plan.structural_checks[0].check_type == "signature_preserved"
+    assert any("function_signature" in warning for warning in plan.validation_warnings)
+    assert any("function_io" in warning for warning in plan.validation_warnings)
+    assert any("check-missing-field" in warning for warning in plan.validation_warnings)
+    assert any(
+        "check-missing-method-operands" in warning
+        for warning in plan.validation_warnings
+    )
 
 
 def test_extract_json_no_json_raises():
@@ -750,6 +896,9 @@ def test_create_plan_with_repository_context():
     assert "tracked_files" in prompt
     assert '"acceptance_probes": [' in prompt
     assert '"structural_checks": [' in prompt
+    assert "return_structure is only" in prompt
+    assert "must never be used as assertion" in prompt
+    assert "Never use function_signature" in prompt
 
 
 def test_create_plan_keeps_safe_plan_with_incomplete_acceptance_coverage():
@@ -833,8 +982,8 @@ def test_create_plan_keeps_safe_plan_with_incomplete_acceptance_coverage():
     assert len(prompts) == 1
 
 
-def test_create_plan_repairs_missing_explicit_direct_verification() -> None:
-    """Explicit verification requests trigger a bounded direct-check repair."""
+def test_create_plan_warns_on_missing_explicit_direct_verification() -> None:
+    """Missing optional direct evidence does not trigger a model repair."""
     issue = NormalizedIssue(
         title="Fix behavior",
         task_type="bug",
@@ -879,31 +1028,20 @@ def test_create_plan_repairs_missing_explicit_direct_verification() -> None:
         "out_of_scope": [],
         "risk_level": "low",
     }
-    repaired_plan = {
-        **base_plan,
-        "acceptance_probes": [
-            {
-                "probe_id": "probe-ac-1",
-                "module": "src.main",
-                "target": "run",
-                "probe_type": "function_io",
-                "criterion_ids": ["AC-1"],
-                "assertion": "truthy",
-            }
-        ],
-    }
-    responses = iter([json.dumps(base_plan), json.dumps(repaired_plan)])
     prompts: list[str] = []
 
     def generate(prompt: str) -> str:
         prompts.append(prompt)
-        return next(responses)
+        return json.dumps(base_plan)
 
     plan = create_plan(issue, repository_context, generate)
 
-    assert len(prompts) == 2
-    assert "no direct acceptance check" in prompts[1]
-    assert plan.acceptance_probes[0].criterion_ids == ["AC-1"]
+    assert len(prompts) == 1
+    assert not plan.acceptance_probes
+    assert any(
+        "no direct acceptance check" in warning
+        for warning in plan.validation_warnings
+    )
 
 
 def test_create_plan_does_not_retry_scope_violation():
@@ -986,8 +1124,8 @@ def test_create_plan_raises_plan_generation_error_after_failed_retry():
     assert generate.call_count == 3
 
 
-def test_create_plan_repairs_sequential_schema_errors():
-    """Give independent schema errors separate bounded repair attempts."""
+def test_create_plan_repairs_core_schema_and_drops_invalid_optional_evidence():
+    """Repair core schema errors without retrying optional evidence errors."""
     issue = NormalizedIssue(
         title="Fix behavior",
         task_type="bug",
@@ -1025,16 +1163,8 @@ def test_create_plan_repairs_sequential_schema_errors():
   "out_of_scope": [],
   "risk_level": "low"
 }"""
-    valid = """{
-  "repository_match": true,
-  "relevant_files": [],
-  "planned_changes": [],
-  "planned_tests": [],
-  "out_of_scope": [],
-  "risk_level": "low"
-}"""
     prompts: list[str] = []
-    responses = iter([invalid_risk, invalid_assertion, valid])
+    responses = iter([invalid_risk, invalid_assertion])
 
     def generate(prompt: str) -> str:
         prompts.append(prompt)
@@ -1043,6 +1173,6 @@ def test_create_plan_repairs_sequential_schema_errors():
     plan = create_plan(issue, repository_context, generate)
 
     assert plan.risk_level == "low"
-    assert len(prompts) == 3
-    assert "add validated declarative acceptance_probes" in prompts[2]
-    assert "call_relationship" in prompts[2]
+    assert len(prompts) == 2
+    assert not plan.acceptance_probes
+    assert any("call_relationship" in warning for warning in plan.validation_warnings)

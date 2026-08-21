@@ -1569,6 +1569,31 @@ class TestRunCommand:
         # ruff may not be installed, but command should be allowed
         assert "exit_code" in result.content or result.ok
 
+    def test_run_command_excludes_scratch_tests_from_ruff(self, temp_workspace):
+        """Repository lint must not promote supplemental scratch failures."""
+        commands: list[str] = []
+
+        def run(**kwargs):
+            commands.append(kwargs["command"])
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="All checks passed",
+                stderr="",
+                timed_out=False,
+            )
+
+        registry = ToolRegistry(
+            temp_workspace,
+            command_runner=SimpleNamespace(run=run),
+        )
+
+        result = registry.run_command({"command": "ruff check ."})
+
+        assert result.ok
+        assert commands == [
+            "ruff check --extend-exclude .patchpilot_checks ."
+        ]
+
     def test_run_command_not_allowed(self, tool_registry):
         """Test that disallowed commands are rejected"""
         result = tool_registry.run_command({"command": "rm -rf /"})

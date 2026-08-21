@@ -206,15 +206,19 @@ class AgentState:
     def record_pytest_passed(self) -> None:
         """Record a passing Pytest run for the current edit revision."""
         self.verified_edit_revision = self.edit_revision
+        self.reset_completion_tracking()
 
     def record_ruff_passed(self) -> None:
         """Record a passing Ruff run for the current edit revision."""
         self.linted_edit_revision = self.edit_revision
+        self.reset_completion_tracking()
 
-    def completion_blocker(self) -> str | None:
+    def completion_blocker(self, *, require_edit: bool = True) -> str | None:
         """Return the deterministic reason that completion is not yet allowed."""
-        if self.edit_revision == 0:
+        if require_edit and self.edit_revision == 0:
             return "make at least one effective source edit"
+        if self.edit_revision == 0:
+            return None
         if self.verified_edit_revision != self.edit_revision:
             return "run Pytest successfully after the latest source edit"
         if self.linted_edit_revision != self.edit_revision:
@@ -242,7 +246,6 @@ class AgentState:
         return (
             self.consecutive_completions >= 2
             and self.last_completion_edit_revision == self.edit_revision
-            and self.edit_revision > 0  # Only detect no progress after at least one edit
         )
 
     def _generate_failure_signature(self, tool_name: str, error_content: str) -> str:
@@ -323,6 +326,10 @@ class AgentLoopLimitError(AgentLoopError):
     """Raised when the Agent exceeds the configured round limit."""
 
 
+class AgentNoProgressError(AgentLoopError):
+    """Raised when repeated completion attempts make no observable progress."""
+
+
 class AgentLoop:
     """Coordinate model responses and tool execution with intelligent round management."""
 
@@ -339,6 +346,7 @@ class AgentLoop:
         max_empty_response_retries: int = DEFAULT_EMPTY_RESPONSE_RETRIES,
         force_tool_selection: bool = False,
         enforce_completion_gate: bool = False,
+        require_edit_for_completion: bool = True,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -355,6 +363,7 @@ class AgentLoop:
         self.enable_progress_tracking = enable_progress_tracking
         self.force_tool_selection = force_tool_selection
         self.enforce_completion_gate = enforce_completion_gate
+        self.require_edit_for_completion = require_edit_for_completion
         self.max_empty_response_retries = max_empty_response_retries
         self.state = AgentState()
 
@@ -500,11 +509,24 @@ class AgentLoop:
                     )
 
                 blocker = (
-                    self.state.completion_blocker()
+                    self.state.completion_blocker(
+                        require_edit=self.require_edit_for_completion,
+                    )
                     if self.enforce_completion_gate
                     else None
                 )
+                self.state.record_completion_attempt()
                 if blocker is not None:
+                    if self.state.detect_no_progress():
+                        logger.warning(
+                            "NO_PROGRESS detected after repeated blocked "
+                            "completion attempts: %s",
+                            blocker,
+                        )
+                        raise AgentNoProgressError(
+                            "Agent stopped after repeated completion attempts "
+                            f"without progress: {blocker}"
+                        )
                     logger.warning("Completion rejected: %s", blocker)
                     messages.append(
                         {
@@ -516,9 +538,6 @@ class AgentLoop:
                         }
                     )
                     continue
-
-                # Record completion attempt for NO_PROGRESS detection
-                self.state.record_completion_attempt()
 
                 # Check for NO_PROGRESS: consecutive completions without patch delta
                 if self.state.detect_no_progress():

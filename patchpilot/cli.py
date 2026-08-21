@@ -21,7 +21,11 @@ from patchpilot.evidence.schema import AcceptanceCoverageReport
 from patchpilot.issue.loader import load_issue
 from patchpilot.issue.normalizer import normalize_issue
 from patchpilot.issue.schema import NormalizedIssue
-from patchpilot.planning.planner import PlanGenerationError, create_plan
+from patchpilot.planning.planner import (
+    PlanGenerationError,
+    compile_optional_evidence,
+    create_plan,
+)
 from patchpilot.planning.schema import ChangePlan
 from patchpilot.planning.scope_gate import check_scope, is_test_file
 from patchpilot.planning.validator import validate_plan
@@ -214,6 +218,7 @@ def _save_failed_run_summary(
     failure_type: str,
     error_message: str,
     verification_report: dict[str, object] | None = None,
+    partial_patch: str = "",
 ) -> None:
     """Persist a terminal execute result when the workflow raises an error."""
     output_dir = Path(args.output_dir)
@@ -222,6 +227,11 @@ def _save_failed_run_summary(
         save_json(
             str(output_dir / "verification_report.json"),
             json.dumps(verification_report, indent=2),
+        )
+    if partial_patch:
+        (output_dir / "patch.diff").write_text(
+            partial_patch,
+            encoding="utf-8",
         )
     reported_retry_count = (
         verification_report.get("retry_count", 0)
@@ -1019,6 +1029,7 @@ def handle_run(args) -> None:
             failure_type=e.failure_type,
             error_message=str(e),
             verification_report=e.verification_report,
+            partial_patch=e.partial_patch,
         )
         print(f"Workflow execution error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1115,6 +1126,9 @@ def handle_execute(args) -> None:
 
         with open(plan_path, encoding="utf-8") as f:
             plan_data = json.load(f)
+        if not isinstance(plan_data, dict):
+            raise TypeError("Plan file must contain a JSON object")
+        compile_optional_evidence(plan_data)
         plan = ChangePlan.model_validate(plan_data)
         allow_new_test_files = any(
             requirement.required and requirement.kind == "target_test_change"
@@ -1348,7 +1362,7 @@ def handle_execute(args) -> None:
         )
         print(f"JSON parsing error: {e}", file=sys.stderr)
         sys.exit(1)
-    except ValueError as e:
+    except (TypeError, ValueError) as e:
         _save_failed_run_summary(
             args=args,
             started=started,
@@ -1394,6 +1408,7 @@ def handle_execute(args) -> None:
             failure_type=e.failure_type,
             error_message=str(e),
             verification_report=e.verification_report,
+            partial_patch=e.partial_patch,
         )
         print(f"Workflow execution error: {e}", file=sys.stderr)
         sys.exit(1)

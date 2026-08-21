@@ -140,6 +140,32 @@ class StructuralCheckSpec(BaseModel):
     criterion_ids: list[str] = Field(default_factory=list)
     file_path: str
 
+    @model_validator(mode="after")
+    def validate_check_parameters(self) -> "StructuralCheckSpec":
+        """Require the operands consumed by each structural check runner."""
+        required_parameters = {
+            "signature_preserved": ("expected_params",),
+            "call_relationship": ("callee",),
+            "no_new_imports": ("allowed_imports",),
+            "method_exists": ("class", "method"),
+            "decorator_exists": ("decorator",),
+            "dataclass_field": ("field",),
+            "method_parameter": ("class", "method", "parameter"),
+        }
+        required = required_parameters.get(self.check_type, ())
+        missing = [
+            name
+            for name in required
+            if name not in self.parameters
+            or self.parameters[name] in (None, "")
+        ]
+        if missing:
+            raise ValueError(
+                f"{self.check_type} checks require parameters: "
+                + ", ".join(missing)
+            )
+        return self
+
 
 class ChangePlan(BaseModel):
     """Comprehensive plan for addressing a normalized issue.

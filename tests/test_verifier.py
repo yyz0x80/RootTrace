@@ -1343,6 +1343,9 @@ def test_tiered_verification_runs_scratch_tests_as_supplemental(
     assert scratch_checks[0].passed
     assert scratch_checks[0].tier == "optional"
     assert not scratch_checks[0].direct
+    assert sandbox_mock.run.call_args_list[0].args[0] == (
+        "ruff check --no-cache --exclude .patchpilot_checks ."
+    )
 
 
 def test_tiered_verification_balanced_policy_with_affected_failure() -> None:

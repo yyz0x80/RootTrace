@@ -306,8 +306,7 @@ class TestWorkflowRunnerExecute:
             )
 
         assert result.final_status == CompletionState.FAILED
-        # With second chance fix, agent gets 2 repair attempts (initial + second chance)
-        assert mock_agent_loop.run.call_count == 3
+        assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1
 
     def test_repair_attempt_preserves_baseline_checks(self):
@@ -458,16 +457,13 @@ class TestWorkflowRunnerExecute:
             == REPAIR_SYSTEM_PROMPT
         )
 
-    def test_repair_agent_error_preserves_last_verification_report(self):
-        """Test that repair failures expose the last deterministic report."""
+    def test_no_delta_repair_error_preserves_report_and_patch(self):
+        """A stalled repair must return the last report and partial patch."""
         mock_agent_loop = Mock(spec=AgentLoop)
         mock_agent_loop.force_tool_selection = False
-        # With the second chance fix, the agent gets 2 attempts before stopping
-        # First attempt gets second chance, second attempt triggers agent error
         mock_agent_loop.run.side_effect = [
             "Initial implementation complete",
             AgentLoopError("Repair agent stopped"),
-            AgentLoopError("Repair agent stopped again"),
         ]
         failed_report = VerificationReport(passed=False)
         failed_report.failure_type = FailureType.CODE_FAILURE
@@ -509,19 +505,17 @@ class TestWorkflowRunnerExecute:
                 "patchpilot.workflow.runner.generate_patch",
                 return_value="diff content",
             ),
-            pytest.raises(WorkflowRunnerExecutionError) as exc_info,
         ):
-            runner.execute(
+            result = runner.execute(
                 issue="Fix the bug",
                 plan="Implement the fix",
                 change_plan=None,
             )
 
-        error = exc_info.value
-        assert error.failure_type == "AGENT_ERROR"
-        assert error.verification_report == failed_report.to_dict()
-        # With second chance, retry_count should be 2 (attempt 1 + second chance)
-        assert error.verification_report["retry_count"] == 2
+        assert result.final_status == CompletionState.FAILED
+        assert result.verification_report == failed_report.to_dict()
+        assert result.verification_report["retry_count"] == 1
+        assert result.patch == "diff content"
 
     def test_workflow_runner_uses_tiered_verification(self):
         """Test that WorkflowRunner uses tiered verification in production path."""
@@ -565,7 +559,11 @@ class TestWorkflowRunnerExecute:
             
             mock_git_ls.return_value = ["src/file.py", "tests/test_file.py"]
             mock_get_changes.return_value = mock_changes
-            mock_generate_patch.return_value = "diff content"
+            mock_generate_patch.side_effect = [
+                "diff before repair",
+                "diff after repair",
+                "diff after repair",
+            ]
             
             # Call _run_verification with post_patch phase
             runner._run_verification(
@@ -645,8 +643,7 @@ class TestWorkflowRunnerExecute:
             )
 
         assert isinstance(result, WorkflowResult)
-        # Should attempt initial + 2 repairs (initial repair + second chance, then stop due to scope gate violation)
-        assert mock_agent_loop.run.call_count == 3
+        assert mock_agent_loop.run.call_count == 2
         assert mock_verifier.call_count == 1
 
     def test_execute_repeated_failure_stops_early(self):

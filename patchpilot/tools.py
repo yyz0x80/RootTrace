@@ -1816,6 +1816,13 @@ class ToolRegistry:
         """Normalize supported commands to their deterministic invocation."""
         if args and args[0] == "pytest":
             return ["python", "-m", "pytest", *args[1:]]
+        if args[:2] == ["ruff", "check"] and ".patchpilot_checks" not in args:
+            return [
+                *args[:2],
+                "--extend-exclude",
+                ".patchpilot_checks",
+                *args[2:],
+            ]
         return args
 
     @classmethod

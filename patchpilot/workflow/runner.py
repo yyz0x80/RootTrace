@@ -372,11 +372,13 @@ class WorkflowRunnerExecutionError(WorkflowRunnerError):
         *,
         verification_report: dict[str, Any] | None = None,
         failure_type: str = "WORKFLOW_ERROR",
+        partial_patch: str = "",
     ) -> None:
         """Initialize an execution error with optional partial artifacts."""
         super().__init__(message)
         self.verification_report = verification_report
         self.failure_type = failure_type
+        self.partial_patch = partial_patch
 
 
 class WorkflowRunner:
@@ -636,6 +638,7 @@ class WorkflowRunner:
             WorkflowRunnerExecutionError: If agent execution fails critically
         """
         self.agent_loop.enforce_completion_gate = True
+        self.agent_loop.require_edit_for_completion = True
 
         # Generate a stable run_id for this workflow execution
         run_id = str(uuid.uuid4())
@@ -881,7 +884,6 @@ class WorkflowRunner:
 
             # Step 13: Repair loop if verification failed
             previous_repair_fingerprints: set[str] = set()
-            allow_unchanged_failure_retry = False
             approved_files_set = (
                 {change.path for change in change_plan.planned_changes}
                 if change_plan
@@ -919,14 +921,13 @@ class WorkflowRunner:
                     and current_repair_fingerprints
                     == previous_repair_fingerprints
                 )
-                if repeated_failures and not allow_unchanged_failure_retry:
+                if repeated_failures:
                     logger.warning(
                         "Same repairable failures repeated. Stopping repair loop to avoid futile attempts."
                     )
                     ExecuteLogger.log_repair_stopped("Same repairable failures repeated")
                     break
 
-                allow_unchanged_failure_retry = False
                 previous_repair_fingerprints = current_repair_fingerprints
 
                 # Check for unrecoverable errors from excluded failures
@@ -978,13 +979,6 @@ class WorkflowRunner:
                     normalized_issue=normalized_issue,
                     selection=selection,
                 )
-                if retry_count > 1 and repeated_failures:
-                    repair_prompt += (
-                        "\n\nThe previous repair attempt made no source changes. "
-                        "Inspect the demonstrated failure, edit an allowed source "
-                        "file, and run the required verification commands."
-                    )
-
                 # Run agent with repair prompt
                 execute_callback.set_trace_context(
                     workflow_stage="REPAIR",
@@ -998,7 +992,13 @@ class WorkflowRunner:
                     "force_tool_selection",
                     False,
                 )
+                original_require_edit = getattr(
+                    self.agent_loop,
+                    "require_edit_for_completion",
+                    True,
+                )
                 self.agent_loop.force_tool_selection = True
+                self.agent_loop.require_edit_for_completion = False
 
                 try:
                     self.agent_loop.run(
@@ -1011,6 +1011,7 @@ class WorkflowRunner:
                 finally:
                     # Restore original force_tool_selection setting
                     self.agent_loop.force_tool_selection = original_force_tool_selection
+                    self.agent_loop.require_edit_for_completion = original_require_edit
 
                 # Get workspace changes after repair
                 repair_changes = _get_workspace_changes(workspace_path)
@@ -1019,18 +1020,6 @@ class WorkflowRunner:
                     repair_changes,
                 )
                 if repaired_patch == current_patch:
-                    if (
-                        selection.repair_candidates
-                        and retry_count == 1
-                        and retry_count < self.max_repair_attempts
-                    ):
-                        logger.warning(
-                            "Repair agent had repair candidates but made no changes on attempt %d, retrying with stronger prompt",
-                            retry_count,
-                        )
-                        allow_unchanged_failure_retry = True
-                        continue
-
                     logger.warning(
                         "Repair agent did not change the patch. Stopping repair loop."
                     )
@@ -1042,7 +1031,6 @@ class WorkflowRunner:
                             "Repair agent also stopped with an error: %s",
                             repair_agent_error,
                         )
-                        raise repair_agent_error
                     break
 
                 if repair_agent_error is not None:
@@ -1175,6 +1163,8 @@ class WorkflowRunner:
         except AgentLoopError as error:
             if report is None:
                 raise
+            partial_changes = _get_workspace_changes(workspace_path)
+            report.patch = generate_patch(workspace_path, partial_changes)
             raise WorkflowRunnerExecutionError(
                 str(error),
                 verification_report=report.to_dict(),
@@ -1183,6 +1173,7 @@ class WorkflowRunner:
                     if isinstance(error, AgentLoopLimitError)
                     else "AGENT_ERROR"
                 ),
+                partial_patch=report.patch,
             ) from error
         finally:
             # Cleanup: Stop sandbox and remove temporary directory
