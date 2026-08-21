@@ -778,9 +778,11 @@ class Verifier:
         for test_path in test_paths:
             # Find the selection reason for this test
             selection_reason = ""
+            check_direct = direct
             for selected_test in target_selection.selected_tests:
                 if selected_test.test_id == test_path:
                     selection_reason = selected_test.reason.description
+                    check_direct = selected_test.is_direct_evidence
                     break
 
             # Execute the test
@@ -799,7 +801,7 @@ class Verifier:
                 result=result,
                 timeout_seconds=self.timeouts.target_tests,
                 subject_ids=subject_ids,
-                direct=direct,
+                direct=check_direct,
                 test_node=test_path,  # Use test path as node identifier
             )
             check.tier = tier

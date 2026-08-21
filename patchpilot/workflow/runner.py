@@ -1089,6 +1089,7 @@ class WorkflowRunner:
                 execution_failed=not report.passed,
                 evidence=evidence,
                 environment_can_verify=report.passed,
+                verification_status=report.verification_status,
             )
             final_status = decision.state
 
@@ -1204,6 +1205,8 @@ class WorkflowRunner:
                 final_status = CompletionState.BLOCKED
             elif agent_error is not None or not report.passed:
                 final_status = CompletionState.FAILED
+            elif report.verification_status == "PARTIALLY_VERIFIED":
+                final_status = CompletionState.PARTIALLY_VERIFIED
             else:
                 final_status = CompletionState.VERIFIED
 

@@ -84,6 +84,7 @@ def test_file_level_test_with_single_ac_is_indirect() -> None:
     assert selection.tests == ["tests/test_task.py"]
     assert selection.acceptance_criteria == ["AC-1"]
     assert selection.direct_acceptance_criteria == []
+    assert selection.selected_tests[0].is_direct_evidence is False
 
 
 def test_exact_node_test_with_single_ac_is_direct() -> None:
@@ -103,6 +104,7 @@ def test_exact_node_test_with_single_ac_is_direct() -> None:
     assert selection.tests == ["tests/test_task.py::test_priority"]
     assert selection.acceptance_criteria == ["AC-1"]
     assert selection.direct_acceptance_criteria == ["AC-1"]
+    assert selection.selected_tests[0].is_direct_evidence is True
 
 
 def test_acceptance_probe_is_direct() -> None:

@@ -430,8 +430,12 @@ def _determine_overall_status(
         if evidence is None:
             continue
         has_any_evidence = True
-        if evidence.status in (BehaviorChangeStatus.PASS, BehaviorPreservationStatus.PASS,
-                              StructuralContractStatus.PASS, ConstraintStatus.COMPLIANT):
+        if evidence.status in (
+            BehaviorChangeStatus.PASS,
+            BehaviorChangeStatus.ALREADY_SATISFIED,
+            BehaviorPreservationStatus.PASS,
+            StructuralContractStatus.PASS,
+        ):
             has_pass = True
 
     # Only return PASS if we have actual evidence and at least one dimension passed

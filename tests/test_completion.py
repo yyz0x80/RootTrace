@@ -81,6 +81,29 @@ def test_environment_cannot_verify():
     assert "environment" in result.evidence_precision_hint.lower()
 
 
+def test_canonical_partial_verification_is_preserved():
+    """Incomplete deterministic coverage must not be promoted to verified."""
+    evidence = [
+        AcceptanceEvidence(
+            criterion_id="ac1",
+            description="Test criterion",
+            status=EvidenceStatus.PASS,
+            explanation="Direct acceptance evidence passed",
+        )
+    ]
+
+    result = determine_completion_state(
+        has_ambiguity=False,
+        blocked=False,
+        execution_failed=False,
+        evidence=evidence,
+        verification_status="PARTIALLY_VERIFIED",
+    )
+
+    assert result.state == CompletionState.PARTIALLY_VERIFIED
+    assert "incomplete" in result.evidence_precision_hint.lower()
+
+
 def test_failed_state_execution_failure():
     """Test that execution failure results in FAILED state."""
     evidence = [

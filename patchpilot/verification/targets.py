@@ -352,6 +352,7 @@ def select_target_tests(
 
     # Extract planned test targets
     planned_test_ids: set[str] = set()
+    direct_test_ids: set[str] = set()
 
     for planned_test in plan.planned_tests:
         pytest_args = _pytest_arguments(planned_test.command)
@@ -392,6 +393,7 @@ def select_target_tests(
 
             if is_direct:
                 _append_unique(direct_criterion_ids, criterion_id)
+                direct_test_ids.update(planned_targets)
 
     # Perform dependency analysis if we have the required information
     if changed_files and repo_root and python_files:
@@ -433,7 +435,7 @@ def select_target_tests(
                             test_id=test_id,
                             reason=reason,
                             acceptance_criteria=[],
-                            is_direct_evidence=reason.classification == SelectionReasonType.DIRECT,
+                            is_direct_evidence=test_id in direct_test_ids,
                         )
                     )
                     continue
@@ -473,7 +475,7 @@ def select_target_tests(
                         description="Explicitly planned in ChangePlan (dependency analysis failed)",
                     ),
                     acceptance_criteria=[],
-                    is_direct_evidence=True,
+                    is_direct_evidence=test_id in direct_test_ids,
                 )
                 for test_id in planned_test_ids
             ]
@@ -487,10 +489,24 @@ def select_target_tests(
                     description="Explicitly planned in ChangePlan (no dependency analysis)",
                 ),
                 acceptance_criteria=[],
-                is_direct_evidence=True,
+                is_direct_evidence=test_id in direct_test_ids,
             )
             for test_id in planned_test_ids
         ]
+
+    selected_test_ids = {selected.test_id for selected in selected_tests}
+    for test_id in planned_test_ids - selected_test_ids:
+        selected_tests.append(
+            SelectedTest(
+                test_id=test_id,
+                reason=TestSelectionReason(
+                    classification=SelectionReasonType.DIRECT,
+                    description="Explicitly planned in ChangePlan",
+                ),
+                acceptance_criteria=[],
+                is_direct_evidence=test_id in direct_test_ids,
+            )
+        )
 
     # Ensure deterministic ordering by sorting
     targets.sort()

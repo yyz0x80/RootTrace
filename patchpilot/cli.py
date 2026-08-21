@@ -387,7 +387,11 @@ def main() -> None:
         type=str,
         default=None,
         choices=["strict", "balanced", "focused"],
-        help="Verification strategy: strict (all tests must pass), balanced (required+affected must pass, optional failures warn), focused (only required must pass) (default: balanced)"
+        help=(
+            "Verification strategy: strict (all tests must pass), balanced "
+            "(known regressions fail), focused (only required tests must pass) "
+            "(default: balanced)"
+        ),
     )
     
     # execute subcommand
@@ -475,7 +479,11 @@ def main() -> None:
         type=str,
         default=None,
         choices=["strict", "balanced", "focused"],
-        help="Verification strategy: strict (all tests must pass), balanced (required+affected must pass, optional failures warn), focused (only required must pass) (default: balanced)"
+        help=(
+            "Verification strategy: strict (all tests must pass), balanced "
+            "(known regressions fail), focused (only required tests must pass) "
+            "(default: balanced)"
+        ),
     )
 
     baseline_parser = subparsers.add_parser(
@@ -519,7 +527,11 @@ def main() -> None:
         type=str,
         default=None,
         choices=["strict", "balanced", "focused"],
-        help="Verification strategy: strict (all tests must pass), balanced (required+affected must pass, optional failures warn), focused (only required must pass) (default: balanced)"
+        help=(
+            "Verification strategy: strict (all tests must pass), balanced "
+            "(known regressions fail), focused (only required tests must pass) "
+            "(default: balanced)"
+        ),
     )
     
     args = parser.parse_args()

@@ -778,6 +778,7 @@ def test_constraint_compliant():
 
     assert len(evidence) == 1
     assert evidence[0].criterion_id == "AC-1"
+    assert evidence[0].status == EvidenceStatus.UNVERIFIED
     assert evidence[0].constraint is not None
     assert evidence[0].constraint.status == ConstraintStatus.COMPLIANT
 

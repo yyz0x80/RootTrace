@@ -54,6 +54,7 @@ def determine_completion_state(
     execution_failed: bool,
     evidence: list[AcceptanceEvidence],
     environment_can_verify: bool = True,
+    verification_status: str | None = None,
 ) -> CompletionDecision:
     """Determine the overall completion state based on execution and verification results.
 
@@ -80,6 +81,7 @@ def determine_completion_state(
             status of each acceptance criterion.
         environment_can_verify: Whether the environment can execute necessary
             verification commands.
+        verification_status: Canonical deterministic verifier status, when available.
 
     Returns:
         CompletionDecision object containing the completion state and supporting metrics.
@@ -163,6 +165,12 @@ def determine_completion_state(
         return CompletionDecision(
             state=CompletionState.PARTIALLY_VERIFIED,
             evidence_precision_hint="non-critical constraint cannot be verified",
+        )
+
+    if verification_status == CompletionState.PARTIALLY_VERIFIED.value:
+        return CompletionDecision(
+            state=CompletionState.PARTIALLY_VERIFIED,
+            evidence_precision_hint="deterministic verification coverage is incomplete",
         )
 
     # Calculate metrics for remaining rules
