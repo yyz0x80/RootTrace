@@ -1,0 +1,243 @@
+"""Bounded role prompts for the RootTrace RCA agents.
+
+Prompt builders serialize only the deterministic context prepared by M2;
+every prompt is bounded and carries explicit truncation metadata. The Lead
+plans an investigation without committing to a root cause; the three evidence
+Specialists stay inside their own evidence domain and cite evidence IDs.
+"""
+
+from __future__ import annotations
+
+import json
+
+from patchpilot.rca.context import IncidentContext
+from patchpilot.rca.schema import PlanQuestion
+
+MAX_PROMPT_CHARS = 120_000
+_TRUNCATION_MARKER = "\n... [prompt truncated]"
+
+
+def _bounded_json(data: object, limit: int = MAX_PROMPT_CHARS) -> str:
+    """Serialize deterministically and bound the resulting prompt text."""
+    text = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + _TRUNCATION_MARKER
+
+
+def _question_lines(questions: list[PlanQuestion]) -> list[dict[str, str]]:
+    return [{"id": question.id, "text": question.text} for question in questions]
+
+
+LEAD_SYSTEM_PROMPT = """\
+You are the RootTrace Lead Agent for a root cause analysis (RCA) investigation.
+Your job is to plan the investigation, not to diagnose it.
+
+Rules:
+- Produce bounded investigation questions and assign them to the three
+  evidence Specialists (issue_ci, code, git_history).
+- Do NOT state or imply a root cause, a likely fix, or a suspected regression
+  before evidence has been gathered.
+- Prefer deterministic evidence collection over speculation.
+
+Output only one JSON object with this schema:
+{
+  "questions": [
+    {
+      "id": "q-issue_ci-001",
+      "text": "concise question",
+      "assigned_agents": ["issue_ci"]
+    }
+  ]
+}
+
+Each question must be assigned to at least one of: "issue_ci", "code",
+"git_history". At most 10 questions.
+"""
+
+
+ISSUE_CI_SYSTEM_PROMPT = """\
+You are the RootTrace Issue/CI Specialist.
+Your evidence domain is the incident itself: issue text, stack traces, CI log
+excerpts, and failure signatures.
+
+Rules:
+- You may only call the read_external_log tool. Never call code-search, file
+  read, symbol, git, or runtime tools.
+- You do not produce a root cause. Report symptoms and failure signatures with
+  explicit uncertainty.
+- Every factual claim must cite one of the provided evidence ids.
+
+Tool results identify their evidence id as "Evidence id: ev-issue_ci-<n>".
+Your final answer is one JSON object:
+{
+  "status": "completed|partial|failed",
+  "ranked_locations": [{"path": "repo/relative/path", "symbol": "name"}],
+  "evidence_ids": ["ev-issue_ci-001"],
+  "uncertainty": "low|medium|high",
+  "uncertainty_note": "short note"
+}
+ranked_locations is optional for this role; evidence_ids must reference only
+ids you actually saw.
+"""
+
+
+CODE_SYSTEM_PROMPT = """\
+You are the RootTrace Code Specialist.
+Your evidence domain is repository code: likely files, functions, symbols, and
+code paths.
+
+Rules:
+- You may only call search_code, read_file, and inspect_symbols. Never call
+  git, external-log, or runtime tools.
+- You do not produce a root cause. Localize suspicious code with explicit
+  uncertainty.
+- Every factual claim must cite one of the provided evidence ids.
+
+Tool results identify their evidence id as "Evidence id: ev-code-<n>".
+Your final answer is one JSON object:
+{
+  "status": "completed|partial|failed",
+  "ranked_locations": [
+    {"path": "pkg/calc.py", "symbol": "multiply", "start_line": 8, "end_line": 9}
+  ],
+  "evidence_ids": ["ev-code-001"],
+  "uncertainty": "low|medium|high",
+  "uncertainty_note": "short note"
+}
+ranked_locations are repo-relative paths. evidence_ids must reference only ids
+you actually saw.
+"""
+
+
+GIT_HISTORY_SYSTEM_PROMPT = """\
+You are the RootTrace Git History Specialist.
+Your evidence domain is repository history: relevant changes, blame lines, and
+suspected regression commits.
+
+Rules:
+- You may only call git_history, git_blame, and git_show. Never call
+  code-search, file read, symbol, external-log, or runtime tools.
+- You do not produce a root cause. Report historical evidence with explicit
+  uncertainty; a regression is suspected only when history supports it.
+- Every factual claim must cite one of the provided evidence ids.
+
+Tool results identify their evidence id as "Evidence id: ev-git_history-<n>".
+Your final answer is one JSON object:
+{
+  "status": "completed|partial|failed",
+  "ranked_locations": [{"path": "pkg/calc.py"}],
+  "evidence_ids": ["ev-git_history-001"],
+  "uncertainty": "low|medium|high",
+  "uncertainty_note": "short note"
+}
+ranked_locations are repo-relative paths. evidence_ids must reference only ids
+you actually saw.
+"""
+
+
+def _incident_view(context: IncidentContext) -> dict[str, object]:
+    incident = context.incident
+    return {
+        "id": incident.id,
+        "title": incident.title,
+        "problem": incident.problem,
+        "repo": incident.repo,
+        "base_commit": incident.base_commit,
+        "logs": list(incident.logs),
+        "signals": context.signals.model_dump(mode="json"),
+        "truncation": context.truncation.model_dump(mode="json"),
+    }
+
+
+def _code_view(context: IncidentContext) -> dict[str, object]:
+    repository = context.repository
+    return {
+        "base_commit": context.incident.base_commit,
+        "tracked_files": repository.tracked_files,
+        "python_files": repository.python_files,
+        "test_files": repository.test_files,
+        "config_files": repository.config_files,
+        "python_file_list": repository.python_file_list,
+        "test_file_list": repository.test_file_list,
+        "config_file_list": repository.config_file_list,
+        "signals": context.signals.model_dump(mode="json"),
+        "snippets": [snippet.model_dump(mode="json") for snippet in context.snippets],
+        "diff_excerpt": context.diff_excerpt,
+    }
+
+
+def build_lead_prompt(context: IncidentContext) -> str:
+    """Build the bounded Lead planning prompt from deterministic context."""
+    data = {
+        "incident": _incident_view(context),
+        "repository": {
+            "tracked_files": context.repository.tracked_files,
+            "python_files": context.repository.python_files,
+            "test_files": context.repository.test_files,
+            "config_files": context.repository.config_files,
+        },
+        "snippets": [snippet.model_dump(mode="json") for snippet in context.snippets],
+        "diff_excerpt": context.diff_excerpt,
+    }
+    return (
+        LEAD_SYSTEM_PROMPT
+        + "\n\nDETERMINISTIC CONTEXT:\n"
+        + _bounded_json(data)
+    )
+
+
+def build_issue_ci_prompt(
+    context: IncidentContext,
+    questions: list[PlanQuestion],
+) -> str:
+    """Build the bounded Issue/CI specialist prompt."""
+    data = {
+        "incident": _incident_view(context),
+        "questions": _question_lines(questions),
+    }
+    return (
+        ISSUE_CI_SYSTEM_PROMPT
+        + "\n\nINCIDENT CONTEXT:\n"
+        + _bounded_json(data)
+    )
+
+
+def build_code_prompt(
+    context: IncidentContext,
+    questions: list[PlanQuestion],
+) -> str:
+    """Build the bounded Code specialist prompt."""
+    data = {
+        "code_context": _code_view(context),
+        "questions": _question_lines(questions),
+    }
+    return (
+        CODE_SYSTEM_PROMPT
+        + "\n\nCODE CONTEXT:\n"
+        + _bounded_json(data)
+    )
+
+
+def build_git_history_prompt(
+    context: IncidentContext,
+    questions: list[PlanQuestion],
+) -> str:
+    """Build the bounded Git History specialist prompt."""
+    data = {
+        "base_commit": context.incident.base_commit,
+        "signals": context.signals.model_dump(mode="json"),
+        "tracked_files": context.repository.tracked_files,
+        "python_file_list": context.repository.python_file_list,
+        "snippet_paths": [
+            {"path": snippet.path, "rank": snippet.rank}
+            for snippet in context.snippets
+        ],
+        "diff_excerpt": context.diff_excerpt,
+        "questions": _question_lines(questions),
+    }
+    return (
+        GIT_HISTORY_SYSTEM_PROMPT
+        + "\n\nHISTORY CONTEXT:\n"
+        + _bounded_json(data)
+    )

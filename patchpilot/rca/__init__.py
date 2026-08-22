@@ -5,6 +5,16 @@ compatibility; RCA code lives under ``patchpilot.rca``. User-facing RCA
 artifacts and documentation use the RootTrace name.
 """
 
+from patchpilot.rca.agents import (
+    CodeSpecialist,
+    GitHistorySpecialist,
+    IssueCISpecialist,
+    LeadPlanner,
+    PlanError,
+    ProviderProtocol,
+    SpecialistOutput,
+    SpecialistResponse,
+)
 from patchpilot.rca.artifacts import (
     ARTIFACT_EVIDENCE_GRAPH,
     ARTIFACT_HYPOTHESES,
@@ -37,6 +47,12 @@ from patchpilot.rca.incident_loader import (
     LoadedIncident,
     load_incident,
     resolve_base_commit,
+)
+from patchpilot.rca.prompts import (
+    build_code_prompt,
+    build_git_history_prompt,
+    build_issue_ci_prompt,
+    build_lead_prompt,
 )
 from patchpilot.rca.sandbox import (
     RuntimeVerificationSandbox,
@@ -84,6 +100,7 @@ from patchpilot.rca.tools import (
     RcaToolResult,
     ReadExternalLogInput,
 )
+from patchpilot.rca.usage import UsageTracker
 
 __all__ = [
     "ARTIFACT_EVIDENCE_GRAPH",
@@ -97,6 +114,7 @@ __all__ = [
     "ArtifactError",
     "ArtifactWriter",
     "CauseLink",
+    "CodeSpecialist",
     "ConfidenceLevel",
     "ContextTruncation",
     "EvidenceEdge",
@@ -108,6 +126,7 @@ __all__ = [
     "FixRecommendation",
     "GitBlameInput",
     "GitHistoryInput",
+    "GitHistorySpecialist",
     "GitShowInput",
     "Hypothesis",
     "HypothesisDisposition",
@@ -116,10 +135,14 @@ __all__ = [
     "IncidentSignals",
     "InspectSymbolsInput",
     "InvestigationPlan",
+    "IssueCISpecialist",
+    "LeadPlanner",
     "LoadedIncident",
     "PlanBudgets",
+    "PlanError",
     "PlanQuestion",
     "Provenance",
+    "ProviderProtocol",
     "RCAReport",
     "RankedCause",
     "RcaToolRegistry",
@@ -133,16 +156,23 @@ __all__ = [
     "SandboxCommandResult",
     "SourceLocation",
     "SourceSnippet",
+    "SpecialistOutput",
+    "SpecialistResponse",
     "Timing",
     "UncertaintyLevel",
     "UncertaintySummary",
     "Usage",
+    "UsageTracker",
     "VerificationOutcome",
     "VerificationResult",
     "VerificationStatus",
     "VerificationStep",
     "assert_fingerprint_unchanged",
+    "build_code_prompt",
+    "build_git_history_prompt",
     "build_incident_context",
+    "build_issue_ci_prompt",
+    "build_lead_prompt",
     "build_ranked_snippets",
     "build_repository_inventory",
     "capture_repository_fingerprint",
