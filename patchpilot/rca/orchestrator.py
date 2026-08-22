@@ -91,7 +91,8 @@ class RcaRunResult(BaseModel):
 def _bounded_error(text: str, limit: int = 500) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + "..."
+    keep = max(0, limit - 3)
+    return text[:keep] + "..."
 
 
 def _merge_usage(*snapshots: Usage) -> Usage:

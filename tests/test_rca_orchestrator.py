@@ -13,7 +13,7 @@ import pytest
 from patchpilot.models import AssistantTurn, ToolCall
 from patchpilot.rca.agents import PlanError
 from patchpilot.rca.incident_loader import LoadedIncident
-from patchpilot.rca.orchestrator import RcaOrchestrator
+from patchpilot.rca.orchestrator import RcaOrchestrator, _bounded_error
 from patchpilot.rca.schema import (
     AgentRole,
     FindingStatus,
@@ -478,3 +478,11 @@ def test_artifacts_are_persisted(git_repo, tmp_path: Path) -> None:
     assert any("planning_end" in line for line in trace_lines)
     assert any("code_start" in line for line in trace_lines)
     assert any("hypotheses_end" in line for line in trace_lines)
+
+
+def test_bounded_error_respects_limit_including_ellipsis() -> None:
+    assert _bounded_error("short") == "short"
+    truncated = _bounded_error("x" * 1000, limit=500)
+    assert len(truncated) == 500
+    assert truncated.endswith("...")
+    assert truncated.startswith("x" * 497)
