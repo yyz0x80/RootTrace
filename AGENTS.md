@@ -1,540 +1,247 @@
 # AGENTS.md
+## 1. Project Identity
+RootTrace is an evidence-grounded, multi-agent Root Cause Analysis (RCA) system for GitHub Issues and regression-related PR context in existing Python repositories.
 
-## 1. Project Overview
+RootTrace answers: **what failed, where the likely root cause is, why it happened, and what evidence supports that conclusion**. RCA mode may recommend a fix scope, but it must not edit, patch, commit, push, or open a PR against the analyzed repository.
 
-PatchPilot is an **Issue-to-Patch Code Agent** for existing Python repositories.
+The repository evolved from PatchPilot. During the Demo MVP, the internal Python package and CLI namespace may remain `patchpilot` for compatibility. User-facing RCA artifacts and documentation use RootTrace. Package renaming is a separate migration.
 
-Its goal is to:
+RootTrace is not a general chatbot, autonomous repair agent, PR reviewer, hosted GitHub App, or production incident-management platform in the MVP.
 
-1. Accept a local issue description or GitHub Issue.
-2. Inspect the target repository.
-3. Locate relevant implementation and test files.
-4. Make the smallest valid source-code change.
-5. Run deterministic verification such as Ruff and Pytest.
-6. Produce a reviewable Git diff and verification result.
+## 2. Demo MVP Objective
+The Resume Demo MVP must:
+1. Accept local GitHub Issue-style Markdown/JSON and a local Python repo.
+2. Build deterministic, bounded context before model calls.
+3. Use one Lead Agent to plan the investigation.
+4. Run three evidence-gathering Specialists concurrently:
+   - `issue_ci`: issue text, stack traces, CI excerpts, failure signatures.
+   - `code`: repository structure, symbols, references, likely fault locations.
+   - `git_history`: log, blame, show, diffs, suspected regression changes.
+5. Store findings in a typed, auditable `EvidenceGraph`.
+6. Let the Lead generate falsifiable root-cause hypotheses from gathered evidence.
+7. Use a `runtime_test` Verifier after hypotheses exist to reproduce/falsify them in an ephemeral sandbox derived from the target repo.
+8. Let the Lead select supported causes, retain uncertainty, and produce an RCA report.
+9. Optionally retrieve similar historical RCA cases through shared memory/retrieval; retrieval is infrastructure, not a fourth evidence Agent.
+10. Emit JSON/Markdown reports, per-agent artifacts, trace, timing, and provider usage.
+11. Evaluate file localization on a reproducible 50-case development subset before the full SWE-bench Verified 500.
 
-PatchPilot is not a general-purpose chatbot or a greenfield vibe-coding tool.
+The original analyzed repository is always read-only. Runtime verification may write only inside a disposable sandbox copy destroyed after the run.
 
----
-
-## 2. Repository Boundaries
-
-The active development repository is the current `PatchPilot` directory.
-
-Typical structure:
-
+## 3. Repository Boundaries
 ```text
-PatchPilot/
-├── patchpilot/       # PatchPilot application source
-├── tests/            # Tests for PatchPilot itself
-├── demo_repo/        # Repository used as an Agent execution target
+RootTrace/
+├── patchpilot/      # compatibility package; RCA code under patchpilot/rca/
+├── tests/           # RootTrace tests; writable
+├── evaluation/      # RCA evaluation harness/manifests
+├── docs/
 ├── pyproject.toml
 └── AGENTS.md
 ```
-
 Rules:
+- Modify only RootTrace unless the user explicitly names another workspace.
+- Treat analyzed repos, demo repos, and benchmark workspaces as inputs.
+- Never modify the original analyzed repository.
+- RootTrace implementation/tests are writable during development.
+- Preserve unrelated user changes in a dirty worktree.
+- Do not package datasets, outputs, caches, secrets, or benchmark workspaces.
 
-* Modify only files inside the current `PatchPilot` repository.
-* Do not access or modify parent directories.
-* Do not import code directly from external reference repositories.
-* `demo_repo/` is a target repository used for demonstrations and evaluation. It is not part of the `patchpilot` Python package.
-* Do not include `demo_repo/` or `tests/` in the distributed Python package.
-* Never modify another Git repository unless the current task explicitly names it as the target workspace.
-
----
-
-## 3. Current Scope
-
-The initial version supports:
-
-* Python repositories
-* Local Markdown issue files
-* OpenAI-compatible model providers
-* Structured tool calling
-* Repository-scoped file access
-* Source-code search
-* Bounded file reading
-* Exact text replacement
-* Restricted command execution
-* Git diff output
-* Ruff and Pytest verification
+## 4. MVP Scope
+In scope:
+- Python repositories and local Issue Markdown/JSON.
+- Optional stack trace, CI log, and PR diff/context.
+- One Lead, three concurrent evidence Specialists, one runtime/test Verifier.
+- Deterministic context construction and bounded model reasoning.
+- File- and symbol-level localization.
+- Evidence provenance, competing hypotheses, contradictions, uncertainty.
+- Read-only Git inspection.
+- Prepared local historical-case JSONL.
+- TF-IDF + seeded MiniBatchKMeans retrieval buckets plus lexical/cosine Top-K retrieval.
+- JSON, Markdown, JSONL trace, timing, and exact/null token-usage artifacts.
+- Reproducible 50-case SWE-bench-derived file-localization evaluation.
 
 Out of scope unless explicitly requested:
+- Editing/patching the analyzed repository or generating executable patches.
+- Automatic commits, pushes, merges, PR comments, or PR creation.
+- Hosted GitHub App, webhooks, queues, databases, or Web UI.
+- Live GitHub/API ingestion in the first vertical slice.
+- Multi-language support, mandatory LSP, full code-property graphs, or fine-tuning.
+- Claiming unmeasured RCA accuracy, latency, token, or retrieval improvements.
 
-* Web UI
-* VS Code extension
-* Multi-agent conversation
-* Vector databases
-* Long-term memory
-* Automatic Git push or merge
-* Arbitrary shell access
-* Multi-language repository support
-* Greenfield project generation
-* Large-scale SWE-bench integration
-
-Do not expand the project scope without an explicit task.
-
----
-
-## 4. Core Architecture
-
-Maintain clear separation between the following modules:
-
+## 5. Architecture
 ```text
-CLI
-  ↓
-Workflow / Agent Loop
-  ↓
-Provider + Tool Registry
-  ↓
+CLI / Evaluation Adapter
+          ↓
+RCA Orchestrator
+    ├── Deterministic Context Builder
+    ├── Lead Agent
+    ├── Issue/CI + Code + Git Specialists   # parallel
+    ├── Evidence Graph Aggregator
+    ├── Historical RCA Retriever            # shared memory, optional
+    ├── Runtime/Test Verifier                # after hypotheses
+    └── RCA Report Renderer
+          ↓
+Provider + RCA Tool Registry
+          ↓
 Workspace Policy
-  ↓
-Target Repository
+    ├── Original Repository                 # read-only
+    └── Ephemeral Verification Sandbox      # disposable
 ```
 
 ### Provider
+Provider owns model calls, translation, retries, structured-output parsing, and usage accounting. It must not inspect repos, execute commands, or contain RCA workflow logic. Raw SDK objects must not escape it. Concurrent workers must use thread-safe accounting; aggregate immutable usage snapshots after completion.
 
-The Provider is responsible for:
+### Orchestrator
+The orchestrator owns ordering, concurrency, timeouts, failure isolation, artifacts, and final status. It must not bypass Tool Registry or Workspace Policy.
 
-* Calling an OpenAI-compatible API
-* Converting internal messages into provider requests
-* Converting provider responses into internal models
-* Parsing tool-call arguments
-* Handling provider-specific errors and retries
+Preferred flow:
+1. Normalize incident and build deterministic context.
+2. Lead plans investigation; do not commit to a root cause before evidence.
+3. Run `issue_ci`, `code`, and `git_history` concurrently.
+4. Validate/merge findings into `EvidenceGraph`.
+5. Lead generates ranked, falsifiable hypotheses and verification plans.
+6. `runtime_test` verifies selected hypotheses in the disposable sandbox.
+7. Lead performs final evidence-based selection and uncertainty reporting.
+8. Render artifacts deterministically.
 
-The Provider must not:
+Do not create unrestricted coding loops. Deterministic code should collect, rank, trim, and validate evidence before LLM calls.
 
-* Read or write repository files
-* Execute shell commands
-* Contain workflow logic
-* Return raw SDK objects to other modules
-
-### Agent Loop
-
-The Agent Loop is responsible for:
-
-* Maintaining the message history
-* Calling the Provider
-* Detecting tool requests
-* Dispatching tools through the Tool Registry
-* Adding tool results back to the conversation
-* Enforcing maximum-round limits
-* Returning the final Agent response
-
-The Agent Loop must not:
-
-* Implement provider HTTP logic
-* Perform direct file-system operations
-* Run shell commands directly
-* Bypass the Tool Registry or Workspace Policy
+### Agents
+Each Agent has one role, bounded context, typed input/output, budgets, stable IDs, allowed tools, and explicit uncertainty.
+- Specialists never communicate directly.
+- Shared state is the `EvidenceGraph`, not chat history.
+- Every factual finding cites evidence/provenance.
+- Worker failure is explicit and increases uncertainty.
+- Runtime verification returns `supported`, `rejected`, or `unverified`.
 
 ### Tools
+Original-repository tools are scoped, typed, bounded, auditable, and read-only:
+- `search_code`, `read_file`, `inspect_symbols`
+- `git_history`, `git_blame`, `git_show`
+- `read_external_log`
 
-Each tool must:
+Never expose `edit_file`, `write_file`, patch tools, unrestricted shell, `git commit`, `git push`, branch-changing commands, or direct `.git/` access to RCA Agents.
 
-* Have one clear responsibility
-* Define an explicit JSON-compatible input schema
-* Return a structured success or failure result
-* Validate all inputs
-* Enforce output-size and execution-time limits
-* Operate only inside the configured target workspace
+Runtime verification uses a separate sandbox registry with parsed allowlisted commands such as `pytest`, `python -m pytest`, or project-specific test commands. Sandbox writes are disposable and never propagate to the original repo.
 
-Initial tools:
+### Historical retrieval
+- TF-IDF + seeded MiniBatchKMeans creates coarse retrieval buckets only.
+- Lexical/cosine similarity retrieves Top-K historical cases.
+- Cluster IDs are not ground-truth root-cause categories.
+- Retrieved cases provide prior evidence/localization hints, never final answers.
+- Exclude evaluation targets, their gold patches, duplicates, and linked cases.
+- Persist split, instance ID, source timestamp, and index checksum.
+- When timestamps are available, only use cases resolved before the target incident.
 
-* `search_code`
-* `read_file`
-* `edit_file`
-* `write_file`
-* `run_command`
+## 6. Core Data Contracts
+Use Pydantic for persisted/public models:
+- `IncidentInput`: ID, repo, base commit, problem, optional logs/diff, provenance.
+- `InvestigationPlan`: questions, assignments, budgets; no premature final cause.
+- `SourceLocation`: repo-relative path, optional symbol/line range.
+- `EvidenceItem`: stable ID, agent, kind, observation, location, provenance, excerpt.
+- `Hypothesis`: statement, locations, supporting/contradicting evidence IDs, verification plan, confidence, disposition.
+- `AgentFinding`: status, ranked locations, evidence, uncertainty, timing, usage.
+- `EvidenceEdge`: source, target, relation (`supports`, `contradicts`, `caused_by`).
+- `EvidenceGraph`: incident, findings, hypotheses, evidence, edges.
+- `VerificationResult`: hypothesis ID, command/test, outcome, evidence IDs, status.
+- `RCAReport`: ranked causes, Top-K locations, causal chain, verification, suspected regression change, fix recommendation/scope, uncertainty, timing, usage.
 
-### Workspace Policy
+Rules:
+- Every factual RCA claim references evidence IDs.
+- Every evidence item has reproducible provenance.
+- Confidence ranks evidence; it never replaces evidence.
+- Missing/conflicting evidence yields `uncertain` or `insufficient_evidence`.
+- Fix recommendations are advisory text/locations only, never generated edits.
+- Persist repo-relative paths; never leak host/temp paths.
 
-The Workspace Policy is the authoritative security boundary.
+## 7. Security and Workspace Guarantees
+Workspace Policy is authoritative; prompts are not a security boundary.
 
-It must:
+For the original analyzed repository always deny:
+- File creation/edit/rename/delete and index/worktree mutation.
+- Absolute paths, traversal, symlink escapes, outside-workspace access.
+- `.env`, credentials, API keys, SSH keys, tokens, system secrets.
+- `sudo`, downloads, destructive commands, `shell=True`, commit/push/reset/checkout.
 
-* Resolve all paths relative to the target repository root
-* Reject absolute paths
-* Reject `..` path traversal
-* Reject files outside the target repository
-* Reject sensitive files and directories
-* Apply separate read and write policies
+Git tools use validated argument lists. Commands use `subprocess.run`, `shell=False`, repo-scoped `cwd`, bounded captured output, and finite timeouts.
 
-Prompt instructions are not a substitute for programmatic enforcement.
+Capture target fingerprint/Git status before and after each run. A successful RCA run must leave the original target unchanged. Runtime tests execute only in the disposable verification sandbox, where caches/temp files are allowed and discarded. Never print or serialize complete secrets.
 
----
+## 8. Token, Context, and Concurrency Policy
+- Send ranked snippets, never whole repos or unbounded Git history.
+- Deduplicate shared snippets; cap candidates, excerpts, history, and Top-K cases.
+- Run at most three concurrent evidence Specialists in the MVP.
+- Prefer deterministic tools over extra model turns.
+- Record exact usage when returned; otherwise record `null`.
+- Record wall-clock, model-call, and verification durations separately.
+- Typical target: no more than 7 model calls per incident; exceed only with measured quality/cost justification.
 
-## 5. Security Rules
+## 9. Evaluation Rules
+SWE-bench Verified is a patch-resolution benchmark. RootTrace derives localization metrics from its gold patch; these are not native SWE-bench RCA metrics.
 
-Never weaken these rules without an explicit security-related task.
+Required metrics:
+- `top_1_file_accuracy`: first predicted source file is a gold non-test patch file.
+- `any_file_recall_at_k`: at least one gold source file appears in Top-K.
+- `all_file_recall_at_k`: all gold source files appear in Top-K.
+- `mean_gold_file_recall_at_k`.
+- Coverage, invalid-output rate, P50/P95 latency, calls/case, tokens/case.
 
-### Always deny
+Use a checked-in fixed-seed 50-case development manifest with documented selection. Do not tune on the full 500 and report it as untouched test data.
 
-* Reading or writing `.env` files
-* Reading credentials, API keys, SSH keys, or system secrets
-* Accessing `.git/` internals directly
-* Accessing files outside the target workspace
-* Running commands with `sudo`
-* Running `git push`
-* Running destructive commands such as `rm -rf`
-* Running arbitrary network download commands
-* Using `shell=True`
-* Disabling tests to make a patch appear successful
+Required ablations:
+1. deterministic baseline without LLM Agents;
+2. Lead + Code Specialist;
+3. three evidence Specialists, historical retrieval off;
+4. three evidence Specialists, retrieval on;
+5. optional clustering-off comparison.
 
-### Require explicit approval or configuration
+Hold model, prompts, budgets, concurrency, and manifest constant between comparable runs. Never call file localization `RCA Accuracy`. Natural-language root-cause correctness needs separate Silver/Gold adjudication and is deferred unless implemented.
 
-* Installing dependencies
-* Deleting files
-* Modifying dependency lockfiles
-* Modifying CI/CD configuration
-* Modifying files outside the approved change plan
-* Running commands that require network access
-
-### Day 1 write restrictions
-
-For the initial minimal implementation:
-
-* Source files may be modified.
-* Target repository tests must be treated as read-only.
-* Files matching `test_*.py` or paths under `tests/` must not be modified by the coding Agent.
-
-PatchPilot's own tests under the root `tests/` directory may be modified when developing PatchPilot itself.
-
----
-
-## 6. Command Execution Policy
-
-Use `subprocess.run` with:
-
-* An argument list rather than a shell string
-* `shell=False`
-* A repository-scoped working directory
-* Captured standard output and error
-* A finite timeout
-* A bounded output size
-
-Initially allowed commands:
-
-```text
-python -m pytest
-pytest
-ruff check
-git diff
-git status
-```
-
-Command validation must inspect parsed arguments, not only string prefixes.
-
-Do not add a general unrestricted shell tool.
-
----
-
-## 7. File Editing Policy
-
-Prefer the smallest possible change.
-
-The initial `edit_file` tool should use exact text replacement:
-
-1. Read the current file.
-2. Verify that `old_text` exists exactly once.
-3. Reject zero or multiple matches.
-4. Apply the replacement.
-5. Return a unified diff.
-
-Do not rewrite an entire file when a local replacement is sufficient.
-
-Preserve:
-
-* Existing public interfaces
-* Existing formatting style
-* Existing type annotations
-* Existing behavior unrelated to the issue
-
-Do not modify tests merely to make failing code pass.
-
----
-
-## 8. Agent Behavior
-
-The coding Agent must follow this sequence:
-
-1. Inspect the repository before editing.
-2. Search for relevant symbols and files.
-3. Read the implementation and related tests.
-4. Form a minimal change hypothesis.
-5. Modify source code.
-6. Run the narrowest relevant verification.
-7. Run broader verification when practical.
-8. Report success only when deterministic checks pass.
-9. Report a concrete blocker when the task cannot be completed.
-
-The Agent must not:
-
-* Guess file contents
-* Claim tests passed without running them
-* Invent tool results
-* Continue indefinitely
-* Expand an issue into unrelated refactoring
-* Change tests to hide an implementation defect
-
----
-
-## 9. Development Workflow for AI Coding Tools
-
-Before making changes:
-
-1. Read this file completely.
-2. Inspect the relevant existing files.
-3. Summarize the intended change in a few sentences.
-4. Identify the files that need modification.
-5. Avoid editing unrelated files.
+## 10. Development and Testing
+Before editing:
+1. Read this file and the relevant milestone in `docs/rca-demo-mvp-plan.md`.
+2. Inspect relevant code/tests and preserve unrelated changes.
+3. Prefer a working vertical slice over placeholder abstractions.
 
 During implementation:
+- Add RCA code under `patchpilot/rca/`.
+- Reuse Provider, Workspace, trace, and config seams where practical.
+- Keep deterministic collection separate from LLM reasoning.
+- Type public APIs; use Pydantic for persisted schemas and `pathlib.Path`.
+- Never hide worker failures, validation errors, or missing usage.
 
-* Work on one focused task at a time.
-* Preserve current module boundaries.
-* Prefer extending existing abstractions over introducing parallel ones.
-* Avoid broad refactoring unless required by the task.
-* Do not generate placeholder implementations presented as complete.
-* Do not silently ignore exceptions.
-* Use clear error types and actionable messages.
-* Keep functions small and single-purpose.
+Tests must cover schema integrity, role isolation, true concurrency, deterministic aggregation, timeout/partial failure, path/security attacks, target immutability, sandbox isolation, retrieval leakage, seeded clustering, localization metrics, usage aggregation, CLI artifacts, and non-zero failure exits.
 
-After implementation:
-
-1. Run the relevant focused tests.
-2. Run the broader test suite when practical.
-3. Run Ruff on changed Python files or the project.
-4. Inspect `git diff`.
-5. Report:
-
-   * Files changed
-   * Main design decisions
-   * Commands executed
-   * Test results
-   * Remaining limitations
-
-Do not claim completion if required tests fail.
-
----
-
-## 10. Testing Requirements
-
-Every behavior change should include or update tests.
-
-Tests should cover:
-
-* Successful behavior
-* Invalid input
-* Security boundaries
-* Failure handling
-* Path traversal attempts
-* Command allowlist enforcement
-* Provider tool-call parsing
-* Agent-loop stopping conditions
-
-Use:
-
+Run focused tests first, then when practical:
 ```bash
 python -m pytest tests -q
-ruff check patchpilot tests
+ruff check patchpilot tests evaluation
+git diff --check
+git status --short
 ```
+Never weaken tests to hide defects.
 
-For a focused change, run the relevant test file first:
-
-```bash
-python -m pytest tests/test_workspace.py -q
-```
-
-Do not delete or weaken an existing test without explaining why the expected behavior has legitimately changed.
-
----
-
-## 11. Python Standards
-
-* Python 3.11 or later
-* Type annotations for public functions and methods
-* `pathlib.Path` for file paths
-* Dataclasses or Pydantic models for structured internal data
-* Explicit exceptions for expected failure conditions
-* UTF-8 text handling
-* No mutable default arguments
-* No hidden global state
-* No hard-coded API keys
-* No provider-specific SDK objects outside the Provider module
-* No `print` calls in reusable library code unless they are part of an explicit CLI or tracing interface
-
-Prefer standard-library solutions when they are clear and sufficient.
-
----
-
-## 12. Configuration and Secrets
-
-Configuration may come from:
-
-* Environment variables
-* CLI arguments
-* Explicit configuration files
-* Model configuration files
-
-Secrets must come from environment variables or model configuration files.
-
-### Model Configuration
-
-PatchPilot supports unified model configuration through a model configuration file, allowing users to specify models by name with automatic resolution of base_url, api_key, and provider type.
-
-**Model Configuration File Format:**
-
-The model configuration file is a JSON file with the following structure:
-
-```json
-{
-  "models": [
-    {
-      "name": "gpt4",
-      "provider": "openai",
-      "base_url": "https://api.openai.com/v1",
-      "api_key": "your-openai-api-key",
-      "model_id": "gpt-4"
-    },
-    {
-      "name": "claude-opus",
-      "provider": "anthropic",
-      "api_key": "your-anthropic-api-key",
-      "model_id": "claude-3-opus-20240229"
-    },
-    {
-      "name": "zhipu-glm4",
-      "provider": "openai",
-      "base_url": "https://open.bigmodel.cn/api/paas/v4/",
-      "api_key": "your-zhipu-api-key",
-      "model_id": "glm-4"
-    }
-  ]
-}
-```
-
-**Configuration File Search Order:**
-
-1. Explicit path via `--config` CLI argument
-2. `~/.patchpilot/models.json` (user-level configuration)
-3. `.patchpilot/models.json` (project-level configuration)
-
-**Usage:**
-
-```bash
-# Use model from configuration file
-patchpilot prepare --repo /path/to/repo --issue issue.md --model gpt4
-
-# Use custom config file
-patchpilot prepare --repo /path/to/repo --issue issue.md --model gpt4 --config /path/to/config.json
-
-# Fallback to environment variables if model not found in config
-patchpilot prepare --repo /path/to/repo --issue issue.md --model gpt-4
-```
-
-**Environment Variable Fallback:**
-
-If a model is not found in the configuration file, PatchPilot falls back to environment variables:
-
-* `ZHIPU_API_KEY` or `OPENAI_API_KEY`: API authentication key
-* `PATCHPILOT_BASE_URL` or `OPENAI_BASE_URL`: API base URL
-* `PATCHPILOT_MODEL`: Model identifier
-
-This maintains backward compatibility with existing environment variable configuration.
-
-Never:
-
-* Commit `.env`
-* Commit model configuration files with real API keys
-* Hard-code an API key
-* Print complete API keys
-* Include secrets in traces, exceptions, fixtures, or examples
-
-Use `.env.example` and `.patchpilot/models.json.example` only for variable names and safe placeholder values.
-
----
-
-## 13. Packaging Rules
-
-The installable package is `patchpilot`.
-
-`pyproject.toml` must explicitly include only `patchpilot*` and exclude:
-
-* `demo_repo*`
-* `tests*`
-* Build artifacts
-
-Do not turn `demo_repo/` into an installable Python package.
-
-The following command must remain valid:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
----
-
-## 14. Git Rules
-
-* Keep commits focused and descriptive.
-* Do not rewrite Git history.
-* Do not force-push.
-* Do not push automatically.
-* Do not commit generated caches, secrets, or build output.
-* Do not mix unrelated refactoring with feature work.
-
-Recommended commit prefixes:
+## 11. Packaging, Artifacts, and Git
+The package remains `patchpilot` during the Demo MVP. Exclude tests, datasets, benchmark repos, outputs, caches, and model artifacts from package discovery.
 
 ```text
-chore:
-feat:
-fix:
-test:
-docs:
-refactor:
+<output-dir>/
+├── incident.json
+├── investigation_plan.json
+├── agents/{issue_ci,code,git_history}.json
+├── evidence_graph.json
+├── hypotheses.json
+├── verification.json
+├── rca_report.json
+├── rca_report.md
+├── execution_trace.jsonl
+└── run_summary.json
 ```
 
-Always inspect:
+Artifacts must be bounded, secret-free, deterministic where order is irrelevant, and explicit about model ID, base commit, config, timing, usage, and partial failures.
 
-```bash
-git status
-git diff
-```
+Keep Git changes focused. Do not rewrite history, force-push, auto-push, commit generated data, or mix package renaming with RCA features. Prefer `feat(rca):`, `fix(rca):`, `test(rca):`, `docs(rca):`, and `refactor(rca):`.
 
-before reporting completion.
+## 12. Definition of Done
+A milestone is complete only when its vertical behavior works, the original target is unchanged, sandbox writes are isolated, persisted outputs validate, conclusions are evidence-linked or explicitly uncertain, relevant tests/Ruff pass, usage/failures are honest, and the diff contains no unrelated migration/generated data.
 
----
-
-## 15. Definition of Done
-
-A task is complete only when:
-
-* The requested behavior is implemented.
-* Security boundaries remain enforced.
-* Relevant tests pass.
-* Ruff reports no new violations.
-* The package remains installable.
-* The diff contains no unrelated changes.
-* No secrets or generated files are included.
-* The final report clearly states what was changed and verified.
-
-For Agent-executed repository tasks, success additionally requires:
-
-* The target repository tests were not modified.
-* Verification commands were actually executed.
-* The resulting Git diff is available for human review.
-* The Agent did not access files outside the target workspace.
-
----
-
-## 16. Instruction Priority
-
-When instructions conflict, follow this order:
-
-1. Security and workspace restrictions in this file
-2. Explicit user task
-3. Existing project architecture and tests
-4. Local implementation convenience
-
-Do not bypass a security restriction merely because a task prompt requests it. Report the conflict instead.
+The Resume Demo MVP is complete only after a reproducible 50-case evaluation and required ablations exist. Resume percentages must come from generated reports, never estimates.
