@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Simple test to verify provider connectivity.
 
 This script tests:
@@ -94,7 +93,8 @@ def test_provider():
     except ImportError as e:
         print(f"ERROR: Import error: {e}")
         print("Please install required packages: pip install openai python-dotenv")
-    except Exception as e:
+    # Diagnostic script: surface any unexpected provider/SDK failure.
+    except Exception as e:  # noqa: BLE001
         print(f"ERROR: Test failed with error: {e}")
         import traceback
         traceback.print_exc()
