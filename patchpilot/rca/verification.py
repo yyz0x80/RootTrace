@@ -40,6 +40,7 @@ from patchpilot.rca.schema import (
     VerificationOutcome,
     VerificationResult,
     VerificationStatus,
+    VerificationStep,
 )
 
 DEFAULT_STEP_TIMEOUT_SECONDS = 120
@@ -95,7 +96,7 @@ class RuntimeTestVerifier:
                 if remaining <= 0:
                     break
                 remaining -= 1
-                result, item = self._run_step(hypothesis, step.command, step.timeout_seconds)
+                result, item = self._run_step(hypothesis, step)
                 results.append(result)
                 if item is not None:
                     evidence.append(item)
@@ -129,24 +130,31 @@ class RuntimeTestVerifier:
     def _run_step(
         self,
         hypothesis: Hypothesis,
-        command: str,
-        timeout_seconds: int | None,
+        step: VerificationStep,
     ) -> tuple[VerificationResult, EvidenceItem | None]:
+        command = step.command
         try:
             argv = shlex.split(command)
             sandbox_result = self.sandbox.run(
                 argv,
-                timeout_seconds=timeout_seconds or DEFAULT_STEP_TIMEOUT_SECONDS,
+                timeout_seconds=step.timeout_seconds or DEFAULT_STEP_TIMEOUT_SECONDS,
             )
         except (ValueError, RuntimeError) as exc:
             return self._rejected_command(hypothesis, command, str(exc)), None
-        return self._record_command(hypothesis, command, sandbox_result)
+        return self._record_command(
+            hypothesis,
+            command,
+            sandbox_result,
+            expect_failure=step.expect_failure,
+        )
 
     def _record_command(
         self,
         hypothesis: Hypothesis,
         command: str,
         sandbox_result: SandboxCommandResult,
+        *,
+        expect_failure: bool,
     ) -> tuple[VerificationResult, EvidenceItem]:
         exit_code = sandbox_result.exit_code
         timed_out = sandbox_result.timed_out
@@ -155,10 +163,18 @@ class RuntimeTestVerifier:
             outcome = VerificationOutcome.UNVERIFIED
         elif exit_code == 0:
             status = VerificationStatus.PASSED
-            outcome = VerificationOutcome.SUPPORTED
+            outcome = (
+                VerificationOutcome.REJECTED
+                if expect_failure
+                else VerificationOutcome.SUPPORTED
+            )
         else:
             status = VerificationStatus.FAILED
-            outcome = VerificationOutcome.REJECTED
+            outcome = (
+                VerificationOutcome.SUPPORTED
+                if expect_failure
+                else VerificationOutcome.REJECTED
+            )
         output = "\n".join(
             part for part in (sandbox_result.stdout, sandbox_result.stderr) if part
         )

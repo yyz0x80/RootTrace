@@ -419,6 +419,13 @@ class VerificationStep(BaseModel):
     command: str = Field(max_length=MAX_COMMAND_CHARS)
     description: str | None = Field(default=None, max_length=MAX_NOTE_CHARS)
     timeout_seconds: int | None = Field(default=None, gt=0, le=3_600)
+    expect_failure: bool = Field(
+        default=False,
+        description=(
+            "True when the command should exit non-zero to confirm the "
+            "hypothesis (e.g., reproducing the reported failure)."
+        ),
+    )
 
 
 class Hypothesis(BaseModel):

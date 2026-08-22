@@ -27,6 +27,12 @@ from patchpilot.rca.artifacts import (
     model_to_json,
     write_artifact,
 )
+from patchpilot.rca.cli import (
+    RcaCliResult,
+    add_rca_subparser,
+    run_rca_command,
+    run_rca_pipeline,
+)
 from patchpilot.rca.context import (
     ContextTruncation,
     IncidentContext,
@@ -63,6 +69,7 @@ from patchpilot.rca.prompts import (
     build_issue_ci_prompt,
     build_lead_prompt,
 )
+from patchpilot.rca.renderer import render_rca_markdown
 from patchpilot.rca.sandbox import (
     RuntimeVerificationSandbox,
     SandboxCommandResult,
@@ -159,6 +166,7 @@ __all__ = [
     "ProviderProtocol",
     "RCAReport",
     "RankedCause",
+    "RcaCliResult",
     "RcaOrchestrator",
     "RcaRunResult",
     "RcaToolRegistry",
@@ -186,6 +194,7 @@ __all__ = [
     "VerificationRun",
     "VerificationStatus",
     "VerificationStep",
+    "add_rca_subparser",
     "aggregate_evidence",
     "assert_fingerprint_unchanged",
     "build_code_prompt",
@@ -201,6 +210,9 @@ __all__ = [
     "extract_signals",
     "load_incident",
     "model_to_json",
+    "render_rca_markdown",
     "resolve_base_commit",
+    "run_rca_command",
+    "run_rca_pipeline",
     "write_artifact",
 ]

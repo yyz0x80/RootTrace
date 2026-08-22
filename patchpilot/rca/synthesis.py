@@ -17,7 +17,11 @@ from patchpilot.rca.prompts import (
     FINAL_REPORT_SYSTEM_PROMPT,
     build_final_report_prompt,
 )
-from patchpilot.rca.schema import EvidenceGraph, RCAReport
+from patchpilot.rca.schema import (
+    EvidenceGraph,
+    HypothesisDisposition,
+    RCAReport,
+)
 from patchpilot.rca.usage import UsageTracker
 from patchpilot.rca.verification import VerificationRun
 
@@ -79,4 +83,17 @@ class LeadSynthesizer:
             raise SynthesisError(
                 f"malformed final synthesis output: {exc}"
             ) from exc
+        dispositions = {
+            hypothesis.id: hypothesis.disposition
+            for hypothesis in graph.hypotheses
+        }
+        for cause in report.ranked_causes:
+            if (
+                dispositions.get(cause.hypothesis_id)
+                is HypothesisDisposition.REJECTED
+            ):
+                raise SynthesisError(
+                    f"ranked cause {cause.rank} references rejected "
+                    f"hypothesis {cause.hypothesis_id}"
+                )
         return report

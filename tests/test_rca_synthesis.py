@@ -220,6 +220,35 @@ def test_synthesis_rejects_root_cause_without_ranked_causes(
         )
 
 
+def test_synthesis_rejects_ranking_a_rejected_hypothesis(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    payload = json.loads(_report_json(git_repo))
+    payload["ranked_causes"][0]["hypothesis_id"] = "h-rejected"
+    rejected = run.graph.hypotheses[0].model_copy(
+        update={
+            "id": "h-rejected",
+            "disposition": HypothesisDisposition.REJECTED,
+        }
+    )
+    graph = run.graph.model_copy(
+        update={
+            "hypotheses": [
+                rejected if hypothesis.id == "h-001" else hypothesis
+                for hypothesis in run.graph.hypotheses
+            ]
+        }
+    )
+    provider = FakeProvider(turn(json.dumps(payload)))
+    with pytest.raises(SynthesisError):
+        LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
+            graph,
+            run,
+        )
+
+
 def test_verification_to_report_chain(git_repo, tmp_path: Path) -> None:
     """One local case produces an evidence-backed RCA report."""
     run = _verified_run(git_repo, tmp_path)

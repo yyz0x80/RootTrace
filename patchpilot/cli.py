@@ -35,6 +35,7 @@ from patchpilot.provider import (
     ToolCallParseError,
     create_provider_from_config,
 )
+from patchpilot.rca.cli import add_rca_subparser, run_rca_command
 from patchpilot.repository import RepositoryPreflightError, validate_repository
 from patchpilot.repository.analyzer import analyze_repository
 from patchpilot.tools import ToolRegistry
@@ -543,10 +544,14 @@ def main() -> None:
             "(default: balanced)"
         ),
     )
+
+    add_rca_subparser(subparsers)
     
     args = parser.parse_args()
     
-    if args.command == "prepare":
+    if args.command == "rca":
+        sys.exit(run_rca_command(args))
+    elif args.command == "prepare":
         handle_prepare(args)
     elif args.command == "run":
         handle_run(args)

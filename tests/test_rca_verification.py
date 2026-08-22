@@ -138,6 +138,65 @@ def test_verifier_marks_rejected_for_failing_tests(
     assert "assert False" in result.output_excerpt or result.output_excerpt
 
 
+def test_verifier_expect_failure_supports_reproduced_failure(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    with RuntimeVerificationSandbox(
+        git_repo.repo,
+        work_dir=tmp_path,
+    ) as sandbox:
+        _write(
+            sandbox.work_root,
+            "tests/test_fail.py",
+            "def test_fail():\n    assert False\n",
+        )
+        hypothesis = Hypothesis(
+            id="h-repro",
+            statement="the reported failure reproduces",
+            supporting_evidence_ids=["ev-seed-001"],
+            verification_plan=[
+                VerificationStep(
+                    command="python -m pytest -q tests/test_fail.py",
+                    expect_failure=True,
+                )
+            ],
+        )
+        run = RuntimeTestVerifier(sandbox).verify(
+            _graph(git_repo, [hypothesis])
+        )
+    assert run.results[0].outcome == VerificationOutcome.SUPPORTED
+    assert run.results[0].status == VerificationStatus.FAILED
+    assert run.graph.hypotheses[0].disposition == HypothesisDisposition.SUPPORTED
+
+
+def test_verifier_expect_failure_rejects_passing_test(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    with RuntimeVerificationSandbox(
+        git_repo.repo,
+        work_dir=tmp_path,
+    ) as sandbox:
+        hypothesis = Hypothesis(
+            id="h-repro-pass",
+            statement="the reported failure should reproduce",
+            supporting_evidence_ids=["ev-seed-001"],
+            verification_plan=[
+                VerificationStep(
+                    command="python -m pytest -q tests/test_calc.py",
+                    expect_failure=True,
+                )
+            ],
+        )
+        run = RuntimeTestVerifier(sandbox).verify(
+            _graph(git_repo, [hypothesis])
+        )
+    assert run.results[0].outcome == VerificationOutcome.REJECTED
+    assert run.results[0].status == VerificationStatus.PASSED
+    assert run.graph.hypotheses[0].disposition == HypothesisDisposition.REJECTED
+
+
 def test_verifier_marks_timeout_as_unverified(
     git_repo,
     tmp_path: Path,

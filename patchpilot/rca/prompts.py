@@ -72,6 +72,8 @@ Rules:
 - You do not produce a root cause. Report symptoms and failure signatures with
   explicit uncertainty.
 - Every factual claim must cite one of the provided evidence ids.
+- When external logs are provided for this run, read_external_log accepts the
+  paths "ci.log" and "stack_trace.log".
 
 Tool results identify their evidence id as "Evidence id: ev-issue_ci-<n>".
 Your final answer is one JSON object:
@@ -152,6 +154,10 @@ Rules:
 - Rank hypotheses from most to least likely.
 - Each hypothesis needs a bounded verification plan using only sandbox test
   commands of the form "python -m pytest <relative test target> [flags]".
+- Set expect_failure to true when the verification command should exit
+  non-zero to confirm the hypothesis (e.g., reproducing the reported failure
+  on the analyzed commit). Set it to false when a passing command confirms the
+  hypothesis.
 - Do not propose code edits, patches, or repository mutations.
 - Confidence only ranks evidence; it never replaces it.
 
@@ -167,7 +173,8 @@ Output only one JSON object with this schema:
         {
           "command": "python -m pytest -q tests/test_calc.py",
           "description": "short description",
-          "timeout_seconds": 60
+          "timeout_seconds": 60,
+          "expect_failure": false
         }
       ],
       "confidence": "low|medium|high"
@@ -236,6 +243,8 @@ Rules:
 - Choose the best-supported cause, or report insufficient evidence.
 - Rank causes only when the evidence and verification support them; cite
   evidence ids that exist in the provided graph.
+- Never rank a hypothesis whose verification outcome is rejected. When no
+  hypothesis is supported by verification, conclude insufficient_evidence.
 - Report a suspected regression commit only when verification and evidence
   support it.
 - Fix recommendations are advisory text and scope only. Never embed diffs,
