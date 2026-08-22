@@ -1,6 +1,6 @@
 """RCA-safe read-only tool registry for RootTrace evidence gathering.
 
-M3 implements the read-only target tool registry used by the three evidence
+This registry is the read-only tool surface used by the three evidence
 Specialists. It borrows design semantics from OpenHands (typed tool inputs,
 bounded observations, Agent/Tool separation), AutoCodeRover (AST/symbol-aware
 repository search), and Agentless (file -> symbol localization), while reusing

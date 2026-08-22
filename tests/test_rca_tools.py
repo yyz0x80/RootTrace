@@ -1,4 +1,4 @@
-"""Tests for the M3 RCA-safe read-only tool registry."""
+"""Tests for the RCA-safe read-only tool registry."""
 
 from __future__ import annotations
 

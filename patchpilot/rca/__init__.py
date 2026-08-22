@@ -48,9 +48,16 @@ from patchpilot.rca.incident_loader import (
     load_incident,
     resolve_base_commit,
 )
+from patchpilot.rca.orchestrator import (
+    RcaOrchestrator,
+    RcaRunResult,
+    aggregate_evidence,
+)
 from patchpilot.rca.prompts import (
+    HYPOTHESES_SYSTEM_PROMPT,
     build_code_prompt,
     build_git_history_prompt,
+    build_hypotheses_prompt,
     build_issue_ci_prompt,
     build_lead_prompt,
 )
@@ -109,6 +116,7 @@ __all__ = [
     "ARTIFACT_INVESTIGATION_PLAN",
     "ARTIFACT_RCA_REPORT",
     "ARTIFACT_VERIFICATION",
+    "HYPOTHESES_SYSTEM_PROMPT",
     "AgentFinding",
     "AgentRole",
     "ArtifactError",
@@ -145,6 +153,8 @@ __all__ = [
     "ProviderProtocol",
     "RCAReport",
     "RankedCause",
+    "RcaOrchestrator",
+    "RcaRunResult",
     "RcaToolRegistry",
     "RcaToolResult",
     "ReadExternalLogInput",
@@ -167,9 +177,11 @@ __all__ = [
     "VerificationResult",
     "VerificationStatus",
     "VerificationStep",
+    "aggregate_evidence",
     "assert_fingerprint_unchanged",
     "build_code_prompt",
     "build_git_history_prompt",
+    "build_hypotheses_prompt",
     "build_incident_context",
     "build_issue_ci_prompt",
     "build_lead_prompt",

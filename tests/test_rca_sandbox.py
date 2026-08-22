@@ -1,4 +1,4 @@
-"""Tests for the M3 ephemeral runtime verification sandbox."""
+"""Tests for the ephemeral runtime verification sandbox."""
 
 from __future__ import annotations
 

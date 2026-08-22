@@ -1,9 +1,10 @@
 """Bounded role prompts for the RootTrace RCA agents.
 
-Prompt builders serialize only the deterministic context prepared by M2;
-every prompt is bounded and carries explicit truncation metadata. The Lead
-plans an investigation without committing to a root cause; the three evidence
-Specialists stay inside their own evidence domain and cite evidence IDs.
+Prompt builders serialize only the deterministic context prepared by the
+context builder; every prompt is bounded and carries explicit truncation
+metadata. The Lead plans an investigation without committing to a root cause;
+the three evidence Specialists stay inside their own evidence domain and cite
+evidence IDs.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import json
 
 from patchpilot.rca.context import IncidentContext
-from patchpilot.rca.schema import PlanQuestion
+from patchpilot.rca.schema import EvidenceGraph, PlanQuestion
 
 MAX_PROMPT_CHARS = 120_000
 _TRUNCATION_MARKER = "\n... [prompt truncated]"
@@ -134,6 +135,93 @@ Your final answer is one JSON object:
 ranked_locations are repo-relative paths. evidence_ids must reference only ids
 you actually saw.
 """
+
+
+HYPOTHESES_SYSTEM_PROMPT = """\
+You are the RootTrace Lead Agent generating falsifiable root-cause hypotheses
+after evidence has been gathered.
+
+Rules:
+- Hypotheses must be falsifiable and grounded in the provided evidence graph.
+- Every hypothesis must cite supporting evidence ids that exist in the graph;
+  contradicting evidence ids are optional.
+- Rank hypotheses from most to least likely.
+- Each hypothesis needs a bounded verification plan using only sandbox test
+  commands of the form "python -m pytest <relative test target> [flags]".
+- Do not propose code edits, patches, or repository mutations.
+- Confidence only ranks evidence; it never replaces it.
+
+Output only one JSON object with this schema:
+{
+  "hypotheses": [
+    {
+      "statement": "falsifiable root-cause claim",
+      "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
+      "supporting_evidence_ids": ["ev-code-001"],
+      "contradicting_evidence_ids": [],
+      "verification_plan": [
+        {
+          "command": "python -m pytest -q tests/test_calc.py",
+          "description": "short description",
+          "timeout_seconds": 60
+        }
+      ],
+      "confidence": "low|medium|high"
+    }
+  ]
+}
+
+Return at most 5 hypotheses. Evidence ids must be chosen only from the ids
+listed in the EVIDENCE GRAPH section.
+"""
+
+
+def build_hypotheses_prompt(graph: EvidenceGraph) -> str:
+    """Build the bounded hypothesis-generation prompt from the evidence graph."""
+    incident = graph.incident
+    evidence = [
+        {
+            "id": item.id,
+            "agent": item.agent.value,
+            "kind": item.kind.value,
+            "observation": item.observation,
+            "location": item.location.model_dump(mode="json")
+            if item.location is not None
+            else None,
+            "excerpt": item.excerpt[:600]
+            + ("..." if len(item.excerpt) > 600 else ""),
+        }
+        for item in graph.evidence
+    ]
+    findings = [
+        {
+            "agent": finding.agent.value,
+            "status": finding.status.value,
+            "ranked_locations": [
+                location.model_dump(mode="json")
+                for location in finding.ranked_locations
+            ],
+            "evidence_ids": finding.evidence_ids,
+            "uncertainty": finding.uncertainty.value,
+            "uncertainty_note": finding.uncertainty_note,
+        }
+        for finding in graph.findings
+    ]
+    data = {
+        "incident": {
+            "id": incident.id,
+            "title": incident.title,
+            "problem": incident.problem,
+            "base_commit": incident.base_commit,
+        },
+        "findings": findings,
+        "evidence": evidence,
+    }
+    return (
+        HYPOTHESES_SYSTEM_PROMPT
+        + "\n\nEVIDENCE GRAPH:\n"
+        + _bounded_json(data)
+    )
 
 
 def _incident_view(context: IncidentContext) -> dict[str, object]:

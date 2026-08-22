@@ -1,4 +1,4 @@
-"""Focused tests for the RootTrace deterministic context builder (M2)."""
+"""Focused tests for the RootTrace deterministic context builder."""
 
 import json
 import subprocess

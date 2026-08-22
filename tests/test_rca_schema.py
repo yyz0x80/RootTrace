@@ -1,4 +1,4 @@
-"""Focused tests for RootTrace typed RCA contracts (M1)."""
+"""Focused tests for RootTrace typed RCA contracts."""
 
 import pytest
 from pydantic import ValidationError

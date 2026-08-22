@@ -1,4 +1,4 @@
-"""Tests for the M4 Lead planner and three evidence Specialists."""
+"""Tests for the Lead planner and three evidence Specialists."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from patchpilot.workspace import Workspace
 
 
 class FakeProvider:
-    """Deterministic provider used by all M4 agent tests."""
+    """Deterministic provider used by all RCA agent tests."""
 
     model = "fake-model"
 

@@ -1,4 +1,4 @@
-"""Focused tests for RootTrace RCA artifact persistence (M1)."""
+"""Focused tests for RootTrace RCA artifact persistence."""
 
 import json
 

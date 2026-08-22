@@ -1,6 +1,6 @@
 """Lead planner and three evidence Specialists for RootTrace RCA.
 
-M4 implements typed RCA Agents with strict least-privilege tool binding:
+Typed RCA Agents with strict least-privilege tool binding:
 
 - ``LeadPlanner`` plans investigation questions/assignments only; it never
   commits to a root cause before evidence.

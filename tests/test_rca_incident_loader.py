@@ -1,4 +1,4 @@
-"""Focused tests for the RootTrace incident loader (M2)."""
+"""Focused tests for the RootTrace incident loader."""
 
 import json
 import subprocess
