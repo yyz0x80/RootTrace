@@ -98,6 +98,13 @@ Never send whole repositories or unbounded Git history to a model.
 Exit: identical inputs produce stable context, truncation is visible, original target unchanged.
 
 ### M3 — Read-only tools and verification sandbox
+Before implementation, study only the relevant design patterns from:
+- OpenHands: typed tool input/output, bounded observations, and Agent/Tool/Workspace separation.
+- AutoCodeRover: AST/symbol-aware repository search.
+- Agentless: file → symbol → fine-grained localization.
+
+Borrow design semantics, not infrastructure. Prefer reusing PatchPilot's existing tool/workspace seams. Do not introduce a full external agent framework, general TerminalTool, LSP, or multi-language Tree-sitter stack for the Python MVP.
+
 Create an RCA-safe target registry:
 - `search_code`
 - `read_file`
@@ -107,7 +114,18 @@ Create an RCA-safe target registry:
 - `git_show`
 - `read_external_log`
 
-Do not expose PatchPilot edit/write/apply-patch tools.
+Tool requirements:
+- typed input/output;
+- bounded output;
+- repository-relative paths;
+- finite timeouts;
+- reproducible provenance;
+- `subprocess.run(..., shell=False)` for subprocess-backed tools;
+- explicit Git command/argument allowlists.
+
+For the Python-only MVP, prefer Python `ast` for `inspect_symbols` unless an existing reusable structural parser already provides the capability.
+
+Do not expose PatchPilot edit/write/apply-patch tools, unrestricted shell, or Git mutation commands.
 
 Add an ephemeral verification sandbox:
 - derived from target/base commit;
@@ -119,7 +137,11 @@ Add an ephemeral verification sandbox:
 
 Test traversal, absolute paths, symlink escape, secret access, Git mutation flags, write attempts, sandbox escape, and before/after target fingerprints.
 
-Exit: original target is immutable on success/failure; runtime tests execute only inside sandbox.
+Exit:
+- original target is immutable on success/failure;
+- runtime tests execute only inside sandbox;
+- RCA target tools are bounded and read-only;
+- no unnecessary external agent/tool framework is added.
 
 ### M4 — Lead planner and three evidence Specialists
 Add `prompts.py`, `agents.py`, `usage.py`, and focused tests.
@@ -130,9 +152,19 @@ Implement:
 3. `CodeSpecialist`: likely files/functions/symbols and code-path evidence.
 4. `GitHistorySpecialist`: relevant changes, blame/history evidence, suspected regressions.
 
+Bind each role to the smallest tool surface it needs:
+- `IssueCISpecialist` → incident/context data and `read_external_log`.
+- `CodeSpecialist` → `search_code`, `read_file`, `inspect_symbols`.
+- `GitHistorySpecialist` → `git_history`, `git_blame`, `git_show`.
+- No evidence Specialist receives runtime test execution or write-capable tools.
+
 Every Agent uses typed I/O, bounded context, role-specific tools, explicit uncertainty, call/time budget, and stable provenance. Normal tests use deterministic fake Providers.
 
-Exit: role isolation works, malformed outputs are explicit, factual findings contain provenance.
+Exit:
+- role isolation and tool isolation work;
+- malformed outputs are explicit;
+- factual findings contain provenance;
+- Specialists cannot bypass the RCA-safe registry.
 
 ### M5 — Parallel evidence orchestration and hypotheses
 Add orchestrator, evidence aggregator, trace integration, concurrency tests.
@@ -144,29 +176,45 @@ Pipeline:
 4. run `issue_ci`, `code`, `git_history` concurrently;
 5. aggregate in stable role order;
 6. validate/persist `EvidenceGraph`;
-7. Lead generates ranked falsifiable hypotheses;
-8. persist `hypotheses.json`.
+7. optionally attach bounded historical retrieval hints when enabled;
+8. Lead generates ranked falsifiable hypotheses;
+9. persist `hypotheses.json`.
 
 Each hypothesis includes statement, suspected locations, supporting/contradicting evidence IDs, verification plan, and uncertainty.
+
+Rules:
+- Specialists do not communicate directly;
+- shared state is the typed `EvidenceGraph`, not chat history;
+- historical retrieval hints never override current-repository evidence;
+- no Specialist may invoke verification-sandbox commands;
+- do not create unrestricted ReAct/coding loops.
 
 Failure behavior:
 - one Specialist timeout/failure yields partial evidence and higher uncertainty;
 - planning failure stops before workers;
 - exceptions never erase diagnostics.
 
-Exit: tests prove overlapping worker execution, deterministic aggregation, and timing/usage/failure reporting.
+Exit:
+- tests prove overlapping worker execution;
+- aggregation is deterministic;
+- evidence/hypothesis references validate;
+- timing/usage/failure reporting is correct.
 
 ### M6 — Runtime/Test verification and final synthesis
 Implement `RuntimeTestVerifier`, reusing existing PatchPilot verification infrastructure where practical.
 
-Input: ranked hypotheses plus verification plans.
+The Verifier is the only RCA component allowed to execute test commands, and only through the M3 verification-sandbox registry.
+
+Input: ranked hypotheses plus explicit verification plans.
 
 Behavior:
 - choose bounded reproduction/test actions;
-- execute only in the ephemeral sandbox;
-- record command/test, bounded output, duration, provenance;
+- execute only allowlisted commands in the ephemeral sandbox;
+- record command/test, bounded output, duration, and provenance;
 - mark attempted hypotheses `supported`, `rejected`, or `unverified`;
-- never edit original target or generate repair patches.
+- never edit the original target;
+- never generate or apply repair patches;
+- never expose a general shell to the model.
 
 Final Lead synthesis:
 - choose the best-supported cause or report insufficient evidence;
@@ -175,13 +223,21 @@ Final Lead synthesis:
 - provide non-executable fix recommendation/scope;
 - preserve uncertainty and partial-worker failures.
 
-Exit: one local case produces an evidence-backed RCA report and target immutability is proven.
+Exit:
+- one local case produces an evidence-backed RCA report;
+- at least one test demonstrates hypothesis support/rejection handling;
+- original target immutability is proven;
+- all verification writes remain sandbox-local.
 
 ### M7 — Report renderer and CLI
 Add renderer, `patchpilot rca`, integration tests.
 
 ```bash
-patchpilot rca   --repo /path/to/repo   --issue issue.md   --model <configured-model>   --output-dir output/roottrace-demo
+patchpilot rca \
+  --repo /path/to/repo \
+  --issue issue.md \
+  --model <configured-model> \
+  --output-dir output/roottrace-demo
 ```
 
 Optional inputs: `--stack-trace`, `--ci-log`, `--pr-diff`.
@@ -220,9 +276,10 @@ Rules:
 - exclude target instance, duplicate/linked cases, target gold patch, and evaluation artifacts;
 - persist split, timestamps when available, and index checksum;
 - when timestamps are available, exclude cases resolved after the target incident;
-- support `retrieval_off` and `clustering_off`.
+- support `retrieval_off` and `clustering_off`;
+- retrieval returns bounded evidence hints through a typed interface and does not receive target write/runtime permissions.
 
-Retrieved cases are bounded historical hints. They never override current-repo evidence.
+Retrieved cases never override current-repository evidence.
 
 Exit: fixed seed gives stable results, leakage tests pass, Top-K results are bounded/auditable.
 
