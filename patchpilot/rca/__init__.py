@@ -38,6 +38,10 @@ from patchpilot.rca.incident_loader import (
     load_incident,
     resolve_base_commit,
 )
+from patchpilot.rca.sandbox import (
+    RuntimeVerificationSandbox,
+    SandboxCommandResult,
+)
 from patchpilot.rca.schema import (
     AgentFinding,
     AgentRole,
@@ -71,6 +75,15 @@ from patchpilot.rca.schema import (
     VerificationStatus,
     VerificationStep,
 )
+from patchpilot.rca.tools import (
+    GitBlameInput,
+    GitHistoryInput,
+    GitShowInput,
+    InspectSymbolsInput,
+    RcaToolRegistry,
+    RcaToolResult,
+    ReadExternalLogInput,
+)
 
 __all__ = [
     "ARTIFACT_EVIDENCE_GRAPH",
@@ -93,11 +106,15 @@ __all__ = [
     "EvidenceRelation",
     "FindingStatus",
     "FixRecommendation",
+    "GitBlameInput",
+    "GitHistoryInput",
+    "GitShowInput",
     "Hypothesis",
     "HypothesisDisposition",
     "IncidentContext",
     "IncidentInput",
     "IncidentSignals",
+    "InspectSymbolsInput",
     "InvestigationPlan",
     "LoadedIncident",
     "PlanBudgets",
@@ -105,10 +122,15 @@ __all__ = [
     "Provenance",
     "RCAReport",
     "RankedCause",
+    "RcaToolRegistry",
+    "RcaToolResult",
+    "ReadExternalLogInput",
     "RegressionChange",
     "ReportConclusion",
     "RepositoryFingerprint",
     "RepositoryInventory",
+    "RuntimeVerificationSandbox",
+    "SandboxCommandResult",
     "SourceLocation",
     "SourceSnippet",
     "Timing",
