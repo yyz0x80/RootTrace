@@ -54,8 +54,10 @@ from patchpilot.rca.orchestrator import (
     aggregate_evidence,
 )
 from patchpilot.rca.prompts import (
+    FINAL_REPORT_SYSTEM_PROMPT,
     HYPOTHESES_SYSTEM_PROMPT,
     build_code_prompt,
+    build_final_report_prompt,
     build_git_history_prompt,
     build_hypotheses_prompt,
     build_issue_ci_prompt,
@@ -98,6 +100,7 @@ from patchpilot.rca.schema import (
     VerificationStatus,
     VerificationStep,
 )
+from patchpilot.rca.synthesis import LeadSynthesizer, SynthesisError
 from patchpilot.rca.tools import (
     GitBlameInput,
     GitHistoryInput,
@@ -108,6 +111,7 @@ from patchpilot.rca.tools import (
     ReadExternalLogInput,
 )
 from patchpilot.rca.usage import UsageTracker
+from patchpilot.rca.verification import RuntimeTestVerifier, VerificationRun
 
 __all__ = [
     "ARTIFACT_EVIDENCE_GRAPH",
@@ -116,6 +120,7 @@ __all__ = [
     "ARTIFACT_INVESTIGATION_PLAN",
     "ARTIFACT_RCA_REPORT",
     "ARTIFACT_VERIFICATION",
+    "FINAL_REPORT_SYSTEM_PROMPT",
     "HYPOTHESES_SYSTEM_PROMPT",
     "AgentFinding",
     "AgentRole",
@@ -145,6 +150,7 @@ __all__ = [
     "InvestigationPlan",
     "IssueCISpecialist",
     "LeadPlanner",
+    "LeadSynthesizer",
     "LoadedIncident",
     "PlanBudgets",
     "PlanError",
@@ -162,12 +168,14 @@ __all__ = [
     "ReportConclusion",
     "RepositoryFingerprint",
     "RepositoryInventory",
+    "RuntimeTestVerifier",
     "RuntimeVerificationSandbox",
     "SandboxCommandResult",
     "SourceLocation",
     "SourceSnippet",
     "SpecialistOutput",
     "SpecialistResponse",
+    "SynthesisError",
     "Timing",
     "UncertaintyLevel",
     "UncertaintySummary",
@@ -175,11 +183,13 @@ __all__ = [
     "UsageTracker",
     "VerificationOutcome",
     "VerificationResult",
+    "VerificationRun",
     "VerificationStatus",
     "VerificationStep",
     "aggregate_evidence",
     "assert_fingerprint_unchanged",
     "build_code_prompt",
+    "build_final_report_prompt",
     "build_git_history_prompt",
     "build_hypotheses_prompt",
     "build_incident_context",

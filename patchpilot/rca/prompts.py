@@ -12,7 +12,11 @@ from __future__ import annotations
 import json
 
 from patchpilot.rca.context import IncidentContext
-from patchpilot.rca.schema import EvidenceGraph, PlanQuestion
+from patchpilot.rca.schema import (
+    EvidenceGraph,
+    PlanQuestion,
+    VerificationResult,
+)
 
 MAX_PROMPT_CHARS = 120_000
 _TRUNCATION_MARKER = "\n... [prompt truncated]"
@@ -220,6 +224,135 @@ def build_hypotheses_prompt(graph: EvidenceGraph) -> str:
     return (
         HYPOTHESES_SYSTEM_PROMPT
         + "\n\nEVIDENCE GRAPH:\n"
+        + _bounded_json(data)
+    )
+
+
+FINAL_REPORT_SYSTEM_PROMPT = """\
+You are the RootTrace Lead Agent producing the final RCA report after evidence
+gathering and runtime verification.
+
+Rules:
+- Choose the best-supported cause, or report insufficient evidence.
+- Rank causes only when the evidence and verification support them; cite
+  evidence ids that exist in the provided graph.
+- Report a suspected regression commit only when verification and evidence
+  support it.
+- Fix recommendations are advisory text and scope only. Never embed diffs,
+  patches, edit commands, or repository mutation commands.
+- Preserve uncertainty from partial worker failures and unverified
+  hypotheses.
+
+Output only one JSON object with this schema:
+{
+  "conclusion": "root_cause_identified|insufficient_evidence",
+  "conclusion_summary": "short evidence-backed summary",
+  "ranked_causes": [
+    {
+      "rank": 1,
+      "hypothesis_id": "h-001",
+      "confidence": "low|medium|high",
+      "rationale": "short rationale",
+      "evidence_ids": ["ev-code-001"]
+    }
+  ],
+  "top_k_locations": [
+    {"path": "pkg/calc.py", "symbol": "multiply", "start_line": 8}
+  ],
+  "causal_chain": [
+    {
+      "statement": "causal step",
+      "hypothesis_id": "h-001",
+      "evidence_ids": ["ev-code-001"]
+    }
+  ],
+  "suspected_regression": {
+    "commit": "7-character-or-longer hex sha",
+    "summary": "short summary",
+    "evidence_ids": ["ev-git_history-001"],
+    "locations": [{"path": "pkg/calc.py"}]
+  },
+  "fix_recommendation": {
+    "scope": "advisory fix scope",
+    "suggestions": ["advisory suggestion text"],
+    "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}]
+  },
+  "uncertainty": {
+    "level": "low|medium|high",
+    "insufficient_evidence": false,
+    "notes": ["short note"]
+  }
+}
+
+Rules for fields:
+- conclusion root_cause_identified requires at least one ranked cause.
+- All hypothesis_id and evidence_id values must exist in the provided context.
+- suspected_regression is optional and only when supported.
+- fix_recommendation is optional and strictly advisory.
+"""
+
+
+def build_final_report_prompt(
+    graph: EvidenceGraph,
+    results: list[VerificationResult],
+) -> str:
+    """Build the bounded final-synthesis prompt from graph and verification."""
+    incident = graph.incident
+    hypotheses = [
+        {
+            "id": hypothesis.id,
+            "statement": hypothesis.statement,
+            "disposition": hypothesis.disposition.value,
+            "locations": [
+                location.model_dump(mode="json")
+                for location in hypothesis.locations
+            ],
+            "supporting_evidence_ids": hypothesis.supporting_evidence_ids,
+            "contradicting_evidence_ids": hypothesis.contradicting_evidence_ids,
+            "confidence": hypothesis.confidence.value,
+        }
+        for hypothesis in graph.hypotheses
+    ]
+    evidence = [
+        {
+            "id": item.id,
+            "agent": item.agent.value,
+            "kind": item.kind.value,
+            "observation": item.observation,
+            "location": item.location.model_dump(mode="json")
+            if item.location is not None
+            else None,
+            "excerpt": item.excerpt[:600]
+            + ("..." if len(item.excerpt) > 600 else ""),
+        }
+        for item in graph.evidence
+    ]
+    verification = [
+        {
+            "id": result.id,
+            "hypothesis_id": result.hypothesis_id,
+            "command": result.command,
+            "status": result.status.value,
+            "outcome": result.outcome.value,
+            "exit_code": result.exit_code,
+            "evidence_ids": result.evidence_ids,
+        }
+        for result in results
+    ]
+    data = {
+        "incident": {
+            "id": incident.id,
+            "title": incident.title,
+            "problem": incident.problem,
+            "base_commit": incident.base_commit,
+        },
+        "hypotheses": hypotheses,
+        "verification": verification,
+        "evidence": evidence,
+    }
+    return (
+        FINAL_REPORT_SYSTEM_PROMPT
+        + "\n\nINVESTIGATION STATE:\n"
         + _bounded_json(data)
     )
 
