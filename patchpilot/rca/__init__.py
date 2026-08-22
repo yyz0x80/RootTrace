@@ -17,6 +17,27 @@ from patchpilot.rca.artifacts import (
     model_to_json,
     write_artifact,
 )
+from patchpilot.rca.context import (
+    ContextTruncation,
+    IncidentContext,
+    IncidentSignals,
+    RepositoryFingerprint,
+    RepositoryInventory,
+    SourceSnippet,
+)
+from patchpilot.rca.context_builder import (
+    assert_fingerprint_unchanged,
+    build_incident_context,
+    build_ranked_snippets,
+    build_repository_inventory,
+    capture_repository_fingerprint,
+    extract_signals,
+)
+from patchpilot.rca.incident_loader import (
+    LoadedIncident,
+    load_incident,
+    resolve_base_commit,
+)
 from patchpilot.rca.schema import (
     AgentFinding,
     AgentRole,
@@ -64,6 +85,7 @@ __all__ = [
     "ArtifactWriter",
     "CauseLink",
     "ConfidenceLevel",
+    "ContextTruncation",
     "EvidenceEdge",
     "EvidenceGraph",
     "EvidenceItem",
@@ -73,8 +95,11 @@ __all__ = [
     "FixRecommendation",
     "Hypothesis",
     "HypothesisDisposition",
+    "IncidentContext",
     "IncidentInput",
+    "IncidentSignals",
     "InvestigationPlan",
+    "LoadedIncident",
     "PlanBudgets",
     "PlanQuestion",
     "Provenance",
@@ -82,7 +107,10 @@ __all__ = [
     "RankedCause",
     "RegressionChange",
     "ReportConclusion",
+    "RepositoryFingerprint",
+    "RepositoryInventory",
     "SourceLocation",
+    "SourceSnippet",
     "Timing",
     "UncertaintyLevel",
     "UncertaintySummary",
@@ -91,6 +119,14 @@ __all__ = [
     "VerificationResult",
     "VerificationStatus",
     "VerificationStep",
+    "assert_fingerprint_unchanged",
+    "build_incident_context",
+    "build_ranked_snippets",
+    "build_repository_inventory",
+    "capture_repository_fingerprint",
+    "extract_signals",
+    "load_incident",
     "model_to_json",
+    "resolve_base_commit",
     "write_artifact",
 ]
