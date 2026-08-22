@@ -50,6 +50,7 @@ class CaseResult(BaseModel):
     base_commit: str | None = None
     status: CaseStatus
     error: str | None = None
+    rca_errors: list[str] = Field(default_factory=list, max_length=20)
     predicted_files: list[str] = Field(default_factory=list)
     gold_files: list[str] = Field(default_factory=list)
     metrics: CaseMetrics

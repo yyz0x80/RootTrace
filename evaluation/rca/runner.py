@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, ValidationError
 from evaluation.rca.adapter import (
     PublicCase,
     build_incident_input,
-    case_from_public_record,
+    load_public_cases,
     write_root_trace_input,
 )
 from evaluation.rca.gold import GoldStore
@@ -69,6 +69,7 @@ class RootTraceOutcome(BaseModel):
 
     status: Literal["completed", "error"]
     error: str | None = None
+    errors: list[str] = Field(default_factory=list, max_length=20)
     report: dict | None = None
     latency_seconds: float = Field(default=0.0, ge=0)
     llm_calls: int | None = Field(default=None, ge=0)
@@ -134,14 +135,25 @@ class InProcessRootTraceClient:
                 latency_seconds=elapsed,
             )
         elapsed = time.monotonic() - started
-        usage = result.report.usage
+        run_usage = result.run.usage
+        report_usage = result.report.usage
+        calls = (run_usage.llm_calls if run_usage else 0) + (
+            report_usage.llm_calls if report_usage else 0
+        )
         return RootTraceOutcome(
             status="completed",
+            errors=list(result.run.errors),
             report=_read_report_json(output_dir),
             latency_seconds=elapsed,
-            llm_calls=usage.llm_calls,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
+            llm_calls=calls,
+            prompt_tokens=_sum_or_none(
+                run_usage.prompt_tokens if run_usage else None,
+                report_usage.prompt_tokens if report_usage else None,
+            ),
+            completion_tokens=_sum_or_none(
+                run_usage.completion_tokens if run_usage else None,
+                report_usage.completion_tokens if report_usage else None,
+            ),
         )
 
 
@@ -149,6 +161,13 @@ def _bounded_error(text: str, limit: int = MAX_ERROR_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
+
+
+def _sum_or_none(left: int | None, right: int | None) -> int | None:
+    """Sum exact usage values; an unknown side keeps the total null."""
+    if left is None or right is None:
+        return None
+    return left + right
 
 
 def _read_report_json(output_dir: Path) -> dict | None:
@@ -197,28 +216,6 @@ def extract_predicted_files(report: dict | None) -> list[str]:
         if len(files) >= MAX_PREDICTED_FILES:
             break
     return files
-
-
-def load_public_cases(path: str | Path) -> dict[str, PublicCase]:
-    """Load public SWE-bench metadata, rejecting gold fields and duplicates."""
-    public_path = Path(path)
-    cases: dict[str, PublicCase] = {}
-    with public_path.open("r", encoding="utf-8") as stream:
-        for line_no, line in enumerate(stream, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-                case = case_from_public_record(record)
-            except (json.JSONDecodeError, ValueError) as exc:
-                raise ValueError(
-                    f"invalid public record at line {line_no}: {exc}"
-                ) from exc
-            if case.instance_id in cases:
-                raise ValueError(f"duplicate public instance_id: {case.instance_id}")
-            cases[case.instance_id] = case
-    return cases
 
 
 def _validate_manifest_against_public(
@@ -303,6 +300,7 @@ def _run_case(
         base_commit=case.base_commit,
         status=outcome.status,
         error=outcome.error,
+        rca_errors=list(outcome.errors),
         predicted_files=predicted,
         gold_files=gold_files,
         metrics=metrics,

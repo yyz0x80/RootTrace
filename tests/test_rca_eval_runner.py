@@ -36,6 +36,7 @@ class FakeRootTraceClient:
         predictions: dict[str, list[str]] | None = None,
         *,
         fail_ids: set[str] | None = None,
+        errors: list[str] | None = None,
         latency: float = 0.25,
         calls: int = 2,
         prompt: int = 100,
@@ -43,6 +44,7 @@ class FakeRootTraceClient:
     ) -> None:
         self.predictions = predictions or {}
         self.fail_ids = fail_ids or set()
+        self.errors = errors or []
         self.received: list[IncidentInput] = []
         self.latency = latency
         self.calls = calls
@@ -69,6 +71,7 @@ class FakeRootTraceClient:
         )
         return RootTraceOutcome(
             status="completed",
+            errors=list(self.errors),
             report=report,
             latency_seconds=self.latency,
             llm_calls=self.calls,
@@ -311,6 +314,34 @@ def test_extract_predicted_files_from_report() -> None:
     assert extract_predicted_files(report) == ["src/a.py", "src/b.py"]
     assert extract_predicted_files(None) == []
     assert extract_predicted_files({"top_k_locations": "bad"}) == []
+
+
+def test_rca_errors_surface_in_result(tmp_path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    output_dir = tmp_path / "out"
+    client = FakeRootTraceClient(
+        predictions={"acme__demo-1": ["pkg/mod.py"]},
+        errors=["code worker failed: excerpt too long"],
+    )
+    assert run_from_args(_args(data_root, output_dir, max_cases=1), client=client) == 0
+    result = CaseResult.model_validate(
+        json.loads(
+            (output_dir / "cases" / "acme__demo-1" / "result.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    )
+    assert result.status == "completed"
+    assert result.rca_errors == ["code worker failed: excerpt too long"]
+
+
+def test_sum_or_none_usage_merge() -> None:
+    from evaluation.rca.runner import _sum_or_none
+
+    assert _sum_or_none(1, 2) == 3
+    assert _sum_or_none(None, 2) is None
+    assert _sum_or_none(1, None) is None
+    assert _sum_or_none(None, None) is None
 
 
 def test_cli_help_and_dry_run_subprocess(tmp_path) -> None:

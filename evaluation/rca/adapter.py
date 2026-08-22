@@ -143,6 +143,28 @@ def case_from_public_record(record: dict) -> PublicCase:
         raise ValueError(f"public metadata contains disallowed fields: {exc}") from exc
 
 
+def load_public_cases(path: str | Path) -> dict[str, PublicCase]:
+    """Load public SWE-bench metadata, rejecting gold fields and duplicates."""
+    public_path = Path(path)
+    cases: dict[str, PublicCase] = {}
+    with public_path.open("r", encoding="utf-8") as stream:
+        for line_no, line in enumerate(stream, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                case = case_from_public_record(record)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid public record at line {line_no}: {exc}"
+                ) from exc
+            if case.instance_id in cases:
+                raise ValueError(f"duplicate public instance_id: {case.instance_id}")
+            cases[case.instance_id] = case
+    return cases
+
+
 def write_root_trace_input(incident: IncidentInput, path: str | Path) -> None:
     """Persist exactly the RootTrace input as a four-field JSON snapshot."""
     payload = {
