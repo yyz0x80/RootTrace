@@ -500,3 +500,41 @@ def test_prompt_builders_are_bounded_and_domain_scoped(rca_env) -> None:
     assert "incident" in issue_prompt.lower()
     assert "snippets" in code_prompt
     assert "git" in git_prompt.lower()
+
+
+def test_bounded_note_never_exceeds_agent_finding_limit() -> None:
+    from patchpilot.rca.agents import _bounded_note
+    from patchpilot.rca.schema import (
+        MAX_NOTE_CHARS,
+        AgentFinding,
+        AgentRole,
+        FindingStatus,
+        UncertaintyLevel,
+    )
+
+    note = _bounded_note("x" * 2000)
+    assert note is not None
+    assert len(note) == MAX_NOTE_CHARS
+    assert note.endswith("\n...[truncated]")
+    # A long worker error must survive AgentFinding validation instead of
+    # crashing the whole investigation with an unbounded error string.
+    AgentFinding(
+        agent=AgentRole.CODE,
+        status=FindingStatus.PARTIAL,
+        uncertainty=UncertaintyLevel.HIGH,
+        uncertainty_note=note,
+        error=note,
+    )
+
+
+def test_cap_text_keeps_excerpt_within_evidence_limit() -> None:
+    from patchpilot.rca.agents import _cap_text
+    from patchpilot.rca.schema import MAX_EXCERPT_CHARS
+
+    excerpt, truncated = _cap_text(
+        "y" * (MAX_EXCERPT_CHARS + 500),
+        MAX_EXCERPT_CHARS,
+    )
+    assert truncated is True
+    assert len(excerpt) == MAX_EXCERPT_CHARS
+    assert excerpt.endswith("\n...[truncated]")

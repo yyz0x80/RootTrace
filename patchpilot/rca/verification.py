@@ -47,9 +47,11 @@ DEFAULT_STEP_TIMEOUT_SECONDS = 120
 
 
 def _cap(text: str, limit: int = MAX_EXCERPT_CHARS) -> str:
+    """Cap text to ``limit`` characters including the truncation marker."""
     if len(text) <= limit:
         return text
-    return text[:limit] + "\n...[truncated]"
+    keep = max(0, limit - len("\n...[truncated]"))
+    return text[:keep] + "\n...[truncated]"
 
 
 class VerificationRun(BaseModel):

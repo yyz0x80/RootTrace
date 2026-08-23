@@ -112,9 +112,11 @@ class SpecialistOutput(BaseModel):
 
 
 def _cap_text(text: str, limit: int, marker: str = "\n...[truncated]") -> tuple[str, bool]:
+    """Cap text to ``limit`` characters including the truncation marker."""
     if len(text) <= limit:
         return text, False
-    return text[:limit] + marker, True
+    keep = max(0, limit - len(marker))
+    return text[:keep] + marker, True
 
 
 def _bounded_note(text: str | None, limit: int = MAX_NOTE_CHARS) -> str | None:

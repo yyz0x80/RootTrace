@@ -288,3 +288,12 @@ def test_verifier_honors_step_budget(git_repo, tmp_path: Path) -> None:
     assert dispositions["h-006"] == HypothesisDisposition.SUPPORTED
     assert dispositions["h-007"] == HypothesisDisposition.SUPPORTED
     assert dispositions["h-008"] == HypothesisDisposition.UNVERIFIED
+
+
+def test_capped_excerpt_respects_excerpt_limit() -> None:
+    from patchpilot.rca.schema import MAX_EXCERPT_CHARS
+    from patchpilot.rca.verification import _cap
+
+    excerpt = _cap("z" * (MAX_EXCERPT_CHARS + 500))
+    assert len(excerpt) == MAX_EXCERPT_CHARS
+    assert excerpt.endswith("\n...[truncated]")
