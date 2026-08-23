@@ -57,7 +57,7 @@ Output only one JSON object with this schema:
 {
   "questions": [
     {
-      "id": "q-issue_ci-001",
+      "id": "<unique-question-id>",
       "text": "concise question",
       "assigned_agents": ["issue_ci"]
     }
@@ -88,7 +88,7 @@ Your final answer is one JSON object:
 {
   "status": "completed|partial|failed",
   "ranked_locations": [{"path": "repo/relative/path", "symbol": "name"}],
-  "evidence_ids": ["ev-issue_ci-001"],
+  "evidence_ids": ["<existing-evidence-id>"],
   "uncertainty": "low|medium|high",
   "uncertainty_note": "short note"
 }
@@ -114,9 +114,14 @@ Your final answer is one JSON object:
 {
   "status": "completed|partial|failed",
   "ranked_locations": [
-    {"path": "pkg/calc.py", "symbol": "multiply", "start_line": 8, "end_line": 9}
+    {
+      "path": "<repo-relative-path>",
+      "symbol": "<symbol-name>",
+      "start_line": 8,
+      "end_line": 9
+    }
   ],
-  "evidence_ids": ["ev-code-001"],
+  "evidence_ids": ["<existing-evidence-id>"],
   "uncertainty": "low|medium|high",
   "uncertainty_note": "short note"
 }
@@ -141,8 +146,8 @@ Tool results identify their evidence id as "Evidence id: ev-git_history-<n>".
 Your final answer is one JSON object:
 {
   "status": "completed|partial|failed",
-  "ranked_locations": [{"path": "pkg/calc.py"}],
-  "evidence_ids": ["ev-git_history-001"],
+  "ranked_locations": [{"path": "<repo-relative-path>"}],
+  "evidence_ids": ["<existing-evidence-id>"],
   "uncertainty": "low|medium|high",
   "uncertainty_note": "short note"
 }
@@ -174,12 +179,12 @@ Output only one JSON object with this schema:
   "hypotheses": [
     {
       "statement": "falsifiable root-cause claim",
-      "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
-      "supporting_evidence_ids": ["ev-code-001"],
+      "locations": [{"path": "<repo-relative-path>", "symbol": "<symbol-name>"}],
+      "supporting_evidence_ids": ["<existing-evidence-id>"],
       "contradicting_evidence_ids": [],
       "verification_plan": [
         {
-          "command": "python -m pytest -q tests/test_calc.py",
+          "command": "python -m pytest -q <relative-test-target>",
           "description": "short description",
           "timeout_seconds": 60,
           "expect_failure": false
@@ -295,19 +300,23 @@ Output only one JSON object with this schema:
   "ranked_causes": [
     {
       "rank": 1,
-      "hypothesis_id": "h-001",
+      "hypothesis_id": "<existing-hypothesis-id>",
       "confidence": "low|medium|high",
       "rationale": "short rationale",
       "evidence_ids": ["<existing-evidence-id>"]
     }
   ],
   "top_k_locations": [
-    {"path": "pkg/calc.py", "symbol": "multiply", "start_line": 8}
+    {
+      "path": "<repo-relative-path>",
+      "symbol": "<symbol-name>",
+      "start_line": 8
+    }
   ],
   "causal_chain": [
     {
       "statement": "causal step",
-      "hypothesis_id": "h-001",
+      "hypothesis_id": "<existing-hypothesis-id>",
       "evidence_ids": ["<existing-evidence-id>"]
     }
   ],
@@ -315,12 +324,12 @@ Output only one JSON object with this schema:
     "commit": "7-character-or-longer hex sha",
     "summary": "short summary",
     "evidence_ids": ["<existing-evidence-id>"],
-    "locations": [{"path": "pkg/calc.py"}]
+    "locations": [{"path": "<repo-relative-path>"}]
   },
   "fix_recommendation": {
     "scope": "advisory fix scope",
     "suggestions": ["advisory suggestion text"],
-    "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}]
+    "locations": [{"path": "<repo-relative-path>", "symbol": "<symbol-name>"}]
   },
   "uncertainty": {
     "level": "low|medium|high",

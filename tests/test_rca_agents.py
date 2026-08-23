@@ -538,3 +538,40 @@ def test_cap_text_keeps_excerpt_within_evidence_limit() -> None:
     assert truncated is True
     assert len(excerpt) == MAX_EXCERPT_CHARS
     assert excerpt.endswith("\n...[truncated]")
+
+
+def test_system_prompts_contain_no_hardcoded_example_data() -> None:
+    """Schema examples must not prime the model with concrete fake ids/paths."""
+    from patchpilot.rca.prompts import (
+        CODE_SYSTEM_PROMPT,
+        FINAL_REPORT_SYSTEM_PROMPT,
+        GIT_HISTORY_SYSTEM_PROMPT,
+        HYPOTHESES_SYSTEM_PROMPT,
+        ISSUE_CI_SYSTEM_PROMPT,
+        LEAD_SYSTEM_PROMPT,
+    )
+
+    prompts = {
+        "lead": LEAD_SYSTEM_PROMPT,
+        "issue_ci": ISSUE_CI_SYSTEM_PROMPT,
+        "code": CODE_SYSTEM_PROMPT,
+        "git_history": GIT_HISTORY_SYSTEM_PROMPT,
+        "hypotheses": HYPOTHESES_SYSTEM_PROMPT,
+        "final_report": FINAL_REPORT_SYSTEM_PROMPT,
+    }
+    fake_values = (
+        "ev-issue_ci-001",
+        "ev-code-001",
+        "ev-git_history-001",
+        "h-001",
+        "ver-h-001-001",
+        "pkg/calc.py",
+        "tests/test_calc.py",
+    )
+    for name, prompt in prompts.items():
+        for fake in fake_values:
+            assert fake not in prompt, f"{name} prompt contains hardcoded {fake}"
+    assert "<unique-question-id>" in LEAD_SYSTEM_PROMPT
+    assert "<existing-evidence-id>" in HYPOTHESES_SYSTEM_PROMPT
+    assert "<existing-hypothesis-id>" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "<relative-test-target>" in HYPOTHESES_SYSTEM_PROMPT
