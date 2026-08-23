@@ -265,3 +265,27 @@ def test_verification_to_report_chain(git_repo, tmp_path: Path) -> None:
         for item in report.evidence_graph.evidence
     )
     assert report.verification[0].status == VerificationStatus.PASSED
+
+
+def test_final_report_prompt_exposes_evidence_domain_and_never_primes_ids(
+    git_repo,
+) -> None:
+    from patchpilot.rca.prompts import (
+        FINAL_REPORT_SYSTEM_PROMPT,
+        build_final_report_prompt,
+    )
+
+    graph = _graph(git_repo, [_hypothesis("h-001")])
+    prompt = build_final_report_prompt(graph, [])
+
+    # The code-only graph must be told that git-history evidence is absent and
+    # that invented ids are forbidden.
+    assert "EVIDENCE DOMAIN RULE" in prompt
+    assert "'code'" in prompt
+    assert "never invent ids" in prompt
+    assert "omit suspected_regression" in prompt
+    # The schema must not prime the model with concrete evidence ids, which
+    # caused hallucinated ids like ev-git_history-001 in partial runs.
+    assert "ev-code-001" not in FINAL_REPORT_SYSTEM_PROMPT
+    assert "ev-git_history-001" not in FINAL_REPORT_SYSTEM_PROMPT
+    assert "<existing-evidence-id>" in FINAL_REPORT_SYSTEM_PROMPT

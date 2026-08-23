@@ -277,10 +277,12 @@ Rules:
 - Choose the best-supported cause, or report insufficient evidence.
 - Rank causes only when the evidence and verification support them; cite
   evidence ids that exist in the provided graph.
+- Never invent evidence ids or hypothesis ids; every cited id must appear
+  verbatim in the INVESTIGATION STATE.
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
-- Report a suspected regression commit only when verification and evidence
-  support it.
+- Report a suspected regression commit only when the INVESTIGATION STATE
+  contains git-history evidence that supports it.
 - Fix recommendations are advisory text and scope only. Never embed diffs,
   patches, edit commands, or repository mutation commands.
 - Preserve uncertainty from partial worker failures and unverified
@@ -296,7 +298,7 @@ Output only one JSON object with this schema:
       "hypothesis_id": "h-001",
       "confidence": "low|medium|high",
       "rationale": "short rationale",
-      "evidence_ids": ["ev-code-001"]
+      "evidence_ids": ["<existing-evidence-id>"]
     }
   ],
   "top_k_locations": [
@@ -306,13 +308,13 @@ Output only one JSON object with this schema:
     {
       "statement": "causal step",
       "hypothesis_id": "h-001",
-      "evidence_ids": ["ev-code-001"]
+      "evidence_ids": ["<existing-evidence-id>"]
     }
   ],
   "suspected_regression": {
     "commit": "7-character-or-longer hex sha",
     "summary": "short summary",
-    "evidence_ids": ["ev-git_history-001"],
+    "evidence_ids": ["<existing-evidence-id>"],
     "locations": [{"path": "pkg/calc.py"}]
   },
   "fix_recommendation": {
@@ -393,10 +395,19 @@ def build_final_report_prompt(
         "verification": verification,
         "evidence": evidence,
     }
+    evidence_agents = sorted({item.agent.value for item in graph.evidence})
+    domain_rule = (
+        "\n\nEVIDENCE DOMAIN RULE:\n"
+        f"Evidence was gathered only by agents: {evidence_agents}.\n"
+        "Cite only evidence ids listed under evidence above; never invent ids.\n"
+        "If 'git_history' evidence is absent, omit suspected_regression entirely.\n"
+        "If 'issue_ci' evidence is absent, do not cite issue/CI evidence ids."
+    )
     return (
         FINAL_REPORT_SYSTEM_PROMPT
         + "\n\nINVESTIGATION STATE:\n"
         + _bounded_json(data)
+        + domain_rule
     )
 
 
