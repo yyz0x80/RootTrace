@@ -12,6 +12,7 @@ def make_provider(responses: list[SimpleNamespace]) -> LLMProvider:
     """Create a provider with a deterministic completion client."""
     provider = object.__new__(LLMProvider)
     provider._model = "test-model"
+    provider._max_retries = 3
     provider._llm_call_count = 0
     provider._prompt_tokens = 0
     provider._completion_tokens = 0

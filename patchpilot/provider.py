@@ -6,6 +6,9 @@ including request conversion, response parsing, error handling, and retries.
 
 import json
 import os
+import random
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import sleep
 from typing import Any
@@ -17,6 +20,64 @@ from patchpilot.models import AssistantTurn, ToolCall
 
 # Load environment variables from .env file if it exists
 load_dotenv()
+
+DEFAULT_MAX_RETRIES = 4
+BACKOFF_BASE_SECONDS = 1.0
+BACKOFF_CAP_SECONDS = 8.0
+MAX_RETRY_AFTER_SECONDS = 30.0
+
+
+def _retry_after_seconds(error: RateLimitError) -> float | None:
+    """Return the server-requested retry delay in seconds, when advertised.
+
+    OpenAI-compatible providers may include a ``Retry-After`` header (delta
+    seconds or an HTTP date) on 429 responses. Honoring it avoids retrying
+    too early; a missing or unparsable header returns ``None`` so the caller
+    falls back to jittered exponential backoff.
+    """
+    response = getattr(error, "response", None)
+    headers = getattr(error, "headers", None) or getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After") or headers.get("retry-after")
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        now = datetime.now(UTC).replace(tzinfo=None)
+    else:
+        now = datetime.now(UTC)
+    return max((retry_at - now).total_seconds(), 0.0)
+
+
+def _retry_delay_seconds(
+    attempt: int,
+    *,
+    retry_after_seconds: float | None = None,
+    rng: random.Random | None = None,
+) -> float:
+    """Compute a bounded, jittered delay before the next rate-limit retry.
+
+    A server-provided ``Retry-After`` value takes precedence and is capped to
+    keep total retry time bounded. Otherwise the delay uses capped exponential
+    backoff with full jitter so concurrent specialists do not retry in lockstep
+    and re-trigger the same limit together.
+    """
+    if retry_after_seconds is not None:
+        return min(max(retry_after_seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
+    backoff = min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * (2**attempt))
+    rng = rng or random
+    return rng.uniform(0.0, backoff)
 
 
 class ToolCallParseError(Exception):
@@ -39,6 +100,7 @@ class LLMProvider:
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         """Initialize the provider with explicit or environment configuration.
 
@@ -46,10 +108,13 @@ class LLMProvider:
             model: Optional model identifier.
             api_key: Optional API key. If not provided, reads from ZHIPU_API_KEY.
             base_url: Optional API base URL. If not provided, reads from PATCHPILOT_BASE_URL.
+            max_retries: Total completion attempts for rate-limited requests.
 
         Raises:
             ValueError: If API key or base URL cannot be determined.
         """
+        if not 1 <= max_retries <= 10:
+            raise ValueError("max_retries must be between 1 and 10")
         if api_key is None:
             api_key = os.getenv("ZHIPU_API_KEY")
         if not api_key:
@@ -68,6 +133,7 @@ class LLMProvider:
 
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = configured_model
+        self._max_retries = max_retries
         self._llm_call_count = 0
         self._prompt_tokens: int | None = 0
         self._completion_tokens: int | None = 0
@@ -132,12 +198,12 @@ class LLMProvider:
 
         Raises:
             ToolCallParseError: If tool call arguments cannot be parsed as JSON
-            OpenAIError: For other API-related errors after retries are exhausted
+            OpenAIError: For API errors after retries are exhausted; rate-limited
+                requests retry with Retry-After or jittered exponential backoff
         """
-        max_retries = 3
         last_error = None
 
-        for attempt in range(max_retries):
+        for attempt in range(self._max_retries):
             try:
                 api_params: dict[str, Any] = {
                     "model": self._model,
@@ -189,14 +255,16 @@ class LLMProvider:
 
             except RateLimitError as e:
                 last_error = e
-                if attempt < max_retries - 1:
-                    # Exponential backoff: 1s, 2s, 4s
-                    sleep(2**attempt)
-                    continue
-                else:
+                if attempt >= self._max_retries - 1:
                     raise OpenAIError(
-                        f"Rate limit exceeded after {max_retries} retry attempts"
+                        f"Rate limit exceeded after {self._max_retries} attempts"
                     ) from e
+                sleep(
+                    _retry_delay_seconds(
+                        attempt,
+                        retry_after_seconds=_retry_after_seconds(e),
+                    )
+                )
 
             except OpenAIError:
                 # Non-rate-limit errors are not retried
