@@ -183,7 +183,10 @@ def test_synthesis_produces_validated_report(git_repo, tmp_path: Path) -> None:
 
 def test_synthesis_rejects_malformed_output(git_repo, tmp_path: Path) -> None:
     run = _verified_run(git_repo, tmp_path)
-    provider = FakeProvider(turn("the root cause is obvious"))
+    provider = FakeProvider(
+        turn("the root cause is obvious"),
+        turn("the root cause is obvious"),
+    )
     with pytest.raises(SynthesisError):
         LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
             run.graph,
@@ -197,7 +200,7 @@ def test_synthesis_rejects_embedded_patch_text(git_repo, tmp_path: Path) -> None
     payload["fix_recommendation"]["suggestions"] = [
         "diff --git a/pkg/calc.py b/pkg/calc.py\nindex 123..456"
     ]
-    provider = FakeProvider(turn(json.dumps(payload)))
+    provider = FakeProvider(turn(json.dumps(payload)), turn(json.dumps(payload)))
     with pytest.raises(SynthesisError):
         LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
             run.graph,
@@ -212,7 +215,7 @@ def test_synthesis_rejects_root_cause_without_ranked_causes(
     run = _verified_run(git_repo, tmp_path)
     payload = json.loads(_report_json(git_repo))
     payload["ranked_causes"] = []
-    provider = FakeProvider(turn(json.dumps(payload)))
+    provider = FakeProvider(turn(json.dumps(payload)), turn(json.dumps(payload)))
     with pytest.raises(SynthesisError):
         LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
             run.graph,
@@ -226,12 +229,8 @@ def test_synthesis_rejects_ranking_a_rejected_hypothesis(
 ) -> None:
     run = _verified_run(git_repo, tmp_path)
     payload = json.loads(_report_json(git_repo))
-    payload["ranked_causes"][0]["hypothesis_id"] = "h-rejected"
     rejected = run.graph.hypotheses[0].model_copy(
-        update={
-            "id": "h-rejected",
-            "disposition": HypothesisDisposition.REJECTED,
-        }
+        update={"disposition": HypothesisDisposition.REJECTED}
     )
     graph = run.graph.model_copy(
         update={
@@ -289,3 +288,69 @@ def test_final_report_prompt_exposes_evidence_domain_and_never_primes_ids(
     assert "ev-code-001" not in FINAL_REPORT_SYSTEM_PROMPT
     assert "ev-git_history-001" not in FINAL_REPORT_SYSTEM_PROMPT
     assert "<existing-evidence-id>" in FINAL_REPORT_SYSTEM_PROMPT
+
+
+def test_final_report_prompt_bans_verification_ids_and_empty_commits() -> None:
+    from patchpilot.rca.prompts import FINAL_REPORT_SYSTEM_PROMPT
+
+    assert "verification result ids (ver-*)" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "Never emit an empty or placeholder commit" in FINAL_REPORT_SYSTEM_PROMPT
+
+
+def _invalid_report_json() -> str:
+    return json.dumps(
+        {
+            "conclusion": "insufficient_evidence",
+            "conclusion_summary": "no supported cause",
+            "ranked_causes": [],
+            "top_k_locations": [],
+            "causal_chain": [],
+            "suspected_regression": {
+                "commit": "",
+                "summary": "empty commit",
+                "evidence_ids": [],
+                "locations": [],
+            },
+            "uncertainty": {
+                "level": "medium",
+                "insufficient_evidence": True,
+                "notes": [],
+            },
+        }
+    )
+
+
+def test_synthesis_retries_once_with_validation_feedback(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    runtime_id = run.results[0].evidence_ids[0]
+    provider = FakeProvider(
+        turn(_invalid_report_json()),
+        turn(_report_json(git_repo, runtime_id)),
+    )
+    usage = UsageTracker()
+    report = LeadSynthesizer(provider=provider, usage=usage).synthesize(
+        run.graph,
+        run,
+    )
+    assert len(provider.calls) == 2
+    second_messages = provider.calls[1]["messages"][1]["content"]
+    assert "PREVIOUS OUTPUT REJECTED" in second_messages
+    assert "commit must be a 7-64 character hexadecimal SHA" in second_messages
+    assert report.id.startswith("rca-")
+    assert usage.snapshot().llm_calls == 2
+
+
+def test_synthesis_raises_after_repair_retries_exhausted(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    provider = FakeProvider(turn(_invalid_report_json()), turn(_invalid_report_json()))
+    usage = UsageTracker()
+    with pytest.raises(SynthesisError, match="malformed final synthesis output"):
+        LeadSynthesizer(provider=provider, usage=usage).synthesize(run.graph, run)
+    assert len(provider.calls) == 2
+    assert usage.snapshot().llm_calls == 2

@@ -284,10 +284,16 @@ Rules:
   evidence ids that exist in the provided graph.
 - Never invent evidence ids or hypothesis ids; every cited id must appear
   verbatim in the INVESTIGATION STATE.
+- evidence_ids fields (ranked_causes, causal_chain, suspected_regression) may
+  reference only ids from the evidence list in INVESTIGATION STATE; never cite
+  verification result ids (ver-*) and never invent ids.
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
 - Report a suspected regression commit only when the INVESTIGATION STATE
   contains git-history evidence that supports it.
+- suspected_regression.commit must be an exact 7-64 character hexadecimal SHA
+  found in the evidence; when no real commit sha is available, omit
+  suspected_regression entirely. Never emit an empty or placeholder commit.
 - Fix recommendations are advisory text and scope only. Never embed diffs,
   patches, edit commands, or repository mutation commands.
 - Preserve uncertainty from partial worker failures and unverified
