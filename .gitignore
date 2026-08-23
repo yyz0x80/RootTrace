@@ -8,3 +8,5 @@ __pycache__/
 /evaluation/runs/
 /.patchpilot
 evaluation/.DS_Store
+.DS_Store
+patchpilot/.patchpilot/models.json
