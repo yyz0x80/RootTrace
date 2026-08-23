@@ -137,6 +137,7 @@ class LLMProvider:
         self._llm_call_count = 0
         self._prompt_tokens: int | None = 0
         self._completion_tokens: int | None = 0
+        self._reasoning_tokens: int | None = 0
 
     @property
     def model(self) -> str:
@@ -162,10 +163,16 @@ class LLMProvider:
         """Return exact accumulated completion tokens when fully available."""
         return self._completion_tokens
 
+    @property
+    def reasoning_tokens(self) -> int | None:
+        """Return exact accumulated reasoning tokens when fully available."""
+        return self._reasoning_tokens
+
     def _record_usage(
         self,
         prompt_tokens: int | None,
         completion_tokens: int | None,
+        reasoning_tokens: int | None = None,
     ) -> None:
         """Record one successful completion without estimating missing usage."""
         self._llm_call_count += 1
@@ -179,6 +186,11 @@ class LLMProvider:
             self._completion_tokens = None
         elif self._completion_tokens is not None:
             self._completion_tokens += completion_tokens
+
+        if reasoning_tokens is None:
+            self._reasoning_tokens = None
+        elif self._reasoning_tokens is not None:
+            self._reasoning_tokens += reasoning_tokens
 
     def complete(
         self,
@@ -225,7 +237,13 @@ class LLMProvider:
                     "completion_tokens",
                     None,
                 )
-                self._record_usage(prompt_tokens, completion_tokens)
+                details = getattr(usage, "completion_tokens_details", None)
+                reasoning_tokens = getattr(details, "reasoning_tokens", None)
+                self._record_usage(
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                )
 
                 if message.tool_calls:
                     for tool_call in message.tool_calls:
@@ -251,6 +269,7 @@ class LLMProvider:
                     tool_calls=tool_calls,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
+                    reasoning_tokens=reasoning_tokens,
                 )
 
             except RateLimitError as e:

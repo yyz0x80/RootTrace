@@ -60,6 +60,7 @@ def test_comparison_rows_cover_required_metrics(tmp_path) -> None:
         "latency_p95_seconds",
         "mean_llm_calls_per_case",
         "mean_total_tokens_per_case",
+        "mean_reasoning_tokens_per_case",
     } <= metric_keys
 
 
@@ -107,7 +108,7 @@ def test_compare_cli_writes_files_and_handles_missing_dir(tmp_path) -> None:
     document = json.loads(
         (output_dir / "comparison.json").read_text(encoding="utf-8")
     )
-    assert len(document["rows"]) == 12
+    assert len(document["rows"]) == 13
 
     missing_exit = main(
         [

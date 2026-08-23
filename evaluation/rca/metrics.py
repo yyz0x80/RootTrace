@@ -38,6 +38,7 @@ class CaseMetrics(BaseModel):
     llm_calls: int | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
     total_tokens: int | None = None
 
 
@@ -83,6 +84,9 @@ class AggregateMetrics(BaseModel):
     mean_total_tokens_per_case: float | None = None
     exact_token_cases: int = 0
     null_token_cases: int = 0
+    mean_reasoning_tokens_per_case: float | None = None
+    reasoning_token_cases: int = 0
+    null_reasoning_cases: int = 0
 
 
 class EvalMetrics(BaseModel):
@@ -143,6 +147,7 @@ def compute_case_metrics(
     llm_calls: int | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
 ) -> CaseMetrics:
     """Compute one case's localization metrics deterministically."""
     predicted = normalize_predicted_files(predicted_files)
@@ -190,6 +195,7 @@ def compute_case_metrics(
         llm_calls=llm_calls,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
         total_tokens=total_tokens,
     )
 
@@ -231,6 +237,7 @@ def compute_eval_metrics(results: list[CaseResult]) -> EvalMetrics:
             llm_calls=result.llm_calls,
             prompt_tokens=(result.usage or {}).get("prompt_tokens"),
             completion_tokens=(result.usage or {}).get("completion_tokens"),
+            reasoning_tokens=(result.usage or {}).get("reasoning_tokens"),
         )
         for result in ordered
     ]
@@ -238,6 +245,9 @@ def compute_eval_metrics(results: list[CaseResult]) -> EvalMetrics:
     covered = [case for case in per_case if case.covered]
 
     token_values = [case.total_tokens for case in covered if case.total_tokens is not None]
+    reasoning_values = [
+        case.reasoning_tokens for case in covered if case.reasoning_tokens is not None
+    ]
     aggregate = AggregateMetrics(
         total_cases=total,
         covered_cases=len(covered),
@@ -283,5 +293,12 @@ def compute_eval_metrics(results: list[CaseResult]) -> EvalMetrics:
         mean_total_tokens_per_case=_mean([float(value) for value in token_values]),
         exact_token_cases=len(token_values),
         null_token_cases=sum(1 for case in covered if case.total_tokens is None),
+        mean_reasoning_tokens_per_case=_mean(
+            [float(value) for value in reasoning_values]
+        ),
+        reasoning_token_cases=len(reasoning_values),
+        null_reasoning_cases=sum(
+            1 for case in covered if case.reasoning_tokens is None
+        ),
     )
     return EvalMetrics(aggregate=aggregate, per_case=per_case)

@@ -106,6 +106,9 @@ def _merge_usage(*snapshots: Usage) -> Usage:
     completion_tokens: list[int | None] = [
         snapshot.completion_tokens for snapshot in snapshots
     ]
+    reasoning_tokens: list[int | None] = [
+        snapshot.reasoning_tokens for snapshot in snapshots
+    ]
     return Usage(
         llm_calls=sum(snapshot.llm_calls for snapshot in snapshots),
         prompt_tokens=(
@@ -117,6 +120,11 @@ def _merge_usage(*snapshots: Usage) -> Usage:
             None
             if any(value is None for value in completion_tokens)
             else sum(value for value in completion_tokens if value is not None)
+        ),
+        reasoning_tokens=(
+            None
+            if any(value is None for value in reasoning_tokens)
+            else sum(value for value in reasoning_tokens if value is not None)
         ),
     )
 
@@ -493,7 +501,11 @@ class RcaOrchestrator:
             ],
             tools=[],
         )
-        lead_usage.record(turn.prompt_tokens, turn.completion_tokens)
+        lead_usage.record(
+            turn.prompt_tokens,
+            turn.completion_tokens,
+            turn.reasoning_tokens,
+        )
         if turn.content is None or not turn.content.strip():
             return [], ["hypothesis generation returned no content"]
         try:

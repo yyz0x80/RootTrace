@@ -183,7 +183,11 @@ class LeadPlanner:
             ],
             tools=[],
         )
-        self._usage.record(turn.prompt_tokens, turn.completion_tokens)
+        self._usage.record(
+            turn.prompt_tokens,
+            turn.completion_tokens,
+            turn.reasoning_tokens,
+        )
         if turn.content is None or not turn.content.strip():
             raise PlanError("Lead returned no content")
         try:
@@ -392,7 +396,11 @@ class _Specialist:
                 tools=schemas,
                 tool_choice="auto",
             )
-            self._usage.record(turn.prompt_tokens, turn.completion_tokens)
+            self._usage.record(
+                turn.prompt_tokens,
+                turn.completion_tokens,
+                turn.reasoning_tokens,
+            )
             llm_calls += 1
             if turn.tool_calls:
                 tool_calls_made += len(turn.tool_calls)

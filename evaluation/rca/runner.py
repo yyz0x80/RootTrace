@@ -81,6 +81,7 @@ class RootTraceOutcome(BaseModel):
     llm_calls: int | None = Field(default=None, ge=0)
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
 
 
 class RootTraceClient(Protocol):
@@ -179,6 +180,10 @@ class InProcessRootTraceClient:
             completion_tokens=_sum_or_none(
                 run_usage.completion_tokens if run_usage else None,
                 report_usage.completion_tokens if report_usage else None,
+            ),
+            reasoning_tokens=_sum_or_none(
+                run_usage.reasoning_tokens if run_usage else None,
+                report_usage.reasoning_tokens if report_usage else None,
             ),
         )
 
@@ -313,12 +318,18 @@ def _run_case(
         llm_calls=outcome.llm_calls,
         prompt_tokens=outcome.prompt_tokens,
         completion_tokens=outcome.completion_tokens,
+        reasoning_tokens=outcome.reasoning_tokens,
     )
     usage = None
-    if outcome.prompt_tokens is not None or outcome.completion_tokens is not None:
+    if (
+        outcome.prompt_tokens is not None
+        or outcome.completion_tokens is not None
+        or outcome.reasoning_tokens is not None
+    ):
         usage = {
             "prompt_tokens": outcome.prompt_tokens,
             "completion_tokens": outcome.completion_tokens,
+            "reasoning_tokens": outcome.reasoning_tokens,
             "total_tokens": metrics.total_tokens,
         }
     return CaseResult(

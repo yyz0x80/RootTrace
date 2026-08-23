@@ -87,7 +87,11 @@ class LeadSynthesizer:
                 ],
                 tools=[],
             )
-            self._usage.record(turn.prompt_tokens, turn.completion_tokens)
+            self._usage.record(
+                turn.prompt_tokens,
+                turn.completion_tokens,
+                turn.reasoning_tokens,
+            )
             if turn.content is None or not turn.content.strip():
                 raise SynthesisError("final synthesis returned no content")
             try:

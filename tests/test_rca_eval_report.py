@@ -63,6 +63,7 @@ def test_render_markdown_contains_summary_and_failures(tmp_path) -> None:
     assert "| c2 | error |" in text
     assert "## Failed cases" in text
     assert "boom" in text
+    assert "mean reasoning tokens/case" in text
     assert "generated_at" not in text
 
 

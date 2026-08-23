@@ -16,6 +16,7 @@ class AssistantTurn:
     tool_calls: list[ToolCall]
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 class ToolFailureType(StrEnum):

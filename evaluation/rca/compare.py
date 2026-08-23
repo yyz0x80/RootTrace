@@ -27,6 +27,7 @@ METRIC_ROWS = [
     ("latency_p95_seconds", "Latency P95 (s)"),
     ("mean_llm_calls_per_case", "LLM Calls/Case"),
     ("mean_total_tokens_per_case", "Tokens/Case"),
+    ("mean_reasoning_tokens_per_case", "Reasoning Tokens/Case"),
 ]
 
 

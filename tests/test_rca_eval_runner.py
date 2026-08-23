@@ -41,6 +41,7 @@ class FakeRootTraceClient:
         calls: int = 2,
         prompt: int = 100,
         completion: int = 50,
+        reasoning: int | None = None,
     ) -> None:
         self.predictions = predictions or {}
         self.fail_ids = fail_ids or set()
@@ -50,6 +51,7 @@ class FakeRootTraceClient:
         self.calls = calls
         self.prompt = prompt
         self.completion = completion
+        self.reasoning = reasoning
 
     def run(
         self,
@@ -77,6 +79,7 @@ class FakeRootTraceClient:
             llm_calls=self.calls,
             prompt_tokens=self.prompt,
             completion_tokens=self.completion,
+            reasoning_tokens=self.reasoning,
         )
 
 
@@ -158,12 +161,41 @@ def test_runner_completes_cases_and_writes_artifacts(tmp_path) -> None:
         assert result.predicted_files == ["pkg/mod.py"]
         assert result.gold_files == ["pkg/mod.py"]
         assert result.metrics.top_1_file_accuracy is True
+        assert result.metrics.reasoning_tokens is None
 
     metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["aggregate"]["coverage"] == 1.0
     assert metrics["aggregate"]["top_1_file_accuracy"] == 1.0
     assert metrics["aggregate"]["mean_llm_calls_per_case"] == 2.0
+    assert metrics["aggregate"]["reasoning_token_cases"] == 0
+    assert metrics["aggregate"]["null_reasoning_cases"] == 2
     assert (output_dir / "report.md").is_file()
+
+
+def test_reasoning_tokens_flow_into_case_and_aggregate_metrics(tmp_path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    output_dir = tmp_path / "out"
+    client = FakeRootTraceClient(
+        predictions={"acme__demo-1": ["pkg/mod.py"]},
+        reasoning=42,
+    )
+    exit_code = run_from_args(_args(data_root, output_dir), client=client)
+    assert exit_code == 0
+
+    result = CaseResult.model_validate(
+        json.loads(
+            (
+                output_dir / "cases" / "acme__demo-1" / "result.json"
+            ).read_text(encoding="utf-8")
+        )
+    )
+    assert result.metrics.reasoning_tokens == 42
+    assert (result.usage or {})["reasoning_tokens"] == 42
+
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["aggregate"]["reasoning_token_cases"] == 2
+    assert metrics["aggregate"]["null_reasoning_cases"] == 0
+    assert metrics["aggregate"]["mean_reasoning_tokens_per_case"] == 42.0
 
 
 def test_gold_data_never_reaches_root_trace(tmp_path) -> None:

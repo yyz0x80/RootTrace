@@ -346,6 +346,7 @@ class Usage(BaseModel):
     llm_calls: int = Field(default=0, ge=0)
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
 
 
 class AgentFinding(BaseModel):

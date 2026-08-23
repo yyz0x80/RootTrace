@@ -451,6 +451,7 @@ def test_usage_null_semantics_round_trip() -> None:
         "llm_calls": 3,
         "prompt_tokens": None,
         "completion_tokens": None,
+        "reasoning_tokens": None,
     }
     assert Usage.model_validate(data) == usage
 

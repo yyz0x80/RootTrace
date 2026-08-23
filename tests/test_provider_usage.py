@@ -16,6 +16,7 @@ def make_provider(responses: list[SimpleNamespace]) -> LLMProvider:
     provider._llm_call_count = 0
     provider._prompt_tokens = 0
     provider._completion_tokens = 0
+    provider._reasoning_tokens = 0
     create = Mock(side_effect=responses)
     provider._client = SimpleNamespace(
         chat=SimpleNamespace(
@@ -29,6 +30,7 @@ def make_provider(responses: list[SimpleNamespace]) -> LLMProvider:
 def response_with_usage(
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    reasoning_tokens: int | None = None,
 ) -> SimpleNamespace:
     """Build a minimal OpenAI-compatible response."""
     usage = (
@@ -37,6 +39,11 @@ def response_with_usage(
         else SimpleNamespace(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            completion_tokens_details=(
+                SimpleNamespace(reasoning_tokens=reasoning_tokens)
+                if reasoning_tokens is not None
+                else None
+            ),
         )
     )
     return SimpleNamespace(
@@ -65,6 +72,36 @@ def test_provider_accumulates_exact_usage() -> None:
     assert provider.llm_call_count == 2
     assert provider.prompt_tokens == 30
     assert provider.completion_tokens == 10
+    assert provider.reasoning_tokens is None
+
+
+def test_provider_accumulates_reasoning_tokens() -> None:
+    provider = make_provider(
+        [
+            response_with_usage(10, 4, reasoning_tokens=2),
+            response_with_usage(20, 6, reasoning_tokens=8),
+        ]
+    )
+
+    first = provider.complete(messages=[], tools=[])
+    provider.complete(messages=[], tools=[])
+
+    assert first.reasoning_tokens == 2
+    assert provider.reasoning_tokens == 10
+
+
+def test_provider_keeps_reasoning_unknown_after_missing_details() -> None:
+    provider = make_provider(
+        [
+            response_with_usage(10, 4, reasoning_tokens=2),
+            response_with_usage(20, 6),
+        ]
+    )
+
+    provider.complete(messages=[], tools=[])
+    provider.complete(messages=[], tools=[])
+
+    assert provider.reasoning_tokens is None
 
 
 def test_provider_forwards_tool_choice_when_requested() -> None:

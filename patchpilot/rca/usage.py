@@ -21,8 +21,14 @@ class UsageTracker:
         self._llm_calls = 0
         self._prompt_tokens: int | None = 0
         self._completion_tokens: int | None = 0
+        self._reasoning_tokens: int | None = 0
 
-    def record(self, prompt_tokens: int | None, completion_tokens: int | None) -> None:
+    def record(
+        self,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        reasoning_tokens: int | None = None,
+    ) -> None:
         """Record one provider call; missing usage makes the aggregate null."""
         with self._lock:
             self._llm_calls += 1
@@ -36,6 +42,11 @@ class UsageTracker:
             elif self._completion_tokens is not None:
                 self._completion_tokens += completion_tokens
 
+            if reasoning_tokens is None:
+                self._reasoning_tokens = None
+            elif self._reasoning_tokens is not None:
+                self._reasoning_tokens += reasoning_tokens
+
     def snapshot(self) -> Usage:
         """Return an immutable aggregate usage snapshot."""
         with self._lock:
@@ -43,4 +54,5 @@ class UsageTracker:
                 llm_calls=self._llm_calls,
                 prompt_tokens=self._prompt_tokens,
                 completion_tokens=self._completion_tokens,
+                reasoning_tokens=self._reasoning_tokens,
             )

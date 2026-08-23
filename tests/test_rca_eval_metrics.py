@@ -23,6 +23,7 @@ def _result(
     calls: int | None = None,
     prompt: int | None = None,
     completion: int | None = None,
+    reasoning: int | None = None,
 ) -> CaseResult:
     metrics = compute_case_metrics(
         instance_id=instance_id,
@@ -34,12 +35,14 @@ def _result(
         llm_calls=calls,
         prompt_tokens=prompt,
         completion_tokens=completion,
+        reasoning_tokens=reasoning,
     )
     usage = None
-    if prompt is not None or completion is not None:
+    if prompt is not None or completion is not None or reasoning is not None:
         usage = {
             "prompt_tokens": prompt,
             "completion_tokens": completion,
+            "reasoning_tokens": reasoning,
             "total_tokens": metrics.total_tokens,
         }
     return CaseResult(
@@ -136,6 +139,7 @@ def test_aggregate_metrics_values() -> None:
             calls=3,
             prompt=100,
             completion=50,
+            reasoning=20,
         ),
         _result("c2", ["src/c.py"], ["src/a.py", "src/b.py"], latency=2.0, calls=None),
         _result("c3", [], ["src/a.py"], latency=3.0, calls=5),
@@ -168,6 +172,9 @@ def test_aggregate_metrics_values() -> None:
     assert aggregate.exact_token_cases == 1
     assert aggregate.null_token_cases == 2
     assert aggregate.mean_total_tokens_per_case == pytest.approx(150.0)
+    assert aggregate.reasoning_token_cases == 1
+    assert aggregate.null_reasoning_cases == 2
+    assert aggregate.mean_reasoning_tokens_per_case == pytest.approx(20.0)
 
 
 def test_aggregate_per_case_sorted_by_instance_id() -> None:
