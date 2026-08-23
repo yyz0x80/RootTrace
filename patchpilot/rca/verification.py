@@ -218,7 +218,7 @@ class RuntimeTestVerifier:
         command: str,
         error: str,
     ) -> VerificationResult:
-        return VerificationResult(
+        result = VerificationResult(
             id=f"ver-{hypothesis.id}-{len(self._seen_result_ids) + 1:03d}",
             hypothesis_id=hypothesis.id,
             command=command,
@@ -228,6 +228,10 @@ class RuntimeTestVerifier:
             exit_code=None,
             duration_seconds=None,
         )
+        # Register the id so later steps never reuse the same result id; a
+        # rejected step still consumes a slot in the global id sequence.
+        self._seen_result_ids.add(result.id)
+        return result
 
 
 def _disposition_for(

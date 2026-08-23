@@ -297,3 +297,28 @@ def test_capped_excerpt_respects_excerpt_limit() -> None:
     excerpt = _cap("z" * (MAX_EXCERPT_CHARS + 500))
     assert len(excerpt) == MAX_EXCERPT_CHARS
     assert excerpt.endswith("\n...[truncated]")
+
+
+def test_rejected_step_does_not_reuse_verification_result_id(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        git_repo,
+        [
+            _hypothesis(
+                "h-001",
+                "python -m pytest -q missing_test.py",
+                "python -m pytest -q tests/test_calc.py",
+            )
+        ],
+    )
+    with RuntimeVerificationSandbox(
+        git_repo.repo,
+        base_commit=git_repo.base_sha,
+        work_dir=tmp_path,
+    ) as sandbox:
+        run = RuntimeTestVerifier(sandbox).verify(graph, max_steps=10)
+    ids = [result.id for result in run.results]
+    assert len(ids) == 2
+    assert len(ids) == len(set(ids))
