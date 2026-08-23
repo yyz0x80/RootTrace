@@ -13,7 +13,14 @@ import json
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
@@ -21,6 +28,8 @@ _CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 class ManifestCase(BaseModel):
     """One pinned evaluation case (public metadata only, no gold fields)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     instance_id: str = Field(min_length=1, max_length=200)
     repo: str = Field(min_length=1, max_length=200)

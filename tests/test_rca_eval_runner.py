@@ -91,6 +91,10 @@ def _args(data_root: Path, output_dir: Path, **overrides) -> argparse.Namespace:
         "max_cases": None,
         "dry_run": False,
         "resume": False,
+        "variant": "three_specialists_retrieval_off",
+        "ablation_config": None,
+        "history_corpus": None,
+        "history_index": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -342,6 +346,72 @@ def test_sum_or_none_usage_merge() -> None:
     assert _sum_or_none(None, 2) is None
     assert _sum_or_none(1, None) is None
     assert _sum_or_none(None, None) is None
+
+
+def test_variant_is_recorded_in_results_and_config(tmp_path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    output_dir = tmp_path / "out"
+    client = FakeRootTraceClient(predictions={"acme__demo-1": ["pkg/mod.py"]})
+    exit_code = run_from_args(
+        _args(data_root, output_dir, variant="lead_code"),
+        client=client,
+    )
+    assert exit_code == 0
+    result = CaseResult.model_validate(
+        json.loads(
+            (output_dir / "cases" / "acme__demo-1" / "result.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    )
+    assert result.variant == "lead_code"
+    assert result.config_hash
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["config"]["variant"] == "lead_code"
+    assert metrics["config"]["config_hash"] == result.config_hash
+    assert (output_dir / "variant.json").is_file()
+
+
+def test_resume_skips_only_matching_variant_and_config(tmp_path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    lead_dir = tmp_path / "out-lead"
+    first_client = FakeRootTraceClient(predictions={"acme__demo-1": ["pkg/mod.py"]})
+    assert (
+        run_from_args(
+            _args(data_root, lead_dir, variant="lead_code"),
+            client=first_client,
+        )
+        == 0
+    )
+    assert len(first_client.received) == 2
+
+    # A different variant uses its own output directory.
+    off_dir = tmp_path / "out-off"
+    different_client = FakeRootTraceClient(predictions={"acme__demo-1": ["pkg/mod.py"]})
+    assert (
+        run_from_args(
+            _args(
+                data_root,
+                off_dir,
+                variant="three_specialists_retrieval_off",
+                resume=True,
+            ),
+            client=different_client,
+        )
+        == 0
+    )
+    assert len(different_client.received) == 2
+
+    # The same variant and config are skipped.
+    resume_client = FakeRootTraceClient(predictions={})
+    assert (
+        run_from_args(
+            _args(data_root, lead_dir, variant="lead_code", resume=True),
+            client=resume_client,
+        )
+        == 0
+    )
+    assert resume_client.received == []
 
 
 def test_cli_help_and_dry_run_subprocess(tmp_path) -> None:

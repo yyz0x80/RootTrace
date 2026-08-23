@@ -12,6 +12,7 @@ import pytest
 
 from patchpilot.models import AssistantTurn, ToolCall
 from patchpilot.rca.agents import PlanError
+from patchpilot.rca.history.schema import RetrievalHints, RetrievedCase
 from patchpilot.rca.incident_loader import LoadedIncident
 from patchpilot.rca.orchestrator import RcaOrchestrator, _bounded_error
 from patchpilot.rca.schema import (
@@ -169,6 +170,11 @@ def build_orchestrator(
     git_responses: list[AssistantTurn] | None = None,
     budgets: PlanBudgets | None = None,
     worker_timeout_margin_seconds: float = 30.0,
+    worker_concurrency: int = 3,
+    enabled_roles: frozenset[AgentRole] | None = None,
+    retriever=None,
+    retrieval_mode: str = "off",
+    history_excluded_ids: frozenset[str] = frozenset(),
 ):
     external_root = tmp_path / "logs"
     external_root.mkdir(exist_ok=True)
@@ -211,6 +217,11 @@ def build_orchestrator(
         registry=registry,
         budgets=budgets or PlanBudgets(),
         worker_timeout_margin_seconds=worker_timeout_margin_seconds,
+        worker_concurrency=worker_concurrency,
+        enabled_roles=enabled_roles,
+        retriever=retriever,
+        retrieval_mode=retrieval_mode,
+        history_excluded_ids=history_excluded_ids,
     )
     return orchestrator, providers
 
@@ -486,3 +497,85 @@ def test_bounded_error_respects_limit_including_ellipsis() -> None:
     assert len(truncated) == 500
     assert truncated.endswith("...")
     assert truncated.startswith("x" * 497)
+
+
+def test_enabled_roles_subset_runs_only_selected_specialists(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    code_hypotheses = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "statement": "multiply is implemented as addition",
+                    "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
+                    "supporting_evidence_ids": ["ev-code-001"],
+                    "contradicting_evidence_ids": [],
+                    "verification_plan": [
+                        {
+                            "command": "python -m pytest -q tests/test_calc.py",
+                            "description": "run the calc regression tests",
+                            "timeout_seconds": 60,
+                        }
+                    ],
+                    "confidence": "medium",
+                }
+            ]
+        }
+    )
+    orchestrator, providers = build_orchestrator(
+        git_repo,
+        tmp_path,
+        enabled_roles=frozenset({AgentRole.CODE}),
+        lead_responses=[turn(PLAN_JSON), turn(code_hypotheses)],
+    )
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+    assert result.status == FindingStatus.COMPLETED
+    assert result.enabled_roles == ["code"]
+    assert providers["code"].calls
+    assert not providers["issue_ci"].calls
+    assert not providers["git"].calls
+
+
+def test_retrieval_hints_are_injected_and_targets_excluded(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import MagicMock
+
+    retrieved = RetrievedCase(
+        id="historical-case-1",
+        similarity=0.8,
+        locations=["src/mod.py"],
+        summary="similar issue",
+        source="fixture",
+    )
+    hints = RetrievalHints(
+        mode="clustered",
+        top_k=1,
+        results=[retrieved],
+        candidate_count=3,
+        index_checksum="c" * 64,
+    )
+    retriever = MagicMock()
+    retriever.retrieve.return_value = hints
+    orchestrator, providers = build_orchestrator(
+        git_repo,
+        tmp_path,
+        retriever=retriever,
+        retrieval_mode="clustered",
+        history_excluded_ids=frozenset({"other-target"}),
+    )
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    retriever.retrieve.assert_called_once_with(
+        make_loaded(git_repo).incident.problem,
+        target_id="inc-001",
+        excluded_ids=frozenset({"other-target"}),
+        mode="clustered",
+    )
+    assert result.retrieval is not None
+    assert result.retrieval.mode == "clustered"
+    last_messages = providers["lead"].calls[-1]["messages"]
+    assert "RETRIEVED HISTORICAL HINTS" in str(last_messages)
+    assert "historical-case-1" in str(last_messages)

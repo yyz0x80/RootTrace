@@ -42,6 +42,8 @@ from patchpilot.rca.artifacts import (
 )
 from patchpilot.rca.context import IncidentContext
 from patchpilot.rca.context_builder import build_incident_context
+from patchpilot.rca.history.retrieval import HistoricalRetriever
+from patchpilot.rca.history.schema import RetrievalHints
 from patchpilot.rca.incident_loader import LoadedIncident
 from patchpilot.rca.prompts import (
     HYPOTHESES_SYSTEM_PROMPT,
@@ -86,6 +88,8 @@ class RcaRunResult(BaseModel):
     timing_seconds: float | None = Field(default=None, ge=0)
     usage: Usage | None = None
     isolation_violations: int = Field(default=0, ge=0)
+    enabled_roles: list[str] | None = None
+    retrieval: RetrievalHints | None = None
 
 
 def _bounded_error(text: str, limit: int = 500) -> str:
@@ -147,7 +151,16 @@ class RcaOrchestrator:
         registry: RcaToolRegistry,
         budgets: PlanBudgets,
         worker_timeout_margin_seconds: float = 30.0,
+        worker_concurrency: int = 3,
+        enabled_roles: frozenset[AgentRole] | None = None,
+        retriever: HistoricalRetriever | None = None,
+        retrieval_mode: str = "off",
+        history_excluded_ids: frozenset[str] = frozenset(),
     ) -> None:
+        if not 1 <= worker_concurrency <= 3:
+            raise ValueError("worker_concurrency must be between 1 and 3")
+        if retrieval_mode not in {"off", "clustered", "flat"}:
+            raise ValueError("retrieval_mode must be off, clustered, or flat")
         self._lead_provider = lead_provider
         self._issue_ci_provider = issue_ci_provider
         self._code_provider = code_provider
@@ -155,6 +168,17 @@ class RcaOrchestrator:
         self._registry = registry
         self._budgets = budgets
         self._worker_timeout_margin_seconds = worker_timeout_margin_seconds
+        self._worker_concurrency = worker_concurrency
+        self._enabled_roles = (
+            frozenset(_ROLE_ORDER) if enabled_roles is None else frozenset(enabled_roles)
+        )
+        self._retriever = retriever
+        self._retrieval_mode = retrieval_mode
+        self._history_excluded_ids = frozenset(history_excluded_ids)
+
+    def _specialist_roles(self) -> list[AgentRole]:
+        """Return the enabled evidence-specialist roles in stable order."""
+        return [role for role in _ROLE_ORDER if role in self._enabled_roles]
 
     def run(
         self,
@@ -204,26 +228,34 @@ class RcaOrchestrator:
         )
 
         questions = self._questions_by_role(plan)
-        agents: dict[AgentRole, Any] = {
-            AgentRole.ISSUE_CI: IssueCISpecialist(
-                provider=self._issue_ci_provider,
-                registry=self._registry,
-                usage=issue_ci_usage,
-                budgets=self._budgets,
+        specialist_builders: dict[AgentRole, tuple[Any, UsageTracker]] = {
+            AgentRole.ISSUE_CI: (
+                IssueCISpecialist,
+                issue_ci_usage,
             ),
-            AgentRole.CODE: CodeSpecialist(
-                provider=self._code_provider,
-                registry=self._registry,
-                usage=code_usage,
-                budgets=self._budgets,
+            AgentRole.CODE: (
+                CodeSpecialist,
+                code_usage,
             ),
-            AgentRole.GIT_HISTORY: GitHistorySpecialist(
-                provider=self._git_history_provider,
-                registry=self._registry,
-                usage=git_history_usage,
-                budgets=self._budgets,
+            AgentRole.GIT_HISTORY: (
+                GitHistorySpecialist,
+                git_history_usage,
             ),
         }
+        role_providers = {
+            AgentRole.ISSUE_CI: self._issue_ci_provider,
+            AgentRole.CODE: self._code_provider,
+            AgentRole.GIT_HISTORY: self._git_history_provider,
+        }
+        agents: dict[AgentRole, Any] = {}
+        for role in self._specialist_roles():
+            specialist_cls, usage = specialist_builders[role]
+            agents[role] = specialist_cls(
+                provider=role_providers[role],
+                registry=self._registry,
+                usage=usage,
+                budgets=self._budgets,
+            )
         outputs, errors, isolation_violations = self._run_workers(
             context,
             incident,
@@ -233,6 +265,14 @@ class RcaOrchestrator:
         )
         graph = aggregate_evidence(incident, outputs)
 
+        retrieval_hints: RetrievalHints | None = None
+        if self._retriever is not None:
+            retrieval_hints = self._retriever.retrieve(
+                incident.problem,
+                target_id=incident.id,
+                excluded_ids=self._history_excluded_ids,
+                mode=self._retrieval_mode,
+            )
         self._trace(
             writer,
             incident.id,
@@ -243,6 +283,7 @@ class RcaOrchestrator:
             context,
             graph,
             lead_usage,
+            retrieval_hints=retrieval_hints,
         )
         self._trace(
             writer,
@@ -274,6 +315,8 @@ class RcaOrchestrator:
                 git_history_usage.snapshot(),
             ),
             isolation_violations=isolation_violations,
+            enabled_roles=[role.value for role in self._specialist_roles()],
+            retrieval=retrieval_hints,
         )
         if output_dir is not None:
             self._persist(Path(output_dir), plan, graph)
@@ -302,12 +345,13 @@ class RcaOrchestrator:
         writer: TraceWriter | None,
     ) -> tuple[dict[AgentRole, SpecialistOutput], list[str], int]:
         executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=3,
+            max_workers=min(self._worker_concurrency, max(len(agents), 1)),
             thread_name_prefix="rca-specialist",
         )
         futures: dict[AgentRole, concurrent.futures.Future[SpecialistOutput]] = {}
+        role_order = [role for role in _ROLE_ORDER if role in agents]
         try:
-            for role in _ROLE_ORDER:
+            for role in role_order:
                 futures[role] = executor.submit(
                     self._run_specialist,
                     context,
@@ -325,7 +369,7 @@ class RcaOrchestrator:
             outputs: dict[AgentRole, SpecialistOutput] = {}
             errors: list[str] = []
             isolation_violations = 0
-            for role in _ROLE_ORDER:
+            for role in role_order:
                 try:
                     output = futures[role].result(timeout=timeout)
                 except TimeoutError:
@@ -435,8 +479,13 @@ class RcaOrchestrator:
         context: IncidentContext,
         graph: EvidenceGraph,
         lead_usage: UsageTracker,
+        *,
+        retrieval_hints: RetrievalHints | None = None,
     ) -> tuple[list[Hypothesis], list[str]]:
-        prompt = build_hypotheses_prompt(graph)
+        prompt = build_hypotheses_prompt(
+            graph,
+            retrieval_hints=retrieval_hints,
+        )
         turn = self._lead_provider.complete(
             messages=[
                 {"role": "system", "content": HYPOTHESES_SYSTEM_PROMPT},

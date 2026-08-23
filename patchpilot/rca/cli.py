@@ -38,7 +38,7 @@ from patchpilot.rca.incident_loader import LoadedIncident, load_incident
 from patchpilot.rca.orchestrator import RcaOrchestrator, RcaRunResult
 from patchpilot.rca.renderer import render_rca_markdown
 from patchpilot.rca.sandbox import RuntimeVerificationSandbox
-from patchpilot.rca.schema import EvidenceGraph, PlanBudgets, RCAReport
+from patchpilot.rca.schema import AgentRole, EvidenceGraph, PlanBudgets, RCAReport
 from patchpilot.rca.synthesis import LeadSynthesizer, SynthesisError
 from patchpilot.rca.tools import RcaToolRegistry
 from patchpilot.rca.usage import UsageTracker
@@ -149,6 +149,11 @@ def run_rca_pipeline(
     provider_factory: Callable[[], ProviderProtocol],
     budgets: PlanBudgets | None = None,
     log_sources: dict[str, str | Path] | None = None,
+    worker_concurrency: int = 3,
+    enabled_roles: frozenset[AgentRole] | None = None,
+    retriever: Any | None = None,
+    retrieval_mode: str = "off",
+    history_excluded_ids: frozenset[str] = frozenset(),
 ) -> RcaCliResult:
     """Run the full local RCA pipeline and persist all artifacts."""
     output = Path(output_dir).resolve()
@@ -169,6 +174,11 @@ def run_rca_pipeline(
         git_history_provider=provider_factory(),
         registry=registry,
         budgets=budgets,
+        worker_concurrency=worker_concurrency,
+        enabled_roles=enabled_roles,
+        retriever=retriever,
+        retrieval_mode=retrieval_mode,
+        history_excluded_ids=history_excluded_ids,
     )
     run_result = orchestrator.run(loaded, repo, output_dir=output)
 
@@ -327,6 +337,12 @@ def _persist_run_summary(
             "synthesis_usage": synthesizer_usage.model_dump(mode="json"),
             "errors": run_result.errors,
             "isolation_violations": run_result.isolation_violations,
+            "enabled_roles": run_result.enabled_roles,
+            "retrieval": (
+                run_result.retrieval.model_dump(mode="json")
+                if run_result.retrieval is not None
+                else None
+            ),
             "artifacts": artifact_names,
         },
     )

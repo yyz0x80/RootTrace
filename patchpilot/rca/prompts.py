@@ -10,6 +10,7 @@ evidence IDs.
 from __future__ import annotations
 
 import json
+from typing import Any, Protocol
 
 from patchpilot.rca.context import IncidentContext
 from patchpilot.rca.schema import (
@@ -20,6 +21,13 @@ from patchpilot.rca.schema import (
 
 MAX_PROMPT_CHARS = 120_000
 _TRUNCATION_MARKER = "\n... [prompt truncated]"
+
+
+class RetrievalHintsLike(Protocol):
+    """Duck-typed retrieval hints: bounded prior-case evidence, hints only."""
+
+    mode: str
+    results: list[Any]
 
 
 def _bounded_json(data: object, limit: int = MAX_PROMPT_CHARS) -> str:
@@ -187,8 +195,17 @@ listed in the EVIDENCE GRAPH section.
 """
 
 
-def build_hypotheses_prompt(graph: EvidenceGraph) -> str:
-    """Build the bounded hypothesis-generation prompt from the evidence graph."""
+def build_hypotheses_prompt(
+    graph: EvidenceGraph,
+    *,
+    retrieval_hints: RetrievalHintsLike | None = None,
+) -> str:
+    """Build the bounded hypothesis-generation prompt from the evidence graph.
+
+    ``retrieval_hints`` are optional prior-case hints from shared memory; they
+    are presented as bounded context and never override current-repository
+    evidence.
+    """
     incident = graph.incident
     evidence = [
         {
@@ -228,11 +245,28 @@ def build_hypotheses_prompt(graph: EvidenceGraph) -> str:
         "findings": findings,
         "evidence": evidence,
     }
-    return (
+    prompt = (
         HYPOTHESES_SYSTEM_PROMPT
         + "\n\nEVIDENCE GRAPH:\n"
         + _bounded_json(data)
     )
+    if retrieval_hints is not None and retrieval_hints.results:
+        hints_payload = [
+            {
+                "id": result.id,
+                "similarity": result.similarity,
+                "locations": result.locations[:10],
+                "summary": result.summary,
+                "source": result.source,
+            }
+            for result in retrieval_hints.results[:5]
+        ]
+        prompt += (
+            "\n\nRETRIEVED HISTORICAL HINTS "
+            "(prior cases only; never override current evidence):\n"
+            + _bounded_json({"mode": retrieval_hints.mode, "results": hints_payload})
+        )
+    return prompt
 
 
 FINAL_REPORT_SYSTEM_PROMPT = """\

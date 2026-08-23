@@ -18,7 +18,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -42,16 +42,22 @@ from evaluation.rca.metrics import (
     compute_eval_metrics,
 )
 from evaluation.rca.report import EvalRunConfig, write_reports
+from evaluation.rca.variants import (
+    AblationConfig,
+    AblationVariant,
+    VariantSettings,
+    variant_settings,
+)
 from evaluation.rca.workspace import (
     CaseWorkspace,
     create_case_workspace,
     destroy_case_workspace,
     resolve_repo_cache,
 )
-from patchpilot.rca.schema import IncidentInput
+from patchpilot.rca.schema import AgentRole, IncidentInput
 
 DEFAULT_DATA_ROOT = Path.home() / "Datasets" / "roottrace-swebench"
-DEFAULT_OUTPUT_DIR = Path("output") / "rca-eval"
+OUTPUT_ROOT = Path("output")
 PUBLIC_METADATA = "public/verified_public.jsonl"
 GOLD_METADATA = "gold/verified_gold.jsonl"
 DEFAULT_MANIFEST = "manifests/smoke3.json"
@@ -93,12 +99,27 @@ class RootTraceClient(Protocol):
 
 
 class InProcessRootTraceClient:
-    """Runs the real RootTrace pipeline in-process.
+    """Runs the real RootTrace pipeline in-process for one ablation variant.
 
     Only ``incident`` plus the workspace repository path cross this boundary;
     gold data is never passed. Token usage is taken from the RCA report and
     stays ``null`` when the provider did not return exact values.
     """
+
+    def __init__(
+        self,
+        *,
+        enabled_roles: frozenset[AgentRole] | None = None,
+        retrieval_mode: str = "off",
+        retriever: Any | None = None,
+        history_excluded_ids: frozenset[str] = frozenset(),
+        worker_concurrency: int = 3,
+    ) -> None:
+        self._enabled_roles = enabled_roles
+        self._retrieval_mode = retrieval_mode
+        self._retriever = retriever
+        self._history_excluded_ids = history_excluded_ids
+        self._worker_concurrency = worker_concurrency
 
     def run(
         self,
@@ -126,6 +147,11 @@ class InProcessRootTraceClient:
                 repo,
                 output_dir,
                 provider_factory=provider_factory,
+                worker_concurrency=self._worker_concurrency,
+                enabled_roles=self._enabled_roles,
+                retriever=self._retriever,
+                retrieval_mode=self._retrieval_mode,
+                history_excluded_ids=self._history_excluded_ids,
             )
         except Exception as exc:  # noqa: BLE001 - isolate per-case RootTrace failures
             elapsed = time.monotonic() - started
@@ -258,6 +284,8 @@ def _run_case(
     gold_store: GoldStore,
     *,
     model: str | None,
+    variant: AblationVariant,
+    config_hash: str,
 ) -> CaseResult:
     adapter_result = build_incident_input(public_case)
     incident = adapter_result.incident
@@ -298,6 +326,8 @@ def _run_case(
         instance_id=case.instance_id,
         repo=case.repo,
         base_commit=case.base_commit,
+        variant=variant.value,
+        config_hash=config_hash,
         status=outcome.status,
         error=outcome.error,
         rca_errors=list(outcome.errors),
@@ -316,6 +346,9 @@ def _error_case_result(
     public_case: PublicCase,
     gold_store: GoldStore,
     exc: Exception,
+    *,
+    variant: AblationVariant,
+    config_hash: str,
 ) -> CaseResult:
     try:
         gold_files = gold_store.gold_files(case.instance_id)
@@ -333,6 +366,8 @@ def _error_case_result(
         instance_id=case.instance_id,
         repo=case.repo,
         base_commit=case.base_commit,
+        variant=variant.value,
+        config_hash=config_hash,
         status="error",
         error=_bounded_error(str(exc)),
         gold_files=gold_files,
@@ -351,8 +386,11 @@ def _write_case_result(case_dir: Path, result: CaseResult) -> None:
 def _load_existing_results(
     output_dir: Path,
     cases: list[ManifestCase],
+    *,
+    variant: AblationVariant,
+    config_hash: str,
 ) -> dict[str, CaseResult]:
-    """Load persisted completed results for ``--resume``."""
+    """Load persisted completed results matching the current variant/config."""
     results: dict[str, CaseResult] = {}
     for case in cases:
         result_path = output_dir / "cases" / case.instance_id / RESULT_FILE
@@ -363,7 +401,11 @@ def _load_existing_results(
             result = CaseResult.model_validate(raw)
         except (OSError, json.JSONDecodeError, ValidationError):
             continue
-        if result.status == "completed":
+        if (
+            result.status == "completed"
+            and result.variant == variant.value
+            and result.config_hash == config_hash
+        ):
             results[case.instance_id] = result
     return results
 
@@ -385,6 +427,110 @@ def _dry_run(
         )
     print(f"DRY RUN: {len(selected)} case(s) ready; no files were written")
     return 0
+
+
+def _build_ablation_config(
+    args: argparse.Namespace,
+    manifest: RcaManifest,
+    manifest_path: Path,
+    selected: list[ManifestCase],
+) -> AblationConfig:
+    """Build the effective ablation config from CLI args and optional JSON."""
+    base: dict = {}
+    if args.ablation_config is not None:
+        config_path = Path(args.ablation_config).expanduser().resolve()
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("ablation config must be a JSON object")
+        base.update(raw)
+    base["variant"] = AblationVariant(args.variant).value
+    base["model"] = args.model
+    base["manifest_name"] = manifest.name
+    base["manifest_sha256"] = manifest_sha256(manifest_path)
+    base["history_corpus"] = args.history_corpus
+    base["history_index"] = args.history_index
+    base["max_cases"] = args.max_cases
+    base["history_excluded_ids"] = sorted(
+        {case.instance_id for case in selected}
+    )
+    return AblationConfig(**base)
+
+
+def _build_retriever(config: AblationConfig):
+    """Build a historical retriever when corpus/index are configured."""
+    if not config.history_corpus:
+        return None
+    corpus_path = Path(config.history_corpus).expanduser().resolve()
+    if not corpus_path.is_file():
+        print(
+            "warning: history corpus configured but not found; "
+            "retrieval variant will run without hints",
+            file=sys.stderr,
+        )
+        return None
+    from patchpilot.rca.history import (
+        HistoricalRetriever,
+        build_history_index,
+        build_tfidf,
+        import_corpus,
+    )
+    from patchpilot.rca.history.retrieval import case_text
+
+    corpus = import_corpus(corpus_path, split="historical")
+    if config.history_index:
+        from patchpilot.rca.history.schema import HistoryIndex
+
+        index = HistoryIndex.model_validate_json(
+            Path(config.history_index).expanduser().resolve().read_text(
+                encoding="utf-8"
+            )
+        )
+    else:
+        tfidf = build_tfidf([case_text(case) for case in corpus.cases])
+        clustering = config.variant != AblationVariant.CLUSTERING_OFF
+        index = build_history_index(
+            corpus,
+            tfidf,
+            seed=42,
+            clustering=clustering,
+        )
+    return HistoricalRetriever(corpus, index, top_k=config.retrieval_top_k)
+
+
+def _make_run_client(
+    settings: VariantSettings,
+    config: AblationConfig,
+) -> RootTraceClient:
+    """Build the RootTrace client for one ablation variant."""
+    if settings.deterministic:
+        from evaluation.rca.baseline import DeterministicBaselineClient
+
+        return DeterministicBaselineClient()
+    retriever = None
+    retrieval_mode = settings.retrieval_mode
+    if settings.retrieval_mode != "off":
+        retriever = _build_retriever(config)
+        if retriever is None:
+            retrieval_mode = "off"
+    return InProcessRootTraceClient(
+        enabled_roles=frozenset(settings.enabled_roles) or None,
+        retrieval_mode=retrieval_mode,
+        retriever=retriever,
+        history_excluded_ids=frozenset(config.history_excluded_ids),
+        worker_concurrency=config.worker_concurrency,
+    )
+
+
+def _write_variant_config(output_dir: Path, config: AblationConfig) -> Path:
+    """Persist the effective variant config for reproducibility."""
+    payload = config.model_dump(mode="json")
+    payload["config_hash"] = config.config_hash()
+    path = output_dir / "variant.json"
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _print_summary(metrics) -> None:
@@ -413,7 +559,8 @@ def run_from_args(
     repo_cache = Path(args.repo_cache or data_root / "repos").expanduser().resolve()
     gold_path = Path(args.gold_path or data_root / GOLD_METADATA).expanduser().resolve()
     public_path = data_root / PUBLIC_METADATA
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    variant = AblationVariant(args.variant)
+    settings = variant_settings(variant)
 
     try:
         manifest = load_manifest(manifest_path)
@@ -443,25 +590,52 @@ def run_from_args(
         if args.max_cases is not None
         else list(manifest.instances)
     )
-    config = EvalRunConfig(
-        model=args.model,
+    try:
+        ablation = _build_ablation_config(args, manifest, manifest_path, selected)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"evaluation error: invalid ablation config: {exc}", file=sys.stderr)
+        return 2
+    eval_config = EvalRunConfig(
+        model=ablation.model,
         manifest_name=manifest.name,
-        manifest_sha256=manifest_sha256(manifest_path),
+        manifest_sha256=ablation.manifest_sha256,
         seed=manifest.seed,
-        max_cases=args.max_cases,
+        max_cases=ablation.max_cases,
         resume=args.resume,
+        variant=ablation.variant.value,
+        config_hash=ablation.config_hash(),
+        budgets=ablation.budgets.model_dump(mode="json"),
+        history_corpus=ablation.history_corpus,
+        root_trace_mode=(
+            "deterministic_baseline" if settings.deterministic else "in_process"
+        ),
     )
 
     if args.dry_run:
         return _dry_run(selected, repo_cache)
 
+    output_dir = (
+        OUTPUT_ROOT / f"rca-eval-{variant.value}"
+        if args.output_dir is None
+        else Path(args.output_dir).expanduser().resolve()
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_variant_config(output_dir, ablation)
+
     results: dict[str, CaseResult] = {}
     if args.resume:
-        results = _load_existing_results(output_dir, selected)
+        results = _load_existing_results(
+            output_dir,
+            selected,
+            variant=variant,
+            config_hash=ablation.config_hash(),
+        )
         if results:
             print(f"resume: skipping {len(results)} completed case(s)")
 
-    active_client = client if client is not None else InProcessRootTraceClient()
+    active_client = (
+        client if client is not None else _make_run_client(settings, ablation)
+    )
     gold_store = GoldStore(gold_path)
     for case in selected:
         case_id = case.instance_id
@@ -481,17 +655,26 @@ def run_from_args(
                     case_dir,
                     gold_store,
                     model=args.model,
+                    variant=variant,
+                    config_hash=ablation.config_hash(),
                 )
             finally:
                 destroy_case_workspace(workspace)
         except Exception as exc:  # noqa: BLE001 - a failing case must not abort the run
-            result = _error_case_result(case, public_case, gold_store, exc)
+            result = _error_case_result(
+                case,
+                public_case,
+                gold_store,
+                exc,
+                variant=variant,
+                config_hash=ablation.config_hash(),
+            )
         results[case_id] = result
         _write_case_result(case_dir, result)
         print(f"[{case_id}] status={result.status}")
 
     metrics = compute_eval_metrics(list(results.values()))
-    write_reports(output_dir, metrics, config)
+    write_reports(output_dir, metrics, eval_config)
     _print_summary(metrics)
     return 0
 
@@ -507,7 +690,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the evaluation runner CLI parser."""
     parser = argparse.ArgumentParser(
         prog="python -m evaluation.rca.runner",
-        description="SWE-bench-derived RCA evaluation pipeline (M9-A)",
+        description="SWE-bench-derived RCA benchmark runner (M9-A/M9-C)",
     )
     parser.add_argument(
         "--data-root",
@@ -536,8 +719,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="directory for per-case results and aggregate reports",
+        default=None,
+        help=(
+            "directory for per-case results and aggregate reports "
+            "(default: output/rca-eval-<variant>)"
+        ),
     )
     parser.add_argument(
         "--model",
@@ -558,7 +744,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="skip cases with a persisted completed result",
+        help="skip cases with a persisted completed result for this variant/config",
+    )
+    parser.add_argument(
+        "--variant",
+        default="three_specialists_retrieval_off",
+        choices=[variant.value for variant in AblationVariant],
+        help="ablation variant (default: three_specialists_retrieval_off)",
+    )
+    parser.add_argument(
+        "--ablation-config",
+        type=Path,
+        default=None,
+        help=(
+            "optional JSON file with shared ablation settings (budgets, "
+            "context limits, concurrency); --variant overrides its variant"
+        ),
+    )
+    parser.add_argument(
+        "--history-corpus",
+        default=None,
+        help="optional historical RCA corpus JSONL for retrieval variants",
+    )
+    parser.add_argument(
+        "--history-index",
+        default=None,
+        help="optional persisted history index JSON; built when omitted",
     )
     return parser
 

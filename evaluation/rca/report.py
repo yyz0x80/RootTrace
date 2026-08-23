@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from evaluation.rca.metrics import EvalMetrics
 
@@ -27,6 +27,10 @@ class EvalRunConfig(BaseModel):
     max_cases: int | None = None
     resume: bool = False
     root_trace_mode: str = "in_process"
+    variant: str = ""
+    config_hash: str = ""
+    budgets: dict = Field(default_factory=dict)
+    history_corpus: str | None = None
 
 
 def metrics_document(metrics: EvalMetrics, config: EvalRunConfig) -> dict:
@@ -68,6 +72,10 @@ def render_markdown(metrics: EvalMetrics, config: EvalRunConfig) -> str:
         f"| max cases | {_format_int(config.max_cases)} |",
         f"| resume | {'yes' if config.resume else 'no'} |",
         f"| root trace mode | {config.root_trace_mode} |",
+        f"| variant | {config.variant or 'n/a'} |",
+        f"| config hash | {config.config_hash or 'n/a'} |",
+        f"| budgets | {config.budgets or 'n/a'} |",
+        f"| history corpus | {config.history_corpus or 'n/a'} |",
         "",
         "## Aggregate metrics",
         "",

@@ -51,6 +51,8 @@ class CaseResult(BaseModel):
     status: CaseStatus
     error: str | None = None
     rca_errors: list[str] = Field(default_factory=list, max_length=20)
+    variant: str = ""
+    config_hash: str | None = None
     predicted_files: list[str] = Field(default_factory=list)
     gold_files: list[str] = Field(default_factory=list)
     metrics: CaseMetrics
