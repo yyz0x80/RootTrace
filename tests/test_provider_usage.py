@@ -166,8 +166,9 @@ def test_provider_accepts_explicit_credentials() -> None:
             base_url="https://explicit.com",
         )
 
-        mock_openai.assert_called_once_with(
-            api_key="explicit-key",
-            base_url="https://explicit.com"
-        )
-        assert provider.model == "gpt-4"
+    mock_openai.assert_called_once_with(
+        api_key="explicit-key",
+        base_url="https://explicit.com",
+        max_retries=0,
+    )
+    assert provider.model == "gpt-4"

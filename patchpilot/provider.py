@@ -14,7 +14,14 @@ from time import sleep
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    OpenAI,
+    OpenAIError,
+    RateLimitError,
+)
 
 from patchpilot.models import AssistantTurn, ToolCall
 
@@ -27,13 +34,13 @@ BACKOFF_CAP_SECONDS = 8.0
 MAX_RETRY_AFTER_SECONDS = 30.0
 
 
-def _retry_after_seconds(error: RateLimitError) -> float | None:
+def _retry_after_seconds(error: OpenAIError) -> float | None:
     """Return the server-requested retry delay in seconds, when advertised.
 
     OpenAI-compatible providers may include a ``Retry-After`` header (delta
-    seconds or an HTTP date) on 429 responses. Honoring it avoids retrying
-    too early; a missing or unparsable header returns ``None`` so the caller
-    falls back to jittered exponential backoff.
+    seconds or an HTTP date) on 429 or 5xx responses. Honoring it avoids
+    retrying too early; a missing or unparsable header returns ``None`` so the
+    caller falls back to jittered exponential backoff.
     """
     response = getattr(error, "response", None)
     headers = getattr(error, "headers", None) or getattr(response, "headers", None)
@@ -66,7 +73,7 @@ def _retry_delay_seconds(
     retry_after_seconds: float | None = None,
     rng: random.Random | None = None,
 ) -> float:
-    """Compute a bounded, jittered delay before the next rate-limit retry.
+    """Compute a bounded, jittered delay before the next transient retry.
 
     A server-provided ``Retry-After`` value takes precedence and is capped to
     keep total retry time bounded. Otherwise the delay uses capped exponential
@@ -78,6 +85,20 @@ def _retry_delay_seconds(
     backoff = min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * (2**attempt))
     rng = rng or random
     return rng.uniform(0.0, backoff)
+
+
+def _is_retryable(error: OpenAIError) -> bool:
+    """Return whether a provider error is transient and safe to retry.
+
+    Rate limits (429), connection failures, request timeouts, and server-side
+    (5xx) errors may succeed on a later attempt. Client errors (4xx) and other
+    terminal failures must surface immediately instead of burning retry budget.
+    """
+    if isinstance(error, (RateLimitError, APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(error, APIStatusError):
+        return error.status_code >= 500
+    return False
 
 
 class ToolCallParseError(Exception):
@@ -92,7 +113,8 @@ class LLMProvider:
     - API authentication and configuration
     - Message and tool conversion
     - Response parsing and tool call extraction
-    - Error handling and retries for rate limits
+    - Error handling and retries for transient failures (rate limits,
+      connection errors, timeouts, and server errors)
     """
 
     def __init__(
@@ -108,7 +130,8 @@ class LLMProvider:
             model: Optional model identifier.
             api_key: Optional API key. If not provided, reads from ZHIPU_API_KEY.
             base_url: Optional API base URL. If not provided, reads from PATCHPILOT_BASE_URL.
-            max_retries: Total completion attempts for rate-limited requests.
+            max_retries: Total completion attempts for retryable transient
+                failures (rate limits, connection errors, timeouts, 5xx).
 
         Raises:
             ValueError: If API key or base URL cannot be determined.
@@ -131,7 +154,13 @@ class LLMProvider:
                 "Model is required through --model or PATCHPILOT_MODEL"
             )
 
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # The provider owns the retry policy, so SDK-internal retries are
+        # disabled to keep attempt counts and timing deterministic/auditable.
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+        )
         self._model = configured_model
         self._max_retries = max_retries
         self._llm_call_count = 0
@@ -210,8 +239,8 @@ class LLMProvider:
 
         Raises:
             ToolCallParseError: If tool call arguments cannot be parsed as JSON
-            OpenAIError: For API errors after retries are exhausted; rate-limited
-                requests retry with Retry-After or jittered exponential backoff
+            OpenAIError: For retryable API errors after all attempts are
+                exhausted; non-retryable errors raise immediately
         """
         last_error = None
 
@@ -272,22 +301,28 @@ class LLMProvider:
                     reasoning_tokens=reasoning_tokens,
                 )
 
-            except RateLimitError as e:
+            except OpenAIError as e:
+                if not _is_retryable(e):
+                    raise
                 last_error = e
                 if attempt >= self._max_retries - 1:
-                    raise OpenAIError(
-                        f"Rate limit exceeded after {self._max_retries} attempts"
-                    ) from e
+                    if isinstance(e, RateLimitError):
+                        message = (
+                            f"Rate limit exceeded after "
+                            f"{self._max_retries} attempts"
+                        )
+                    else:
+                        message = (
+                            f"{type(e).__name__} persisted after "
+                            f"{self._max_retries} attempts"
+                        )
+                    raise OpenAIError(message) from e
                 sleep(
                     _retry_delay_seconds(
                         attempt,
                         retry_after_seconds=_retry_after_seconds(e),
                     )
                 )
-
-            except OpenAIError:
-                # Non-rate-limit errors are not retried
-                raise
 
         # This should not be reached, but kept for type safety
         raise OpenAIError("Unexpected error in completion logic") from last_error

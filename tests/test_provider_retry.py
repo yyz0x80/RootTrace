@@ -6,7 +6,14 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from openai import OpenAIError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    BadRequestError,
+    OpenAIError,
+    RateLimitError,
+)
 from test_provider_usage import make_provider, response_with_usage
 
 from patchpilot.provider import (
@@ -90,7 +97,7 @@ def test_retry_after_header_is_capped() -> None:
     assert sleeper.call_args_list[0].args == (MAX_RETRY_AFTER_SECONDS,)
 
 
-def test_non_rate_limit_errors_are_not_retried() -> None:
+def test_non_retryable_errors_are_not_retried() -> None:
     provider = make_provider([OpenAIError("boom")])
     with (
         patch("patchpilot.provider.sleep") as sleeper,
@@ -98,6 +105,129 @@ def test_non_rate_limit_errors_are_not_retried() -> None:
     ):
         provider.complete(messages=[], tools=[])
     assert sleeper.call_count == 0
+
+
+def _request() -> httpx.Request:
+    return httpx.Request("POST", "https://example.com/chat/completions")
+
+
+def _connection_error() -> APIConnectionError:
+    return APIConnectionError(request=_request())
+
+
+def _status_error(
+    status_code: int,
+    headers: dict | None = None,
+) -> APIStatusError:
+    response = httpx.Response(
+        status_code,
+        request=_request(),
+        headers=headers or {},
+    )
+    return APIStatusError("upstream error", response=response, body=None)
+
+
+def test_connection_error_retries_then_succeeds() -> None:
+    provider = make_provider(
+        [
+            _connection_error(),
+            _connection_error(),
+            response_with_usage(5, 2),
+        ]
+    )
+    with (
+        patch("patchpilot.provider.random") as rng,
+        patch("patchpilot.provider.sleep") as sleeper,
+    ):
+        rng.uniform.side_effect = [0.1, 0.2]
+        turn = provider.complete(messages=[], tools=[])
+
+    assert turn.content == "done"
+    assert provider.llm_call_count == 1
+    create = provider._client.chat.completions.create
+    assert create.call_count == 3
+    assert sleeper.call_count == 2
+    assert sleeper.call_args_list[0].args == (0.1,)
+
+
+def test_connection_error_exhaustion_raises_openai_error() -> None:
+    provider = make_provider(
+        [_connection_error(), _connection_error(), _connection_error()]
+    )
+    with (
+        patch("patchpilot.provider.random.uniform", return_value=0.0),
+        patch("patchpilot.provider.sleep") as sleeper,
+        pytest.raises(
+            OpenAIError,
+            match="APIConnectionError persisted after 3 attempts",
+        ),
+    ):
+        provider.complete(messages=[], tools=[])
+    assert sleeper.call_count == 2
+
+
+def test_timeout_error_retries_then_succeeds() -> None:
+    provider = make_provider(
+        [APITimeoutError(request=_request()), response_with_usage(1, 1)]
+    )
+    with (
+        patch("patchpilot.provider.random.uniform", return_value=0.0),
+        patch("patchpilot.provider.sleep") as sleeper,
+    ):
+        turn = provider.complete(messages=[], tools=[])
+
+    assert turn.content == "done"
+    assert provider.llm_call_count == 1
+    create = provider._client.chat.completions.create
+    assert create.call_count == 2
+    assert sleeper.call_count == 1
+
+
+def test_server_error_retries_then_succeeds() -> None:
+    provider = make_provider([_status_error(503), response_with_usage(1, 1)])
+    with (
+        patch("patchpilot.provider.random.uniform", return_value=0.0),
+        patch("patchpilot.provider.sleep") as sleeper,
+    ):
+        turn = provider.complete(messages=[], tools=[])
+
+    assert turn.content == "done"
+    create = provider._client.chat.completions.create
+    assert create.call_count == 2
+    assert sleeper.call_count == 1
+
+
+def test_server_error_retry_after_header_is_honored() -> None:
+    provider = make_provider(
+        [_status_error(503, {"Retry-After": "12"}), response_with_usage(1, 1)]
+    )
+    with patch("patchpilot.provider.sleep") as sleeper:
+        provider.complete(messages=[], tools=[])
+    assert sleeper.call_args_list[0].args == (12.0,)
+
+
+def test_client_error_raises_immediately() -> None:
+    response = httpx.Response(400, request=_request())
+    error = BadRequestError("bad request", response=response, body=None)
+    provider = make_provider([error])
+    with (
+        patch("patchpilot.provider.sleep") as sleeper,
+        pytest.raises(BadRequestError, match="bad request"),
+    ):
+        provider.complete(messages=[], tools=[])
+    create = provider._client.chat.completions.create
+    assert create.call_count == 1
+    assert sleeper.call_count == 0
+
+
+def test_provider_disables_sdk_retries() -> None:
+    with patch("patchpilot.provider.OpenAI") as mock_openai:
+        LLMProvider(
+            model="m",
+            api_key="k",
+            base_url="https://example.com",
+        )
+    assert mock_openai.call_args.kwargs["max_retries"] == 0
 
 
 def test_retry_delay_uses_capped_jittered_backoff() -> None:
