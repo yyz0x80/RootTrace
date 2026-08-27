@@ -40,11 +40,39 @@ Specialist   Specialist     Specialist
 
 ## Quick Start
 
+Create an environment, install RootTrace, and configure an OpenAI-compatible
+model provider. The repository includes an environment template for the
+default Zhipu endpoint:
+
 ```bash
-roottrace rca --repo /path/to/repo --issue issue.md --model <model> --output-dir output/roottrace-demo
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+cp .env.example .env
 ```
 
-Optional inputs: `--stack-trace`, `--ci-log`, `--pr-diff`.
+Edit `.env` and replace `your_api_key` with a valid key. Set
+`ROOTTRACE_BASE_URL` and `ROOTTRACE_MODEL` to match the provider and model you
+intend to use. The target repository must also have its own test dependencies
+installed because runtime verification runs its tests in an ephemeral copy.
+
+Run an analysis with a local Issue-style Markdown or JSON file:
+
+```bash
+roottrace rca \
+  --repo /path/to/repo \
+  --issue /path/to/issue.md \
+  --model glm-4.7-flash \
+  --output-dir output/roottrace-demo
+```
+
+`--model` can be omitted when `ROOTTRACE_MODEL` is set in `.env`. Optional
+evidence files can be supplied with `--stack-trace`, `--ci-log`, and
+`--pr-diff`.
+
+The command writes the RCA report and supporting artifacts to the output
+directory, including `rca_report.md`, `rca_report.json`, and
+`evidence_graph.json`.
 
 ## Evaluation
 
