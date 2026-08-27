@@ -8,3 +8,4 @@ __pycache__/
 /.roottrace/
 evaluation/.DS_Store
 .DS_Store
+docs/
