@@ -4,12 +4,12 @@ RootTrace is an evidence-grounded, multi-agent Root Cause Analysis (RCA) system 
 
 RootTrace answers: **what failed, where the likely root cause is, why it happened, and what evidence supports that conclusion**. RCA mode may recommend a fix scope, but it must not edit, patch, commit, push, or open a PR against the analyzed repository.
 
-The repository evolved from PatchPilot. During the Demo MVP, the internal Python package and CLI namespace may remain `patchpilot` for compatibility. User-facing RCA artifacts and documentation use RootTrace. Package renaming is a separate migration.
+RootTrace is not a general chatbot, autonomous repair agent, pull-request
+reviewer, hosted GitHub App, or production incident-management platform.
 
-RootTrace is not a general chatbot, autonomous repair agent, PR reviewer, hosted GitHub App, or production incident-management platform in the MVP.
+## 2. Supported RCA Workflow
 
-## 2. Demo MVP Objective
-The Resume Demo MVP must:
+The local RCA workflow must:
 1. Accept local GitHub Issue-style Markdown/JSON and a local Python repo.
 2. Build deterministic, bounded context before model calls.
 3. Use one Lead Agent to plan the investigation.
@@ -23,17 +23,18 @@ The Resume Demo MVP must:
 8. Let the Lead select supported causes, retain uncertainty, and produce an RCA report.
 9. Optionally retrieve similar historical RCA cases through shared memory/retrieval; retrieval is infrastructure, not a fourth evidence Agent.
 10. Emit JSON/Markdown reports, per-agent artifacts, trace, timing, and provider usage.
-11. Evaluate file localization on a reproducible 50-case development subset before the full SWE-bench Verified 500.
+11. Evaluate file localization on a reproducible 50-case development subset
+    before any full SWE-bench Verified 500-case run.
 
 The original analyzed repository is always read-only. Runtime verification may write only inside a disposable sandbox copy destroyed after the run.
 
-## 3. Repository Boundaries
+## 3. Repository Structure and Boundaries
 ```text
 RootTrace/
-├── patchpilot/      # compatibility package; RCA code under patchpilot/rca/
-├── tests/           # RootTrace tests; writable
-├── evaluation/      # RCA evaluation harness/manifests
-├── docs/
+├── roottrace/      # RootTrace package; RCA code under roottrace/rca/
+├── tests/          # RootTrace tests; writable
+├── evaluation/     # RCA evaluation harness/manifests
+├── docs/           # design and evaluation documentation
 ├── pyproject.toml
 └── AGENTS.md
 ```
@@ -45,7 +46,7 @@ Rules:
 - Preserve unrelated user changes in a dirty worktree.
 - Do not package datasets, outputs, caches, secrets, or benchmark workspaces.
 
-## 4. MVP Scope
+## 4. Supported Scope
 In scope:
 - Python repositories and local Issue Markdown/JSON.
 - Optional stack trace, CI log, and PR diff/context.
@@ -63,7 +64,7 @@ Out of scope unless explicitly requested:
 - Editing/patching the analyzed repository or generating executable patches.
 - Automatic commits, pushes, merges, PR comments, or PR creation.
 - Hosted GitHub App, webhooks, queues, databases, or Web UI.
-- Live GitHub/API ingestion in the first vertical slice.
+- Live GitHub/API ingestion.
 - Multi-language support, mandatory LSP, full code-property graphs, or fine-tuning.
 - Claiming unmeasured RCA accuracy, latency, token, or retrieval improvements.
 
@@ -169,7 +170,7 @@ Capture target fingerprint/Git status before and after each run. A successful RC
 ## 8. Token, Context, and Concurrency Policy
 - Send ranked snippets, never whole repos or unbounded Git history.
 - Deduplicate shared snippets; cap candidates, excerpts, history, and Top-K cases.
-- Run at most three concurrent evidence Specialists in the MVP.
+- Run at most three concurrent evidence Specialists.
 - Prefer deterministic tools over extra model turns.
 - Record exact usage when returned; otherwise record `null`.
 - Record wall-clock, model-call, and verification durations separately.
@@ -198,12 +199,12 @@ Hold model, prompts, budgets, concurrency, and manifest constant between compara
 
 ## 10. Development and Testing
 Before editing:
-1. Read this file and the relevant milestone in `docs/rca-demo-mvp-plan.md`.
+1. Read this file and the relevant design or evaluation documentation.
 2. Inspect relevant code/tests and preserve unrelated changes.
 3. Prefer a working vertical slice over placeholder abstractions.
 
 During implementation:
-- Add RCA code under `patchpilot/rca/`.
+- Add RCA code under `roottrace/rca/`.
 - Reuse Provider, Workspace, trace, and config seams where practical.
 - Keep deterministic collection separate from LLM reasoning.
 - Type public APIs; use Pydantic for persisted schemas and `pathlib.Path`.
@@ -214,14 +215,17 @@ Tests must cover schema integrity, role isolation, true concurrency, determinist
 Run focused tests first, then when practical:
 ```bash
 python -m pytest tests -q
-ruff check patchpilot tests evaluation
+ruff check roottrace tests evaluation
 git diff --check
 git status --short
 ```
 Never weaken tests to hide defects.
 
 ## 11. Packaging, Artifacts, and Git
-The package remains `patchpilot` during the Demo MVP. Exclude tests, datasets, benchmark repos, outputs, caches, and model artifacts from package discovery.
+The distribution is `roottrace`; package discovery includes `roottrace*`
+only, and the console script is `roottrace = roottrace.cli:main`. Exclude
+tests, datasets, benchmark repositories, outputs, caches, and model artifacts
+from package discovery.
 
 ```text
 <output-dir>/
@@ -239,9 +243,13 @@ The package remains `patchpilot` during the Demo MVP. Exclude tests, datasets, b
 
 Artifacts must be bounded, secret-free, deterministic where order is irrelevant, and explicit about model ID, base commit, config, timing, usage, and partial failures.
 
-Keep Git changes focused. Do not rewrite history, force-push, auto-push, commit generated data, or mix package renaming with RCA features. Prefer `feat(rca):`, `fix(rca):`, `test(rca):`, `docs(rca):`, and `refactor(rca):`.
+Keep Git changes focused. Do not rewrite history, force-push, auto-push, or
+commit generated data. Prefer `feat(rca):`, `fix(rca):`, `test(rca):`,
+`docs(rca):`, and `refactor(rca):`.
 
-## 12. Definition of Done
-A milestone is complete only when its vertical behavior works, the original target is unchanged, sandbox writes are isolated, persisted outputs validate, conclusions are evidence-linked or explicitly uncertain, relevant tests/Ruff pass, usage/failures are honest, and the diff contains no unrelated migration/generated data.
-
-The Resume Demo MVP is complete only after a reproducible 50-case evaluation and required ablations exist. Resume percentages must come from generated reports, never estimates.
+## 12. Completion Criteria
+A RootTrace run is complete only when its vertical behavior works, the
+original target is unchanged, sandbox writes are isolated, persisted outputs
+validate, conclusions are evidence-linked or explicitly uncertain, relevant
+tests and Ruff checks pass, usage and failures are honest, and the diff
+contains no unrelated or generated data.

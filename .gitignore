@@ -3,10 +3,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
-/patchpilot/docs
 *.egg-info/
 /evaluation/runs/
-/.patchpilot
+/.roottrace/
 evaluation/.DS_Store
 .DS_Store
-patchpilot/.patchpilot/models.json

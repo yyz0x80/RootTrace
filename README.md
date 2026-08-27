@@ -41,17 +41,15 @@ Specialist   Specialist     Specialist
 ## Quick Start
 
 ```bash
-patchpilot rca --repo /path/to/repo --issue issue.md --model <model> --output-dir output/roottrace-demo
+roottrace rca --repo /path/to/repo --issue issue.md --model <model> --output-dir output/roottrace-demo
 ```
 
 Optional inputs: `--stack-trace`, `--ci-log`, `--pr-diff`.
 
 ## Evaluation
 
-RootTrace derives file-localization metrics from SWE-bench Verified gold patches, including **Top-1 File Accuracy** and **Recall@K**. The MVP uses a fixed 50-case development subset before any full 500-case run.
+RootTrace derives file-localization metrics from SWE-bench Verified gold patches, including **Top-1 File Accuracy** and **Recall@K**. The evaluation workflow uses a fixed 50-case development subset before any full 500-case run.
 
 ## Scope
 
 RootTrace diagnoses and recommends a fix scope, but does **not** edit code, generate/apply patches, commit, push, merge, or open PRs in RCA mode.
-
-The internal Python package may remain `patchpilot` during the MVP for compatibility; the user-facing project name is **RootTrace**.

@@ -1,14 +1,14 @@
 [project]
-name = "patchpilot"
+name = "roottrace"
 version = "0.1.0"
-description = "A minimal Issue-to-Patch coding agent"
+description = "Evidence-grounded multi-agent Root Cause Analysis for Python repositories"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=2.0,<3",
-    "anthropic>=0.40.0",
+    "numpy>=1.26,<3",
     "python-dotenv>=1.0,<2",
     "pydantic>=2.0,<3",
-    "rich>=13.0,<15"
+    "scikit-learn>=1.5,<2"
 ]
 
 [project.optional-dependencies]
@@ -18,7 +18,7 @@ dev = [
 ]
 
 [project.scripts]
-patchpilot = "patchpilot.cli:main"
+roottrace = "roottrace.cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -26,6 +26,5 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["patchpilot*"]
-exclude = ["demo_repo*", "tests*"]
+include = ["roottrace*"]
 namespaces = false

@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -89,9 +88,3 @@ def git_repo(tmp_path: Path) -> GitRepoFixture:
     _git(repo, "commit", "-qm", "fix multiply")
     head_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     return GitRepoFixture(repo=repo, base_sha=base_sha, head_sha=head_sha)
-
-
-@pytest.fixture
-def sandbox_mock() -> MagicMock:
-    """Create a mock DockerSandbox for testing."""
-    return MagicMock()
