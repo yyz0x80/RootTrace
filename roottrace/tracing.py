@@ -74,6 +74,7 @@ class TraceEvent(BaseModel):
         modified_files: List of files modified by this event.
         round_number: Agent round associated with a tool event.
         verification_result: Detailed verification command results.
+        degradation: Structured metadata when a bounded fallback was used.
         retry_count: Number of retry attempts for this operation.
         final_status: Final status of the operation (e.g., "SUCCESS", "FAILURE").
         prompt_tokens: Number of prompt tokens used (for model events).
@@ -95,6 +96,7 @@ class TraceEvent(BaseModel):
     modified_files: list[str] = Field(default_factory=list)
     round_number: int | None = None
     verification_result: dict[str, Any] | None = None
+    degradation: dict[str, Any] | None = None
     retry_count: int = 0
     final_status: str | None = None
     prompt_tokens: int | None = None
@@ -146,6 +148,8 @@ class TraceWriter:
         """
         if event.tool_arguments is not None:
             event.tool_arguments = summarize_tool_arguments(event.tool_arguments)
+        if event.degradation is not None:
+            event.degradation = summarize_tool_arguments(event.degradation)
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as stream:

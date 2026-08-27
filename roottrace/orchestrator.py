@@ -206,6 +206,16 @@ class RcaOrchestrator:
                 final_status="FAILED",
             )
             raise
+        if lead.degradation is not None:
+            self._trace(
+                writer,
+                incident.id,
+                "planning_degraded",
+                self._lead_provider.model,
+                final_status="DEGRADED",
+                retry_count=lead.degradation.repair_attempts,
+                degradation=lead.degradation.model_dump(mode="json"),
+            )
         self._trace(
             writer,
             incident.id,
@@ -572,6 +582,8 @@ class RcaOrchestrator:
         final_status: str | None = None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        retry_count: int = 0,
+        degradation: dict[str, Any] | None = None,
     ) -> None:
         if writer is None:
             return
@@ -584,5 +596,7 @@ class RcaOrchestrator:
                 final_status=final_status,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                retry_count=retry_count,
+                degradation=degradation,
             )
         )

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from roottrace.agents import PlanError
-from roottrace.agents.schema import PlanBudgets
+from roottrace.agents.schema import MAX_QUESTIONS, PlanBudgets
 from roottrace.evidence.schema import (
     AgentRole,
     FindingStatus,
@@ -90,6 +90,19 @@ PLAN_JSON = json.dumps(
                 "text": "which change is suspected?",
                 "assigned_agents": ["git_history"],
             },
+        ]
+    }
+)
+
+OVER_LIMIT_PLAN_JSON = json.dumps(
+    {
+        "questions": [
+            {
+                "id": f"q-code-{index:03d}",
+                "text": f"which code evidence answers question {index}?",
+                "assigned_agents": ["code"],
+            }
+            for index in range(1, MAX_QUESTIONS + 2)
         ]
     }
 )
@@ -488,6 +501,49 @@ def test_artifacts_are_persisted(git_repo, tmp_path: Path) -> None:
     assert any("planning_end" in line for line in trace_lines)
     assert any("code_start" in line for line in trace_lines)
     assert any("hypotheses_end" in line for line in trace_lines)
+
+
+def test_planning_fallback_records_degradation_trace(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "degraded-out"
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        lead_responses=[
+            turn(OVER_LIMIT_PLAN_JSON),
+            turn(OVER_LIMIT_PLAN_JSON),
+            turn(HYPOTHESES_JSON),
+        ],
+    )
+
+    result = orchestrator.run(
+        make_loaded(git_repo),
+        git_repo.repo,
+        output_dir=output_dir,
+    )
+
+    assert len(result.plan.questions) == MAX_QUESTIONS
+    trace_events = [
+        json.loads(line)
+        for line in (output_dir / "execution_trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    degraded = next(
+        event
+        for event in trace_events
+        if event["event_type"] == "planning_degraded"
+    )
+    assert degraded["final_status"] == "DEGRADED"
+    assert degraded["retry_count"] == 1
+    assert degraded["degradation"] == {
+        "reason": "question_limit_exceeded",
+        "original_question_count": MAX_QUESTIONS + 1,
+        "retained_question_count": MAX_QUESTIONS,
+        "repair_attempts": 1,
+    }
 
 
 def test_bounded_error_respects_limit_including_ellipsis() -> None:

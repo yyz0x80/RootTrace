@@ -336,7 +336,7 @@ def test_lead_planner_repairs_over_limit_plan(rca_env) -> None:
     assert "at most 10 items" in repair_prompt
 
 
-def test_lead_planner_rejects_persistently_over_limit_plan(rca_env) -> None:
+def test_lead_planner_truncates_persistently_over_limit_plan(rca_env) -> None:
     provider = FakeProvider(
         turn(content=plan_response(MAX_QUESTIONS + 3)),
         turn(content=plan_response(MAX_QUESTIONS + 1)),
@@ -347,10 +347,37 @@ def test_lead_planner_rejects_persistently_over_limit_plan(rca_env) -> None:
         budgets=rca_env["budgets"],
     )
 
-    with pytest.raises(PlanError, match="at most 10 items"):
-        planner.run(rca_env["context"])
+    plan = planner.run(rca_env["context"])
 
+    assert len(plan.questions) == MAX_QUESTIONS
+    assert [question.id for question in plan.questions] == [
+        f"q-{index:03d}" for index in range(1, MAX_QUESTIONS + 1)
+    ]
     assert len(provider.calls) == 2
+    assert planner.degradation is not None
+    assert planner.degradation.reason == "question_limit_exceeded"
+    assert planner.degradation.original_question_count == MAX_QUESTIONS + 1
+    assert planner.degradation.retained_question_count == MAX_QUESTIONS
+    assert planner.degradation.repair_attempts == 1
+
+
+def test_lead_planner_falls_back_when_repair_is_malformed(rca_env) -> None:
+    provider = FakeProvider(
+        turn(content=plan_response(MAX_QUESTIONS + 3)),
+        turn(content="not json"),
+    )
+    planner = LeadPlanner(
+        provider=provider,
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    )
+
+    plan = planner.run(rca_env["context"])
+
+    assert len(plan.questions) == MAX_QUESTIONS
+    assert planner.degradation is not None
+    assert planner.degradation.original_question_count == MAX_QUESTIONS + 3
+    assert planner.degradation.repair_attempts == 1
 
 
 def test_issue_ci_seeds_incident_evidence(rca_env) -> None:

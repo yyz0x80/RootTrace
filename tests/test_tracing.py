@@ -124,6 +124,7 @@ class TestTraceEvent:
             permission_result="ALLOWED",
             modified_files=["src/main.py"],
             verification_result={"ruff": True, "pytest": True},
+            degradation={"reason": "bounded_fallback"},
             retry_count=1,
             final_status="SUCCESS",
             prompt_tokens=100,
@@ -140,6 +141,7 @@ class TestTraceEvent:
         assert event.permission_result == "ALLOWED"
         assert event.modified_files == ["src/main.py"]
         assert event.verification_result == {"ruff": True, "pytest": True}
+        assert event.degradation == {"reason": "bounded_fallback"}
         assert event.retry_count == 1
         assert event.final_status == "SUCCESS"
         assert event.prompt_tokens == 100

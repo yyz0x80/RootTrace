@@ -1,9 +1,14 @@
 """Lead investigation planning agent."""
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from roottrace.agents.prompts import LEAD_SYSTEM_PROMPT, build_lead_prompt
-from roottrace.agents.schema import InvestigationPlan, PlanBudgets, PlanQuestion
+from roottrace.agents.schema import (
+    MAX_QUESTIONS,
+    InvestigationPlan,
+    PlanBudgets,
+    PlanQuestion,
+)
 from roottrace.agents.specialists import ProviderProtocol, extract_json_object
 from roottrace.evidence.schema import AgentRole
 from roottrace.incident.context import IncidentContext
@@ -16,6 +21,15 @@ class PlanError(Exception):
 
 MAX_PLANNING_ATTEMPTS = 2
 MAX_FEEDBACK_CHARS = 2_000
+
+
+class PlanningDegradation(BaseModel):
+    """Structured audit metadata for a deterministic planning fallback."""
+
+    reason: str
+    original_question_count: int = Field(gt=0)
+    retained_question_count: int = Field(gt=0)
+    repair_attempts: int = Field(ge=0)
 
 
 def _repair_feedback(error: Exception) -> str:
@@ -50,11 +64,19 @@ class LeadPlanner:
         self._usage = usage
         self._budgets = budgets
         self._max_attempts = min(max_attempts, budgets.max_llm_calls)
+        self._degradation: PlanningDegradation | None = None
+
+    @property
+    def degradation(self) -> PlanningDegradation | None:
+        """Return fallback metadata when the accepted plan was degraded."""
+        return self._degradation
 
     def run(self, context: IncidentContext) -> InvestigationPlan:
         """Produce a validated plan, with one bounded repair retry by default."""
+        self._degradation = None
         prompt = build_lead_prompt(context)
         last_error: Exception | None = None
+        fallback_questions: list[PlanQuestion] | None = None
         for attempt in range(self._max_attempts):
             attempt_prompt = prompt
             if attempt > 0 and last_error is not None:
@@ -84,6 +106,8 @@ class LeadPlanner:
                 ]
                 if not questions:
                     raise ValueError("Lead plan contains no questions")
+                if len(questions) > MAX_QUESTIONS:
+                    fallback_questions = questions
                 return InvestigationPlan(
                     id=f"plan-{context.incident.id}",
                     incident_id=context.incident.id,
@@ -94,6 +118,25 @@ class LeadPlanner:
                 last_error = exc
                 if attempt < self._max_attempts - 1:
                     continue
+                if fallback_questions is not None:
+                    try:
+                        plan = InvestigationPlan(
+                            id=f"plan-{context.incident.id}",
+                            incident_id=context.incident.id,
+                            questions=fallback_questions[:MAX_QUESTIONS],
+                            budgets=self._budgets,
+                        )
+                    except ValidationError as fallback_error:
+                        raise PlanError(
+                            f"malformed Lead output: {fallback_error}"
+                        ) from fallback_error
+                    self._degradation = PlanningDegradation(
+                        reason="question_limit_exceeded",
+                        original_question_count=len(fallback_questions),
+                        retained_question_count=len(plan.questions),
+                        repair_attempts=attempt,
+                    )
+                    return plan
                 raise PlanError(f"malformed Lead output: {exc}") from exc
 
         raise PlanError("Lead produced no valid investigation plan")
