@@ -22,7 +22,7 @@ from roottrace.agents.prompts import (
     build_issue_ci_prompt,
     build_lead_prompt,
 )
-from roottrace.agents.schema import PlanBudgets, PlanQuestion
+from roottrace.agents.schema import MAX_QUESTIONS, PlanBudgets, PlanQuestion
 from roottrace.evidence.schema import (
     AgentRole,
     EvidenceKind,
@@ -97,6 +97,22 @@ def final_response(
             "evidence_ids": evidence_ids or [],
             "uncertainty": uncertainty,
             "uncertainty_note": note,
+        }
+    )
+
+
+def plan_response(question_count: int) -> str:
+    """Return a deterministic Lead planning response of the requested size."""
+    return json.dumps(
+        {
+            "questions": [
+                {
+                    "id": f"q-{index:03d}",
+                    "text": f"investigate evidence question {index}",
+                    "assigned_agents": ["code"],
+                }
+                for index in range(1, question_count + 1)
+            ]
         }
     )
 
@@ -288,7 +304,7 @@ def test_lead_planner_builds_validated_plan(rca_env) -> None:
 
 def test_lead_planner_rejects_malformed_output(rca_env) -> None:
     for content in ("not json", '{"questions": []}', '{"questions": "x"}'):
-        provider = FakeProvider(turn(content=content))
+        provider = FakeProvider(turn(content=content), turn(content=content))
         planner = LeadPlanner(
             provider=provider,
             usage=UsageTracker(),
@@ -296,6 +312,45 @@ def test_lead_planner_rejects_malformed_output(rca_env) -> None:
         )
         with pytest.raises(PlanError):
             planner.run(rca_env["context"])
+
+
+def test_lead_planner_repairs_over_limit_plan(rca_env) -> None:
+    provider = FakeProvider(
+        turn(content=plan_response(MAX_QUESTIONS + 3)),
+        turn(content=plan_response(2)),
+    )
+    usage = UsageTracker()
+    planner = LeadPlanner(
+        provider=provider,
+        usage=usage,
+        budgets=rca_env["budgets"],
+    )
+
+    plan = planner.run(rca_env["context"])
+
+    assert len(plan.questions) == 2
+    assert usage.snapshot().llm_calls == 2
+    assert len(provider.calls) == 2
+    repair_prompt = provider.calls[1]["messages"][-1]["content"]
+    assert "PREVIOUS OUTPUT REJECTED" in repair_prompt
+    assert "at most 10 items" in repair_prompt
+
+
+def test_lead_planner_rejects_persistently_over_limit_plan(rca_env) -> None:
+    provider = FakeProvider(
+        turn(content=plan_response(MAX_QUESTIONS + 3)),
+        turn(content=plan_response(MAX_QUESTIONS + 1)),
+    )
+    planner = LeadPlanner(
+        provider=provider,
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    )
+
+    with pytest.raises(PlanError, match="at most 10 items"):
+        planner.run(rca_env["context"])
+
+    assert len(provider.calls) == 2
 
 
 def test_issue_ci_seeds_incident_evidence(rca_env) -> None:

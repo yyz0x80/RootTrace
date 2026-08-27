@@ -326,7 +326,7 @@ def test_planning_failure_stops_workers(git_repo, tmp_path: Path) -> None:
     orchestrator, providers = build_orchestrator(
         git_repo,
         tmp_path,
-        lead_responses=[turn("not json at all")],
+        lead_responses=[turn("not json at all"), turn("still not json")],
     )
     with pytest.raises(PlanError):
         orchestrator.run(make_loaded(git_repo), git_repo.repo)
