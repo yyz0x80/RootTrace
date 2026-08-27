@@ -1,17 +1,17 @@
 # RootTrace
 
-[English](README.en.md) | 简体中文
+[English](README.en.md) | [简体中文](README.md)
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Multi-Agent](https://img.shields.io/badge/architecture-multi--agent-orange.svg)
 ![Root Cause Analysis](https://img.shields.io/badge/purpose-root--cause--analysis-green.svg)
 
-面向 GitHub Issue、CI 失败与回归问题的证据驱动多 Agent 根因分析系统。
+Evidence-driven multi-agent root cause analysis for GitHub issues, CI failures, and regressions.
 
-它回答：**什么失败了、可能的根因在哪里、为什么发生、什么证据支持该结论**。
+It answers: **what failed, where the likely root cause is, why it happened, and what evidence supports the conclusion**.
 
-## 架构
+## Architecture
 
 ```text
 Issue / CI / Stack Trace / PR Context
@@ -36,16 +36,16 @@ Specialist   Specialist     Specialist
           Final RCA Report
 ```
 
-## 核心特性
+## Core Features
 
-* 并行收集 Issue/CI、代码与 Git 历史的证据。
-* 结构化 `EvidenceGraph`，支持来源追踪与矛盾检测。
-* 可证伪的根因假设与运行时/测试验证。
-* 对原始仓库只读分析；测试仅在一次性沙盒中运行。
-* 可选的历史 RCA 检索，使用 TF-IDF、MiniBatchKMeans 与 Top-K 相似度。
-* 输出 JSON/Markdown 报告、执行追踪、时序与提供商用量。
+* Parallel evidence gathering across Issue/CI, code, and Git history.
+* Structured `EvidenceGraph` with provenance and contradiction tracking.
+* Falsifiable root-cause hypotheses with runtime/test verification.
+* Read-only analysis of the original repository; tests run only in a disposable sandbox.
+* Optional historical RCA retrieval with TF-IDF, MiniBatchKMeans, and Top-K similarity.
+* JSON/Markdown reports, execution traces, timing, and provider usage.
 
-## 快速开始
+## Quick Start
 
 ```bash
 git clone https://github.com/yyz0x80/RootTrace.git
@@ -56,9 +56,9 @@ python -m pip install -e .
 cp .env.example .env
 ```
 
-编辑 `.env`，将 `your_api_key` 替换为有效密钥。根据你的提供商配置 `ROOTTRACE_BASE_URL` 与 `ROOTTRACE_MODEL`。
+Edit `.env` and replace `your_api_key` with a valid key. Configure `ROOTTRACE_BASE_URL` and `ROOTTRACE_MODEL` for your provider.
 
-运行分析：
+Run an analysis:
 
 ```bash
 roottrace rca \
@@ -68,12 +68,12 @@ roottrace rca \
   --output-dir output/roottrace-demo
 ```
 
-可选证据文件：`--stack-trace`、`--ci-log`、`--pr-diff`。输出包含 `rca_report.md`、`rca_report.json` 与 `evidence_graph.json`。
+Optional evidence files: `--stack-trace`, `--ci-log`, `--pr-diff`. Output includes `rca_report.md`, `rca_report.json`, and `evidence_graph.json`.
 
-## 适用范围
+## Applicable Scope
 
-RootTrace 诊断问题并推荐修复范围，但在 RCA 模式下**不**编辑代码、生成/应用补丁、提交、推送、合并或创建 PR。
+RootTrace diagnoses and recommends a fix scope, but does **not** edit code, generate/apply patches, commit, push, merge, or open PRs in RCA mode.
 
-## 许可证
+## License
 
-采用 Apache License 2.0 许可证。
+Licensed under the Apache License 2.0.
