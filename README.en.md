@@ -70,6 +70,16 @@ roottrace rca \
 
 Optional evidence files: `--stack-trace`, `--ci-log`, `--pr-diff`. Output includes `rca_report.md`, `rca_report.json`, and `evidence_graph.json`.
 
+## Benchmark
+
+Results on a fixed 50-case development set derived from SWE-bench Verified:
+
+| Model             | Top-1 File Localization | Any File Recall@5 |
+| ----------------- | ----------------------: | ----------------: |
+| DeepSeek-V4-Flash |                  73.47% |            80.59% |
+
+**Note:** These results are from a controlled 50-case development subset and should not be interpreted as official SWE-bench Verified 500-case benchmark scores. The project includes controlled ablation studies covering agent composition, historical retrieval, and clustering strategy.
+
 ## Applicable Scope
 
 RootTrace diagnoses and recommends a fix scope, but does **not** edit code, generate/apply patches, commit, push, merge, or open PRs in RCA mode.

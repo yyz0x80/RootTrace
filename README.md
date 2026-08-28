@@ -70,6 +70,16 @@ roottrace rca \
 
 可选证据文件：`--stack-trace`、`--ci-log`、`--pr-diff`。输出包含 `rca_report.md`、`rca_report.json` 与 `evidence_graph.json`。
 
+## Benchmark
+
+基于 SWE-bench Verified 派生的固定 50-case 开发集的结果：
+
+| Model             | Top-1 File Localization | Any File Recall@5 |
+| ----------------- | ----------------------: | ----------------: |
+| DeepSeek-V4-Flash |                  73.47% |            80.59% |
+
+**注意：** 这些结果来自受控的 50-case 开发子集，不应解释为官方 SWE-bench Verified 500-case 基准测试分数。该项目包括受控消融研究，涵盖智能体组成、历史检索和聚类策略。
+
 ## 适用范围
 
 RootTrace 诊断问题并推荐修复范围，但在 RCA 模式下**不**编辑代码、生成/应用补丁、提交、推送、合并或创建 PR。
