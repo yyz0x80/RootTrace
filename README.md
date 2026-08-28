@@ -4,6 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/yyz0x80/RootTrace/actions/workflows/ci.yml/badge.svg)](https://github.com/yyz0x80/RootTrace/actions/workflows/ci.yml)
 ![Multi-Agent](https://img.shields.io/badge/architecture-multi--agent-orange.svg)
 ![Root Cause Analysis](https://img.shields.io/badge/purpose-root--cause--analysis-green.svg)
 
