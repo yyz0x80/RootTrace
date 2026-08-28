@@ -72,7 +72,7 @@ roottrace rca \
 
 ## Benchmark
 
-基于 SWE-bench Verified 派生的固定 50-case 开发集的结果：
+基于 [SWE-bench Verified](https://github.com/princeton-nlp/SWE-bench) 派生的固定 50-case 开发集的结果：
 
 | Model             | Top-1 File Localization | Any File Recall@5 |
 | ----------------- | ----------------------: | ----------------: |

@@ -72,7 +72,7 @@ Optional evidence files: `--stack-trace`, `--ci-log`, `--pr-diff`. Output includ
 
 ## Benchmark
 
-Results on a fixed 50-case development set derived from SWE-bench Verified:
+Results on a fixed 50-case development set derived from [SWE-bench Verified](https://github.com/princeton-nlp/SWE-bench):
 
 | Model             | Top-1 File Localization | Any File Recall@5 |
 | ----------------- | ----------------------: | ----------------: |
