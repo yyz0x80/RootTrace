@@ -5,14 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from roottrace.agents.schema import PlanBudgets
 from roottrace.cli import (
+    add_analyze_subparser,
     add_rca_subparser,
+    run_analyze_command,
     run_rca_command,
     run_rca_pipeline,
 )
+from roottrace.github import parse_github_resource_url
 from roottrace.incident.loader import load_incident
 from roottrace.llm.schema import AssistantTurn, ToolCall
 from roottrace.reporting.renderer import render_rca_markdown
@@ -229,6 +233,118 @@ def test_rca_subparser_parses_all_flags() -> None:
     assert args.stack_trace == "/tmp/stack.txt"
     assert args.ci_log == "/tmp/ci.log"
     assert args.pr_diff == "/tmp/diff.patch"
+
+
+def test_analyze_subparser_accepts_github_options() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    add_analyze_subparser(subparsers)
+
+    args = parser.parse_args(
+        [
+            "analyze",
+            "https://github.com/acme/widget/issues/7",
+            "--model",
+            "test-model",
+            "--output-dir",
+            "/tmp/out",
+            "--repo-cache",
+            "/tmp/cache",
+            "--github-token",
+            "token",
+            "--github-timeout",
+            "12.5",
+        ]
+    )
+
+    assert args.command == "analyze"
+    assert args.url.endswith("/issues/7")
+    assert args.model == "test-model"
+    assert args.output_dir == "/tmp/out"
+    assert args.repo_cache == "/tmp/cache"
+    assert args.github_token == "token"
+    assert args.github_timeout == 12.5
+
+
+def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    reference = parse_github_resource_url(
+        "https://github.com/acme/widget/pull/8"
+    )
+    fetched = SimpleNamespace(reference=reference)
+    normalized = SimpleNamespace(
+        base_commit="a" * 40,
+        incident=SimpleNamespace(id="github-acme-widget-pull_request-8"),
+        loaded_incident=object(),
+        repository_url="https://github.com/acme/widget.git",
+    )
+
+    class FakeClient:
+        token = "token"
+
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["timeout"] == 30.0
+
+    class FakeIngestor:
+        def __init__(self, client) -> None:
+            assert isinstance(client, FakeClient)
+
+        def fetch(self, url):
+            assert url == "https://github.com/acme/widget/pull/8"
+            return fetched
+
+        def normalize(self, received):
+            assert received is fetched
+            return normalized
+
+    class FakePrepared:
+        repo = tmp_path / "prepared"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return None
+
+    captured: dict[str, Any] = {}
+
+    def fake_pipeline(loaded, repo, output_dir, *, provider_factory):
+        captured.update(
+            loaded=loaded,
+            repo=repo,
+            output_dir=output_dir,
+            provider_factory=provider_factory,
+        )
+        return SimpleNamespace(
+            incident_id="github-acme-widget-pull_request-8",
+            run=SimpleNamespace(status=SimpleNamespace(value="completed")),
+            output_dir=str(output_dir),
+        )
+
+    monkeypatch.setattr("roottrace.cli.GitHubClient", FakeClient)
+    monkeypatch.setattr("roottrace.cli.GitHubIngestor", FakeIngestor)
+    monkeypatch.setattr(
+        "roottrace.cli.prepare_github_repository",
+        lambda *args, **kwargs: FakePrepared(),
+    )
+    monkeypatch.setattr("roottrace.cli.run_rca_pipeline", fake_pipeline)
+
+    result = run_analyze_command(
+        argparse.Namespace(
+            url="https://github.com/acme/widget/pull/8",
+            github_token="token",
+            github_timeout=30.0,
+            repo_cache=str(tmp_path / "cache"),
+            output_dir=str(tmp_path / "output"),
+            model=None,
+        )
+    )
+
+    assert result == 0
+    assert captured["loaded"] is normalized.loaded_incident
+    assert captured["repo"] == FakePrepared.repo
 
 
 def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:

@@ -41,6 +41,14 @@ from roottrace.artifacts import (
 )
 from roottrace.evidence.graph import EvidenceGraph
 from roottrace.evidence.schema import AgentRole
+from roottrace.github import (
+    GitHubClient,
+    GitHubClientError,
+    GitHubIngestor,
+    GitHubRepositoryError,
+    prepare_github_repository,
+    resolve_default_branch_revision,
+)
 from roottrace.incident.loader import LoadedIncident, load_incident
 from roottrace.llm.provider import create_provider_from_config
 from roottrace.llm.usage import UsageTracker
@@ -106,6 +114,41 @@ def add_rca_subparser(subparsers: Any) -> None:
     )
 
 
+def add_analyze_subparser(subparsers: Any) -> None:
+    """Register direct GitHub Issue/PR analysis."""
+    parser = subparsers.add_parser(
+        "analyze",
+        help="Analyze a GitHub Issue or Pull Request URL",
+    )
+    parser.add_argument("url", help="Canonical GitHub Issue or Pull Request URL")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name from config file or direct model identifier",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for RCA artifacts (default: output/<resource>)",
+    )
+    parser.add_argument(
+        "--repo-cache",
+        default=None,
+        help="Directory for cached GitHub repository mirrors",
+    )
+    parser.add_argument(
+        "--github-token",
+        default=None,
+        help="GitHub token (otherwise GITHUB_TOKEN is used)",
+    )
+    parser.add_argument(
+        "--github-timeout",
+        type=float,
+        default=30.0,
+        help="GitHub API request timeout in seconds",
+    )
+
+
 def run_rca_command(args: argparse.Namespace) -> int:
     """Run the RCA pipeline from parsed CLI arguments."""
     try:
@@ -138,6 +181,58 @@ def run_rca_command(args: argparse.Namespace) -> int:
         )
     except (PlanError, SynthesisError, ValueError, RuntimeError) as exc:
         print(f"RCA run failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"RCA complete: incident={result.incident_id} "
+        f"status={result.run.status.value} output={result.output_dir}"
+    )
+    return 0
+
+
+def run_analyze_command(args: argparse.Namespace) -> int:
+    """Fetch a GitHub resource, prepare its revision, and run existing RCA."""
+    try:
+        client = GitHubClient(token=args.github_token, timeout=args.github_timeout)
+        ingestor = GitHubIngestor(client)
+        fetched = ingestor.fetch(args.url)
+        cache_dir = Path(args.repo_cache or Path.home() / ".cache" / "roottrace" / "github")
+        if fetched.reference.kind == "issue":
+            revision = resolve_default_branch_revision(
+                fetched.reference.repository,
+                cache_dir=cache_dir,
+                clone_url=None,
+                token=client.token,
+            )
+            normalized = ingestor.normalize(fetched, base_commit=revision)
+        else:
+            normalized = ingestor.normalize(fetched)
+            revision = normalized.base_commit
+        output_dir = Path(args.output_dir or "output" / normalized.incident.id)
+        with prepare_github_repository(
+            fetched.reference.repository,
+            revision,
+            cache_dir=cache_dir,
+            clone_url=normalized.repository_url,
+            token=client.token,
+        ) as prepared:
+            def provider_factory() -> ProviderProtocol:
+                return create_provider_from_config(model_name=args.model)
+
+            result = run_rca_pipeline(
+                normalized.loaded_incident,
+                prepared.repo,
+                output_dir,
+                provider_factory=provider_factory,
+            )
+    except (
+        GitHubClientError,
+        GitHubRepositoryError,
+        PlanError,
+        SynthesisError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
+        print(f"GitHub analysis failed: {exc}", file=sys.stderr)
         return 1
     print(
         f"RCA complete: incident={result.incident_id} "
@@ -378,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
     add_rca_subparser(subparsers)
+    add_analyze_subparser(subparsers)
     return parser
 
 
@@ -387,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "rca":
         return run_rca_command(args)
+    if args.command == "analyze":
+        return run_analyze_command(args)
     parser.print_help()
     return 2
 
