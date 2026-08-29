@@ -198,6 +198,130 @@ def test_verifier_expect_failure_rejects_passing_test(
     assert run.graph.hypotheses[0].disposition == HypothesisDisposition.REJECTED
 
 
+def test_verifier_expect_failure_does_not_support_collection_error(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    with RuntimeVerificationSandbox(git_repo.repo, work_dir=tmp_path) as sandbox:
+        _write(
+            sandbox.work_root,
+            "tests/test_import_error.py",
+            "raise RuntimeError('cannot import test module')\n",
+        )
+        hypothesis = Hypothesis(
+            id="h-collection-error",
+            statement="the reported collection failure reproduces",
+            supporting_evidence_ids=["ev-seed-001"],
+            verification_plan=[
+                VerificationStep(
+                    command="python -m pytest -q tests/test_import_error.py",
+                    expect_failure=True,
+                )
+            ],
+        )
+        run = RuntimeTestVerifier(sandbox).verify(_graph(git_repo, [hypothesis]))
+
+    result = run.results[0]
+    assert result.status == VerificationStatus.ERROR
+    assert result.outcome == VerificationOutcome.UNVERIFIED
+    assert run.graph.hypotheses[0].disposition == HypothesisDisposition.UNVERIFIED
+    assert "execution_error" in run.evidence[0].observation
+
+
+def test_verifier_expect_failure_does_not_support_setup_error(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    with RuntimeVerificationSandbox(git_repo.repo, work_dir=tmp_path) as sandbox:
+        _write(
+            sandbox.work_root,
+            "tests/test_setup_error.py",
+            "import pytest\n"
+            "@pytest.fixture\n"
+            "def broken_fixture():\n"
+            "    raise RuntimeError('fixture setup is broken')\n"
+            "def test_setup(broken_fixture):\n"
+            "    assert broken_fixture\n",
+        )
+        hypothesis = Hypothesis(
+            id="h-setup-error",
+            statement="the reported setup failure reproduces",
+            supporting_evidence_ids=["ev-seed-001"],
+            verification_plan=[
+                VerificationStep(
+                    command="python -m pytest -q tests/test_setup_error.py",
+                    expect_failure=True,
+                )
+            ],
+        )
+        run = RuntimeTestVerifier(sandbox).verify(_graph(git_repo, [hypothesis]))
+
+    assert run.results[0].outcome == VerificationOutcome.UNVERIFIED
+    assert run.results[0].status == VerificationStatus.ERROR
+
+
+def test_verifier_expect_failure_does_not_support_no_tests(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    with RuntimeVerificationSandbox(git_repo.repo, work_dir=tmp_path) as sandbox:
+        _write(sandbox.work_root, "tests/test_no_tests.py", "VALUE = 1\n")
+        hypothesis = Hypothesis(
+            id="h-no-tests",
+            statement="the reported failure reproduces in an empty test target",
+            supporting_evidence_ids=["ev-seed-001"],
+            verification_plan=[
+                VerificationStep(
+                    command="python -m pytest -q tests/test_no_tests.py",
+                    expect_failure=True,
+                )
+            ],
+        )
+        run = RuntimeTestVerifier(sandbox).verify(_graph(git_repo, [hypothesis]))
+
+    assert run.results[0].outcome == VerificationOutcome.UNVERIFIED
+    assert run.results[0].status == VerificationStatus.ERROR
+
+
+def test_verifier_infrastructure_error_degrades_mixed_steps(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    with RuntimeVerificationSandbox(git_repo.repo, work_dir=tmp_path) as sandbox:
+        _write(
+            sandbox.work_root,
+            "tests/test_fail.py",
+            "def test_fail():\n    assert False\n",
+        )
+        _write(
+            sandbox.work_root,
+            "tests/test_import_error.py",
+            "raise RuntimeError('cannot import test module')\n",
+        )
+        hypothesis = Hypothesis(
+            id="h-mixed",
+            statement="mixed verification outcomes",
+            supporting_evidence_ids=["ev-seed-001"],
+            verification_plan=[
+                VerificationStep(
+                    command="python -m pytest -q tests/test_fail.py",
+                    expect_failure=True,
+                ),
+                VerificationStep(
+                    command="python -m pytest -q tests/test_import_error.py",
+                    expect_failure=True,
+                ),
+            ],
+        )
+        run = RuntimeTestVerifier(sandbox).verify(_graph(git_repo, [hypothesis]))
+
+    assert [result.outcome for result in run.results] == [
+        VerificationOutcome.SUPPORTED,
+        VerificationOutcome.UNVERIFIED,
+    ]
+    assert run.graph.hypotheses[0].disposition == HypothesisDisposition.UNVERIFIED
+
+
 def test_verifier_marks_timeout_as_unverified(
     git_repo,
     tmp_path: Path,

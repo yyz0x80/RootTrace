@@ -20,7 +20,8 @@ from roottrace.agents.specialists import ProviderProtocol, extract_json_object
 from roottrace.evidence.graph import EvidenceGraph
 from roottrace.evidence.schema import HypothesisDisposition
 from roottrace.llm.usage import UsageTracker
-from roottrace.reporting.schema import RCAReport
+from roottrace.reporting.schema import RCAReport, ReportConclusion
+from roottrace.verification.schema import VerificationOutcome
 from roottrace.verification.verifier import VerificationRun
 
 
@@ -42,6 +43,50 @@ def _repair_feedback(error: Exception) -> str:
         "Fix exactly these validation errors and output the corrected JSON "
         f"object only:\n{text}"
     )
+
+
+def _validate_supported_causes(report: RCAReport) -> None:
+    """Require runtime support and linked evidence for confirmed causes."""
+    if report.conclusion is not ReportConclusion.ROOT_CAUSE_IDENTIFIED:
+        return
+
+    supported_evidence_by_hypothesis: dict[str, set[str]] = {}
+    for result in report.verification:
+        if result.outcome is VerificationOutcome.SUPPORTED:
+            supported_evidence_by_hypothesis.setdefault(
+                result.hypothesis_id,
+                set(),
+            ).update(result.evidence_ids)
+
+    for cause in report.ranked_causes:
+        supported_evidence = supported_evidence_by_hypothesis.get(
+            cause.hypothesis_id,
+            set(),
+        )
+        if not supported_evidence:
+            raise ValueError(
+                f"RankedCause {cause.rank} requires a supported verification "
+                f"result for hypothesis {cause.hypothesis_id}"
+            )
+        if not supported_evidence.intersection(cause.evidence_ids):
+            raise ValueError(
+                f"RankedCause {cause.rank} must cite evidence from a supported "
+                "verification result"
+            )
+
+
+def _validate_ranked_causes(report: RCAReport) -> None:
+    """Reject final causes that point at hypotheses already disproved."""
+    dispositions = {
+        hypothesis.id: hypothesis.disposition
+        for hypothesis in report.evidence_graph.hypotheses
+    }
+    for cause in report.ranked_causes:
+        if dispositions.get(cause.hypothesis_id) is HypothesisDisposition.REJECTED:
+            raise SynthesisError(
+                f"ranked cause {cause.rank} references rejected "
+                f"hypothesis {cause.hypothesis_id}"
+            )
 
 
 class LeadSynthesizer:
@@ -112,6 +157,8 @@ class LeadSynthesizer:
                         "usage": self._usage.snapshot(),
                     }
                 )
+                _validate_ranked_causes(report)
+                _validate_supported_causes(report)
             except (ValueError, ValidationError) as exc:
                 last_error = exc
                 if attempt < self._max_attempts - 1:
@@ -123,17 +170,4 @@ class LeadSynthesizer:
 
         if report is None:
             raise SynthesisError("final synthesis produced no valid report")
-        dispositions = {
-            hypothesis.id: hypothesis.disposition
-            for hypothesis in graph.hypotheses
-        }
-        for cause in report.ranked_causes:
-            if (
-                dispositions.get(cause.hypothesis_id)
-                is HypothesisDisposition.REJECTED
-            ):
-                raise SynthesisError(
-                    f"ranked cause {cause.rank} references rejected "
-                    f"hypothesis {cause.hypothesis_id}"
-                )
         return report

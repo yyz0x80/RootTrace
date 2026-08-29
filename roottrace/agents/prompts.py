@@ -285,6 +285,9 @@ Rules:
 - evidence_ids fields (ranked_causes, causal_chain, suspected_regression) may
   reference only ids from the evidence list in INVESTIGATION STATE; never cite
   verification result ids (ver-*) and never invent ids.
+- Every ranked cause must reference a hypothesis with at least one verification
+  result whose outcome is ``supported`` and cite at least one evidence id from
+  that supported result.
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
 - Report a suspected regression commit only when the INVESTIGATION STATE

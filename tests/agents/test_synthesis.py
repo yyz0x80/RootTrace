@@ -345,6 +345,76 @@ def test_synthesis_retries_once_with_validation_feedback(
     assert usage.snapshot().llm_calls == 2
 
 
+def test_synthesis_rejects_root_cause_without_supported_verification(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    unverified_result = run.results[0].model_copy(
+        update={
+            "status": VerificationStatus.ERROR,
+            "outcome": VerificationOutcome.UNVERIFIED,
+        }
+    )
+    graph = run.graph.model_copy(
+        update={
+            "hypotheses": [
+                run.graph.hypotheses[0].model_copy(
+                    update={"disposition": HypothesisDisposition.UNVERIFIED}
+                )
+            ]
+        }
+    )
+    verification = run.model_copy(
+        update={"graph": graph, "results": [unverified_result]}
+    )
+    runtime_id = run.results[0].evidence_ids[0]
+    response = _report_json(git_repo, runtime_id)
+    provider = FakeProvider(turn(response), turn(response))
+
+    with pytest.raises(SynthesisError, match="supported verification result"):
+        LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
+            graph,
+            verification,
+        )
+
+
+def test_synthesis_rejects_cause_without_supported_runtime_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    response = _report_json(git_repo)
+    provider = FakeProvider(turn(response), turn(response))
+
+    with pytest.raises(SynthesisError, match="supported verification result"):
+        LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
+            run.graph,
+            run,
+        )
+
+
+def test_synthesis_repairs_missing_supported_runtime_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    runtime_id = run.results[0].evidence_ids[0]
+    provider = FakeProvider(
+        turn(_report_json(git_repo)),
+        turn(_report_json(git_repo, runtime_id)),
+    )
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(run.graph, run)
+
+    assert report.conclusion.value == "root_cause_identified"
+    assert len(provider.calls) == 2
+    assert "supported verification result" in provider.calls[1]["messages"][1]["content"]
+
+
 def test_synthesis_raises_after_repair_retries_exhausted(
     git_repo,
     tmp_path: Path,

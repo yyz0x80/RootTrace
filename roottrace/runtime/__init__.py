@@ -1,6 +1,7 @@
 """Low-level workspace policy and disposable execution runtime."""
 
 from roottrace.runtime.sandbox import (
+    PytestExecutionClassification,
     RuntimeVerificationSandbox,
     SandboxCommandResult,
 )
@@ -12,6 +13,7 @@ from roottrace.runtime.workspace import (
 )
 
 __all__ = [
+    "PytestExecutionClassification",
     "RepositoryFingerprint",
     "RuntimeVerificationSandbox",
     "SandboxCommandResult",

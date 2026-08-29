@@ -7,9 +7,11 @@ the parsed ``python -m pytest`` allowlist with ``shell=False``, so no general
 shell is ever exposed.
 
 Outcome rules are deterministic:
-- every executed step passes (exit 0, no timeout) -> hypothesis ``supported``;
-- any executed step fails (non-zero exit) -> hypothesis ``rejected``;
-- any executed step errors or times out -> hypothesis ``unverified``;
+- a pytest run with passing tests -> hypothesis ``supported``;
+- a pytest run with assertion failures -> hypothesis ``rejected``;
+- collection, setup, infrastructure, or no-test results -> hypothesis
+  ``unverified``;
+- an expected assertion failure -> hypothesis ``supported``;
 - a hypothesis without executed steps stays ``unverified``.
 
 Every executed command is recorded as a ``TEST_RESULT`` evidence item with
@@ -36,6 +38,7 @@ from roottrace.evidence.schema import (
 )
 from roottrace.incident.schema import Provenance
 from roottrace.runtime.sandbox import (
+    PytestExecutionClassification,
     RuntimeVerificationSandbox,
     SandboxCommandResult,
 )
@@ -161,24 +164,25 @@ class RuntimeTestVerifier:
         expect_failure: bool,
     ) -> tuple[VerificationResult, EvidenceItem]:
         exit_code = sandbox_result.exit_code
-        timed_out = sandbox_result.timed_out
-        if timed_out:
-            status = VerificationStatus.ERROR
-            outcome = VerificationOutcome.UNVERIFIED
-        elif exit_code == 0:
+        classification = sandbox_result.classification
+        reason = sandbox_result.classification_reason or "missing pytest classification"
+        if classification is PytestExecutionClassification.PASSED:
             status = VerificationStatus.PASSED
             outcome = (
                 VerificationOutcome.REJECTED
                 if expect_failure
                 else VerificationOutcome.SUPPORTED
             )
-        else:
+        elif classification is PytestExecutionClassification.ASSERTION_FAILED:
             status = VerificationStatus.FAILED
             outcome = (
                 VerificationOutcome.SUPPORTED
                 if expect_failure
                 else VerificationOutcome.REJECTED
             )
+        else:
+            status = VerificationStatus.ERROR
+            outcome = VerificationOutcome.UNVERIFIED
         output = "\n".join(
             part for part in (sandbox_result.stdout, sandbox_result.stderr) if part
         )
@@ -186,11 +190,7 @@ class RuntimeTestVerifier:
             id=f"ev-runtime_test-{len(self._seen_evidence_ids) + 1:03d}",
             agent=AgentRole.RUNTIME_TEST,
             kind=EvidenceKind.TEST_RESULT,
-            observation=(
-                f"{command} exited {exit_code}"
-                if not timed_out
-                else f"{command} timed out"
-            ),
+            observation=f"{command}: {classification.value if classification else 'invalid_result'} ({reason})",
             provenance=Provenance(
                 source="verification_sandbox",
                 tool="runtime_test",
@@ -241,8 +241,8 @@ def _disposition_for(
 ) -> HypothesisDisposition:
     if not outcomes:
         return HypothesisDisposition.UNVERIFIED
-    if any(outcome is VerificationOutcome.REJECTED for outcome in outcomes):
-        return HypothesisDisposition.REJECTED
     if any(outcome is VerificationOutcome.UNVERIFIED for outcome in outcomes):
         return HypothesisDisposition.UNVERIFIED
+    if any(outcome is VerificationOutcome.REJECTED for outcome in outcomes):
+        return HypothesisDisposition.REJECTED
     return HypothesisDisposition.SUPPORTED
