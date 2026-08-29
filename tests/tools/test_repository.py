@@ -52,7 +52,9 @@ def test_search_code_and_read_file(registry: RcaToolRegistry) -> None:
 
     # A query that looks like a flag must be treated as a literal pattern.
     literal = registry.execute("search_code", {"query": "--files"})
-    assert literal.ok
+    assert not literal.ok
+    assert literal.command.split()[2] == "--"
+    assert "no matches" in literal.content
 
     read = registry.execute("read_file", {"path": "pkg/calc.py", "raw": True})
     assert read.ok
@@ -70,11 +72,13 @@ def test_search_code_reports_rg_errors(registry: RcaToolRegistry) -> None:
     assert result.command.endswith(".src/_pytest/debugging.py")
 
 
-def test_search_code_treats_no_matches_as_success(registry: RcaToolRegistry) -> None:
+def test_search_code_rejects_no_matches_as_empty_evidence(
+    registry: RcaToolRegistry,
+) -> None:
     result = registry.execute("search_code", {"query": "not-present-in-repository"})
 
-    assert result.ok
-    assert result.content == ""
+    assert not result.ok
+    assert result.content == "Search failed: no matches"
 
 
 def test_file_tools_reject_bad_paths(registry: RcaToolRegistry) -> None:
