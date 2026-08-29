@@ -49,7 +49,7 @@ from roottrace.evidence.schema import (
     UncertaintyLevel,
 )
 from roottrace.incident.context import IncidentContext
-from roottrace.incident.schema import IncidentInput, Provenance
+from roottrace.incident.schema import IncidentInput, Provenance, validate_commit_sha
 from roottrace.llm.schema import AssistantTurn, ToolCall
 from roottrace.llm.usage import UsageTracker
 from roottrace.tools.repository import RcaToolRegistry
@@ -63,6 +63,7 @@ _TOOL_EVIDENCE_KIND: dict[str, EvidenceKind] = {
     "git_show": EvidenceKind.GIT_DIFF,
     "read_external_log": EvidenceKind.CI_LOG,
 }
+_GIT_EVIDENCE_TOOLS = frozenset({"git_history", "git_blame", "git_show"})
 
 
 class ProviderProtocol(Protocol):
@@ -114,6 +115,27 @@ def _bounded_note(text: str | None, limit: int = MAX_NOTE_CHARS) -> str | None:
     if text is None or not text.strip():
         return None
     return _cap_text(text, limit)[0]
+
+
+def _extract_commit_ids(tool: str, content: str) -> list[str]:
+    """Extract commit ids from machine-formatted Git tool output."""
+    if tool not in _GIT_EVIDENCE_TOOLS:
+        return []
+    patterns = {
+        "git_history": re.compile(r"^\s*([0-9a-fA-F]{7,64})(?:\s|$)"),
+        "git_show": re.compile(r"^\s*commit\s+([0-9a-fA-F]{7,64})(?:\s|$)"),
+        "git_blame": re.compile(r"^\s*\^?([0-9a-fA-F]{7,64})(?:\s|$)"),
+    }
+    pattern = patterns[tool]
+    commit_ids: set[str] = set()
+    for line in content.splitlines():
+        match = pattern.match(line)
+        if match:
+            try:
+                commit_ids.add(validate_commit_sha(match.group(1)).lower())
+            except ValueError:
+                continue
+    return sorted(commit_ids)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -177,6 +199,7 @@ class _Specialist:
         self._counter = 0
         self._isolation_violations = 0
         self._base_commit = ""
+        self._tool_failures: list[str] = []
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -243,6 +266,7 @@ class _Specialist:
             ),
             location=location,
             excerpt=excerpt,
+            commit_ids=_extract_commit_ids(tool, result.content),
         )
 
     def _run_tool_call(self, call: ToolCall) -> str:
@@ -262,6 +286,9 @@ class _Specialist:
             )
             self._evidence.append(evidence)
             return f"Evidence id: {evidence.id}\n{result.content}"
+        failure = _bounded_note(f"{call.name} failed: {result.content}")
+        if failure is not None:
+            self._tool_failures.append(failure)
         return result.content
 
     def execute_tool_call(self, call: ToolCall) -> str:
@@ -289,6 +316,7 @@ class _Specialist:
         self._counter = 0
         self._isolation_violations = 0
         self._base_commit = context.incident.base_commit
+        self._tool_failures = []
         self._seed_evidence(context)
 
         prompt = self._prompt_builder(context, questions)
@@ -390,9 +418,20 @@ class _Specialist:
             else:
                 status = response.status
             uncertainty = response.uncertainty
-            uncertainty_note = _bounded_note(
-                response.uncertainty_note or error
+            uncertainty_note = _bounded_note(response.uncertainty_note or error)
+
+        if self._tool_failures:
+            tool_error = _bounded_note(
+                "tool failures: " + "; ".join(self._tool_failures)
             )
+            if status == FindingStatus.COMPLETED:
+                status = FindingStatus.PARTIAL
+            if error:
+                error = _bounded_note(f"{error}; {tool_error}")
+            else:
+                error = tool_error
+            uncertainty = UncertaintyLevel.HIGH
+            uncertainty_note = _bounded_note(error)
 
         finding = AgentFinding(
             agent=self.role,

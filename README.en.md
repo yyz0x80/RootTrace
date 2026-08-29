@@ -71,6 +71,22 @@ roottrace rca \
 
 Optional evidence files: `--stack-trace`, `--ci-log`, `--pr-diff`. Output includes `rca_report.md`, `rca_report.json`, and `evidence_graph.json`.
 
+GitHub Issues and Pull Requests can also be analyzed directly. Issues use the
+current default-branch commit; PRs use the PR `base.sha` (the pre-fix revision)
+and include available comments, commits, changed files, and patches as RCA
+evidence:
+
+```bash
+roottrace analyze https://github.com/owner/repo/issues/123 \
+  --output-dir output/github-issue
+
+roottrace analyze https://github.com/owner/repo/pull/456 \
+  --github-token "$GITHUB_TOKEN"
+```
+
+Repository mirrors are cached under `~/.cache/roottrace/github` by default;
+use `--repo-cache` to override it.
+
 ## Benchmark
 
 Results on a fixed 50-case development set derived from [SWE-bench Verified](https://github.com/princeton-nlp/SWE-bench):

@@ -276,7 +276,10 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
     fetched = SimpleNamespace(reference=reference)
     normalized = SimpleNamespace(
         base_commit="a" * 40,
-        incident=SimpleNamespace(id="github-acme-widget-pull_request-8"),
+        incident=SimpleNamespace(
+            id="github-acme-widget-pull_request-8",
+            git_verification_policy=SimpleNamespace(history_depth=50),
+        ),
         loaded_incident=object(),
         repository_url="https://github.com/acme/widget.git",
     )
@@ -325,10 +328,13 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
 
     monkeypatch.setattr("roottrace.cli.GitHubClient", FakeClient)
     monkeypatch.setattr("roottrace.cli.GitHubIngestor", FakeIngestor)
-    monkeypatch.setattr(
-        "roottrace.cli.prepare_github_repository",
-        lambda *args, **kwargs: FakePrepared(),
-    )
+    prepared_arguments: dict[str, Any] = {}
+
+    def fake_prepare(*args, **kwargs):
+        prepared_arguments.update(kwargs)
+        return FakePrepared()
+
+    monkeypatch.setattr("roottrace.cli.prepare_github_repository", fake_prepare)
     monkeypatch.setattr("roottrace.cli.run_rca_pipeline", fake_pipeline)
 
     result = run_analyze_command(
@@ -346,6 +352,7 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
     assert captured["loaded"] is normalized.loaded_incident
     assert captured["repo"] == FakePrepared.repo
     assert captured["output_dir"] == Path("output") / normalized.incident.id
+    assert prepared_arguments["history_depth"] == 50
 
 
 def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
@@ -408,6 +415,9 @@ def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
     )
     assert summary["incident_id"] == loaded.incident.id
     assert summary["conclusion"] == "root_cause_identified"
+    assert summary["resource_kind"] == "issue"
+    assert summary["git_verification_policy"]["enabled"] is False
+    assert summary["git_verification_policy"]["history_depth"] == 1
 
     after = capture_repository_fingerprint(git_repo.repo)
     assert before.model_dump(mode="json") == after.model_dump(mode="json")

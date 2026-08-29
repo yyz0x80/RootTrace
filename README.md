@@ -71,6 +71,20 @@ roottrace rca \
 
 可选证据文件：`--stack-trace`、`--ci-log`、`--pr-diff`。输出包含 `rca_report.md`、`rca_report.json` 与 `evidence_graph.json`。
 
+也可以直接分析 GitHub Issue 或 Pull Request。Issue 使用仓库默认分支的当前
+提交；PR 使用 PR 的 `base.sha`（修复前版本），同时把 PR 的评论、提交、变更
+文件和可用 patch 作为 RCA 证据：
+
+```bash
+roottrace analyze https://github.com/owner/repo/issues/123 \
+  --output-dir output/github-issue
+
+roottrace analyze https://github.com/owner/repo/pull/456 \
+  --github-token "$GITHUB_TOKEN"
+```
+
+仓库镜像默认缓存在 `~/.cache/roottrace/github`，可通过 `--repo-cache` 修改。
+
 ## Benchmark
 
 基于 [SWE-bench Verified](https://github.com/princeton-nlp/SWE-bench) 派生的固定 50-case 开发集的结果：

@@ -13,7 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-from roottrace.incident.schema import Provenance, StableId
+from roottrace.incident.schema import Provenance, StableId, validate_commit_sha
 from roottrace.llm.schema import Usage
 from roottrace.runtime.paths import validate_relative_path
 
@@ -29,6 +29,7 @@ MAX_EVIDENCE_IDS = 50
 MAX_STEPS = 5
 MAX_SUGGESTIONS = 5
 MAX_GRAPH_EVIDENCE = 200
+MAX_COMMIT_IDS = 20
 
 BoundedNote = Annotated[str, StringConstraints(max_length=MAX_NOTE_CHARS)]
 BoundedSuggestion = Annotated[str, StringConstraints(max_length=MAX_PROPOSAL_CHARS)]
@@ -119,6 +120,30 @@ class EvidenceItem(BaseModel):
     provenance: Provenance
     location: SourceLocation | None = None
     excerpt: str = Field(max_length=MAX_EXCERPT_CHARS)
+    commit_ids: list[str] = Field(default_factory=list, max_length=MAX_COMMIT_IDS)
+
+    @field_validator("commit_ids")
+    @classmethod
+    def _validate_commit_ids(cls, values: list[str]) -> list[str]:
+        normalized = [validate_commit_sha(value).lower() for value in values]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("evidence commit ids must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_commit_provenance(self) -> EvidenceItem:
+        git_kinds = {
+            EvidenceKind.GIT_LOG,
+            EvidenceKind.GIT_DIFF,
+            EvidenceKind.GIT_BLAME,
+        }
+        if self.commit_ids and (
+            self.agent is not AgentRole.GIT_HISTORY or self.kind not in git_kinds
+        ):
+            raise ValueError(
+                "commit ids are allowed only on Git History evidence"
+            )
+        return self
 
 
 class EvidenceEdge(BaseModel):

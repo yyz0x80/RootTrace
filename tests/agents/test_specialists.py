@@ -528,8 +528,32 @@ def test_git_history_specialist_uses_git_tools(rca_env) -> None:
     assert output.finding.uncertainty == UncertaintyLevel.HIGH
     assert output.evidence[0].kind == EvidenceKind.GIT_LOG
     assert output.evidence[0].provenance.command.startswith("git log")
+    assert output.evidence[0].commit_ids
+    assert all(len(commit_id) == 40 for commit_id in output.evidence[0].commit_ids)
     assert output.evidence[1].kind == EvidenceKind.GIT_BLAME
     assert output.evidence[1].location is not None
+
+
+def test_git_tool_failure_is_partial_and_creates_no_evidence(rca_env) -> None:
+    provider = FakeProvider(
+        turn(
+            tool_calls=[
+                call("c1", "git_show", {"revision": "not-a-valid-revision"}),
+            ]
+        ),
+        turn(content=final_response()),
+    )
+    output = GitHistorySpecialist(
+        provider=provider,
+        registry=rca_env["registry"],
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    ).run(rca_env["context"], _questions())
+
+    assert output.evidence == []
+    assert output.finding.status == FindingStatus.PARTIAL
+    assert output.finding.uncertainty == UncertaintyLevel.HIGH
+    assert "tool failures" in (output.finding.error or "")
 
 
 def test_specialist_budget_exhaustion_is_partial(rca_env) -> None:

@@ -41,6 +41,9 @@ def test_issue_normalization_preserves_body_and_bounded_comments() -> None:
     assert result.revision_kind == "default_branch"
     assert result.state == "open"
     assert result.labels == ["bug", "regression"]
+    assert result.incident.resource_kind == "issue"
+    assert result.incident.git_verification_policy.enabled is True
+    assert "regression_label" in result.incident.git_verification_policy.reasons
     assert result.repository_url == "https://github.com/acme/widget.git"
 
 
@@ -78,9 +81,41 @@ def test_pull_request_uses_base_sha_and_keeps_head_as_context() -> None:
     assert result.base_commit == base_sha
     assert result.head_commit == head_sha
     assert result.incident.base_commit == base_sha
+    assert result.incident.resource_kind == "pull_request"
+    assert result.incident.git_verification_policy.enabled is True
+    assert result.incident.git_verification_policy.history_depth > 1
+    assert result.incident.git_verification_policy.candidate_paths == [
+        "src/config.py"
+    ]
     assert result.changed_files == ["src/config.py"]
     assert "diff --git a/src/config.py" in (result.incident.diff or "")
     assert result.revision_kind == "pull_request_base"
+
+
+def test_ordinary_github_issue_does_not_expand_history() -> None:
+    reference = parse_github_resource_url(
+        "https://github.com/acme/widget/issues/9"
+    )
+    fetched = GitHubFetchedResource(
+        reference=reference,
+        detail=GitHubIssueDetail(
+            number=9,
+            title="Crash on empty config",
+            body="The loader crashes when the config path is absent.",
+            state="open",
+            labels=[{"name": "bug"}],
+        ),
+    )
+
+    result = GitHubIngestor(None).normalize(
+        fetched,
+        base_commit="a" * 40,
+    )
+
+    assert result.incident.resource_kind == "issue"
+    assert result.incident.git_verification_policy.enabled is False
+    assert result.incident.git_verification_policy.history_depth == 1
+    assert result.incident.git_verification_policy.max_tool_calls == 1
 
 
 def test_pull_request_rejects_mismatched_explicit_revision() -> None:

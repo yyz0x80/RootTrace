@@ -67,6 +67,9 @@ def test_load_markdown_incident(tmp_path) -> None:
     assert incident.repo == "repo"
     assert incident.provenance.tool == "incident_loader"
     assert incident.provenance.source == "issue.md"
+    assert incident.resource_kind == "issue"
+    assert incident.git_verification_policy.enabled is False
+    assert incident.git_verification_policy.history_depth == 1
     assert loaded.issue_chars_omitted == 0
     assert not any("truncated" in note for note in loaded.notes)
 
@@ -97,6 +100,10 @@ def test_load_json_incident(tmp_path) -> None:
     assert incident.diff == "diff --git a/src/app.py b/src/app.py"
     assert incident.repo == "owner/repo"
     assert incident.base_commit == head_sha(repo)
+    assert incident.resource_kind == "pull_request"
+    assert incident.changed_files == ["src/app.py"]
+    assert incident.git_verification_policy.enabled is True
+    assert "pull_request" in incident.git_verification_policy.reasons
 
 
 def test_explicit_base_commit_is_used(tmp_path) -> None:
@@ -179,6 +186,31 @@ def test_pr_diff_file_wins_over_json_diff(tmp_path) -> None:
 
     loaded = load_incident(issue, repo, pr_diff_path=diff_file)
     assert loaded.incident.diff == "diff --git a/a.py b/a.py\n"
+    assert loaded.incident.resource_kind == "pull_request"
+    assert loaded.incident.git_verification_policy.enabled is True
+
+
+def test_json_issue_regression_metadata_enables_history_without_diff(tmp_path) -> None:
+    repo = make_git_repo(tmp_path, {"a.py": "x = 1\n"})
+    issue = tmp_path / "issue.json"
+    issue.write_text(
+        json.dumps(
+            {
+                "title": "Crash after regression",
+                "problem": "The behavior changed after commit " + "b" * 40,
+                "labels": ["bug"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_incident(issue, repo)
+
+    assert loaded.incident.resource_kind == "issue"
+    assert loaded.incident.git_verification_policy.enabled is True
+    assert loaded.incident.git_verification_policy.candidate_commits == [
+        "b" * 40
+    ]
 
 
 def test_issue_body_truncation_is_recorded(tmp_path) -> None:

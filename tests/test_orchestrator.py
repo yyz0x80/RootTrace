@@ -349,6 +349,42 @@ def test_specialist_partial_status_degrades_run_without_worker_exception(
     assert findings[AgentRole.ISSUE_CI].status == FindingStatus.COMPLETED
 
 
+def test_git_tool_failure_reaches_run_status_and_has_no_fake_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    empty_git_finding = json.dumps(
+        {
+            "status": "completed",
+            "ranked_locations": [],
+            "evidence_ids": [],
+            "uncertainty": "high",
+        }
+    )
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        git_responses=[
+            tool_turn("git_show", {"revision": git_repo.head_sha}),
+            turn(empty_git_finding),
+        ],
+    )
+
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert result.status == FindingStatus.PARTIAL
+    git_finding = next(
+        finding
+        for finding in result.graph.findings
+        if finding.agent is AgentRole.GIT_HISTORY
+    )
+    assert git_finding.status == FindingStatus.PARTIAL
+    assert "tool failures" in (git_finding.error or "")
+    assert not any(
+        item.agent is AgentRole.GIT_HISTORY for item in result.graph.evidence
+    )
+
+
 def test_worker_timeout_is_partial(git_repo, tmp_path: Path) -> None:
     orchestrator, _ = build_orchestrator(
         git_repo,
@@ -485,6 +521,20 @@ def test_specialists_do_not_share_evidence(git_repo, tmp_path: Path) -> None:
     assert "ev-issue_ci-001" not in git_prompt
 
 
+def test_git_policy_is_persisted_in_specialist_context(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    orchestrator, providers = build_orchestrator(git_repo, tmp_path)
+
+    orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    git_prompt = providers["git"].calls[0]["messages"][1]["content"]
+    assert '"enabled": false' in git_prompt
+    assert '"history_depth": 1' in git_prompt
+    assert '"max_tool_calls": 1' in git_prompt
+
+
 def test_isolation_violation_is_recorded(git_repo, tmp_path: Path) -> None:
     git_attempt = json.dumps(
         {
@@ -537,6 +587,9 @@ def test_artifacts_are_persisted(git_repo, tmp_path: Path) -> None:
     assert any("planning_end" in line for line in trace_lines)
     assert any("code_start" in line for line in trace_lines)
     assert any("hypotheses_end" in line for line in trace_lines)
+    planning_start = json.loads(trace_lines[0])
+    assert planning_start["event_type"] == "planning_start"
+    assert planning_start["git_verification_policy"]["history_depth"] == 1
 
 
 def test_trace_is_reset_for_each_run(git_repo, tmp_path: Path) -> None:

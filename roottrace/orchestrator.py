@@ -178,6 +178,10 @@ class RcaOrchestrator:
         """Run the full evidence pipeline for one incident."""
         started = time.monotonic()
         incident = loaded.incident
+        self._registry.configure_git_history(
+            base_commit=incident.base_commit,
+            history_depth=incident.git_verification_policy.history_depth,
+        )
         writer = (
             TraceWriter(Path(output_dir) / "execution_trace.jsonl")
             if output_dir is not None
@@ -190,7 +194,15 @@ class RcaOrchestrator:
         issue_ci_usage = UsageTracker()
         code_usage = UsageTracker()
         git_history_usage = UsageTracker()
-        self._trace(writer, incident.id, "planning_start", self._lead_provider.model)
+        self._trace(
+            writer,
+            incident.id,
+            "planning_start",
+            self._lead_provider.model,
+            git_verification_policy=incident.git_verification_policy.model_dump(
+                mode="json"
+            ),
+        )
 
         lead = LeadPlanner(
             provider=self._lead_provider,
@@ -251,11 +263,21 @@ class RcaOrchestrator:
         agents: dict[AgentRole, Any] = {}
         for role in self._specialist_roles():
             specialist_cls, usage = specialist_builders[role]
+            specialist_budgets = self._budgets
+            if role is AgentRole.GIT_HISTORY:
+                specialist_budgets = self._budgets.model_copy(
+                    update={
+                        "max_tool_calls": min(
+                            self._budgets.max_tool_calls,
+                            incident.git_verification_policy.max_tool_calls,
+                        )
+                    }
+                )
             agents[role] = specialist_cls(
                 provider=role_providers[role],
                 registry=self._registry,
                 usage=usage,
-                budgets=self._budgets,
+                budgets=specialist_budgets,
             )
         outputs, errors, isolation_violations = self._run_workers(
             context,
@@ -597,6 +619,7 @@ class RcaOrchestrator:
         completion_tokens: int | None = None,
         retry_count: int = 0,
         degradation: dict[str, Any] | None = None,
+        git_verification_policy: dict[str, Any] | None = None,
     ) -> None:
         if writer is None:
             return
@@ -611,5 +634,6 @@ class RcaOrchestrator:
                 completion_tokens=completion_tokens,
                 retry_count=retry_count,
                 degradation=degradation,
+                git_verification_policy=git_verification_policy,
             )
         )

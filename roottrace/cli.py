@@ -207,6 +207,8 @@ def run_analyze_command(args: argparse.Namespace) -> int:
         else:
             normalized = ingestor.normalize(fetched)
             revision = normalized.base_commit
+        policy = getattr(normalized.incident, "git_verification_policy", None)
+        history_depth = getattr(policy, "history_depth", 1)
         output_dir = (
             Path(args.output_dir)
             if args.output_dir
@@ -218,6 +220,7 @@ def run_analyze_command(args: argparse.Namespace) -> int:
             cache_dir=cache_dir,
             clone_url=normalized.repository_url,
             token=client.token,
+            history_depth=history_depth,
         ) as prepared:
             def provider_factory() -> ProviderProtocol:
                 return create_provider_from_config(model_name=args.model)
@@ -270,6 +273,8 @@ def run_rca_pipeline(
     registry = RcaToolRegistry(
         Workspace(repo_path),
         external_root=external_root,
+        base_commit=incident.base_commit,
+        history_depth=incident.git_verification_policy.history_depth,
     )
     orchestrator = RcaOrchestrator(
         lead_provider=provider_factory(),
@@ -424,6 +429,7 @@ def _persist_run_summary(
         path.relative_to(output).as_posix()
         for path in output.rglob("*")
         if path.is_file()
+        and path.relative_to(output).as_posix() != _RUN_SUMMARY
     )
     artifact_names.append(_RUN_SUMMARY)
     writer.write_dict(
@@ -432,6 +438,10 @@ def _persist_run_summary(
             "incident_id": run_result.incident_id,
             "status": run_result.status.value,
             "base_commit": report.evidence_graph.incident.base_commit,
+            "resource_kind": report.evidence_graph.incident.resource_kind,
+            "git_verification_policy": report.evidence_graph.incident.git_verification_policy.model_dump(
+                mode="json"
+            ),
             "conclusion": report.conclusion.value,
             "timing_seconds": run_result.timing_seconds,
             "verification_seconds": verification.timing_seconds,

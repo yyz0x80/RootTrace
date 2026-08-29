@@ -12,9 +12,11 @@ from roottrace.evidence.schema import (
     MAX_LOCATIONS,
     MAX_NOTE_CHARS,
     MAX_STATEMENT_CHARS,
+    AgentRole,
     BoundedNote,
     BoundedSuggestion,
     ConfidenceLevel,
+    EvidenceKind,
     SourceLocation,
     UncertaintyLevel,
 )
@@ -63,7 +65,7 @@ class RegressionChange(BaseModel):
     @field_validator("commit")
     @classmethod
     def _validate_commit(cls, value: str) -> str:
-        return validate_commit_sha(value)
+        return validate_commit_sha(value).lower()
 
 
 def assert_advisory_text(value: str) -> str:
@@ -116,6 +118,65 @@ class Timing(BaseModel):
     total_seconds: float | None = Field(default=None, ge=0)
     model_seconds: float | None = Field(default=None, ge=0)
     verification_seconds: float | None = Field(default=None, ge=0)
+
+
+def _validate_suspected_regression(
+    change: RegressionChange,
+    graph: EvidenceGraph,
+) -> None:
+    """Require a regression commit to be backed by real Git evidence."""
+    policy = graph.incident.git_verification_policy
+    if not policy.enabled:
+        raise ValueError(
+            "suspected_regression requires enabled Git verification"
+        )
+    if not change.evidence_ids:
+        raise ValueError("suspected_regression requires evidence_ids")
+
+    evidence_by_id = {item.id: item for item in graph.evidence}
+    referenced = [evidence_by_id[item_id] for item_id in change.evidence_ids]
+    allowed_tools = {
+        "git_history": EvidenceKind.GIT_LOG,
+        "git_show": EvidenceKind.GIT_DIFF,
+        "git_blame": EvidenceKind.GIT_BLAME,
+    }
+    invalid = [
+        item.id
+        for item in referenced
+        if (
+            item.agent is not AgentRole.GIT_HISTORY
+            or item.provenance.tool not in allowed_tools
+            or item.kind is not allowed_tools.get(item.provenance.tool)
+        )
+    ]
+    if invalid:
+        raise ValueError(
+            "suspected_regression may cite only real Git tool evidence: "
+            f"{sorted(invalid)}"
+        )
+    invalid_commit_items = [
+        item.id
+        for item in referenced
+        if not item.commit_ids
+    ]
+    if invalid_commit_items:
+        raise ValueError(
+            "suspected_regression requires commit ids in Git evidence: "
+            f"{sorted(invalid_commit_items)}"
+        )
+
+    claim = change.commit.lower()
+    matching_commits = {
+        commit_id
+        for item in referenced
+        for commit_id in item.commit_ids
+        if commit_id == claim or commit_id.startswith(claim)
+    }
+    if len(matching_commits) != 1:
+        raise ValueError(
+            "suspected_regression.commit is not verifiable in the referenced "
+            "Git evidence"
+        )
 
 
 class RCAReport(BaseModel):
@@ -172,6 +233,7 @@ class RCAReport(BaseModel):
             missing = missing_ids(self.suspected_regression.evidence_ids, evidence_ids)
             if missing:
                 raise ValueError(f"suspected_regression references unknown evidence ids: {missing}")
+            _validate_suspected_regression(self.suspected_regression, graph)
         if self.fix_recommendation is not None:
             missing = missing_ids(self.fix_recommendation.evidence_ids, evidence_ids)
             if missing:

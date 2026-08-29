@@ -83,3 +83,33 @@ def test_prepare_repository_exposes_only_requested_revision(tmp_path) -> None:
         prepared.close()
 
     assert not prepared.root.exists()
+
+
+def test_prepare_repository_exposes_only_bounded_base_ancestors(tmp_path) -> None:
+    source, shas = _build_source_repo(tmp_path / "source-root")
+    cache = tmp_path / "cache"
+    _make_bare_mirror(source, cache)
+    reference = GitHubRepositoryRef(owner="acme", repo="widget")
+
+    prepared = prepare_github_repository(
+        reference,
+        shas[1],
+        cache_dir=cache,
+        clone_url=str(source),
+        work_dir=tmp_path,
+        history_depth=2,
+    )
+    try:
+        commits = subprocess.run(
+            ["git", "rev-list", "--all"],
+            cwd=prepared.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        assert prepared.history_depth == 2
+        assert set(commits) == set(shas)
+        assert all(len(commit) == 40 for commit in commits)
+        assert (prepared.repo / "src/app.py").read_text() == "broken = False\n"
+    finally:
+        prepared.close()

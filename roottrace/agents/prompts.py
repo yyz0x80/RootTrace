@@ -138,6 +138,11 @@ Rules:
   code-search, file read, symbol, external-log, or runtime tools.
 - You do not produce a root cause. Report historical evidence with explicit
   uncertainty; a regression is suspected only when history supports it.
+- Follow the deterministic Git verification policy in the context. When it is
+  disabled, inspect only the base commit and do not expand history.
+- When it is enabled, prioritize the listed candidate commits and paths, stay
+  within the bounded history, and never treat a PR head commit as a regression
+  commit because the checkout is pinned to the base revision.
 - Every factual claim must cite one of the provided evidence ids.
 
 Tool results identify their evidence id as "Evidence id: ev-git_history-<n>".
@@ -215,6 +220,7 @@ def build_hypotheses_prompt(
             "id": item.id,
             "agent": item.agent.value,
             "kind": item.kind.value,
+            "commit_ids": item.commit_ids,
             "observation": item.observation,
             "location": item.location.model_dump(mode="json")
             if item.location is not None
@@ -244,6 +250,10 @@ def build_hypotheses_prompt(
             "title": incident.title,
             "problem": incident.problem,
             "base_commit": incident.base_commit,
+            "resource_kind": incident.resource_kind,
+            "git_verification_policy": incident.git_verification_policy.model_dump(
+                mode="json"
+            ),
         },
         "findings": findings,
         "evidence": evidence,
@@ -291,7 +301,8 @@ Rules:
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
 - Report a suspected regression commit only when the INVESTIGATION STATE
-  contains git-history evidence that supports it.
+  contains Git History evidence from git_history, git_show, or git_blame that
+  supports it.
 - suspected_regression.commit must be an exact 7-64 character hexadecimal SHA
   found in the evidence; when no real commit sha is available, omit
   suspected_regression entirely. Never emit an empty or placeholder commit.
@@ -379,6 +390,7 @@ def build_final_report_prompt(
             "id": item.id,
             "agent": item.agent.value,
             "kind": item.kind.value,
+            "commit_ids": item.commit_ids,
             "observation": item.observation,
             "location": item.location.model_dump(mode="json")
             if item.location is not None
@@ -406,6 +418,10 @@ def build_final_report_prompt(
             "title": incident.title,
             "problem": incident.problem,
             "base_commit": incident.base_commit,
+            "resource_kind": incident.resource_kind,
+            "git_verification_policy": incident.git_verification_policy.model_dump(
+                mode="json"
+            ),
         },
         "hypotheses": hypotheses,
         "verification": verification,
@@ -435,6 +451,12 @@ def _incident_view(context: IncidentContext) -> dict[str, object]:
         "problem": incident.problem,
         "repo": incident.repo,
         "base_commit": incident.base_commit,
+        "resource_kind": incident.resource_kind,
+        "labels": incident.labels,
+        "changed_files": incident.changed_files,
+        "git_verification_policy": incident.git_verification_policy.model_dump(
+            mode="json"
+        ),
         "logs": list(incident.logs),
         "signals": context.signals.model_dump(mode="json"),
         "truncation": context.truncation.model_dump(mode="json"),
@@ -517,6 +539,10 @@ def build_git_history_prompt(
     """Build the bounded Git History specialist prompt."""
     data = {
         "base_commit": context.incident.base_commit,
+        "resource_kind": context.incident.resource_kind,
+        "git_verification_policy": context.incident.git_verification_policy.model_dump(
+            mode="json"
+        ),
         "signals": context.signals.model_dump(mode="json"),
         "tracked_files": context.repository.tracked_files,
         "python_file_list": context.repository.python_file_list,
@@ -525,6 +551,9 @@ def build_git_history_prompt(
             for snippet in context.snippets
         ],
         "diff_excerpt": context.diff_excerpt,
+        "candidate_paths": context.incident.git_verification_policy.candidate_paths,
+        "candidate_commits": context.incident.git_verification_policy.candidate_commits,
+        "max_tool_calls": context.incident.git_verification_policy.max_tool_calls,
         "questions": _question_lines(questions),
     }
     return (

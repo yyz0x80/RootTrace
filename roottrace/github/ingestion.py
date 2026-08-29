@@ -204,6 +204,7 @@ class GitHubIngestor:
         detail = fetched.detail
         if detail.number != reference.number:
             raise ValueError("GitHub response number does not match the requested URL")
+        labels = _labels(detail)
 
         if reference.kind == "pull_request":
             if not isinstance(detail, GitHubPullRequestDetail):
@@ -260,10 +261,13 @@ class GitHubIngestor:
             id=_incident_id(reference),
             repo=reference.repository.full_name,
             base_commit=selected_revision,
+            resource_kind=reference.kind,
             title=_bounded_title(title),
             problem=problem,
             logs=logs,
             diff=diff,
+            labels=labels,
+            changed_files=filenames,
             provenance=Provenance(
                 source=reference.url,
                 tool="github_rest_client",
@@ -277,7 +281,7 @@ class GitHubIngestor:
             base_commit=selected_revision,
             head_commit=head_commit,
             state=detail.state,
-            labels=_labels(detail),
+            labels=labels,
             changed_files=filenames,
             revision_kind=revision_kind,
             notes=notes,

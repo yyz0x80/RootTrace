@@ -28,6 +28,7 @@ from roottrace.reporting.schema import (
     FixRecommendation,
     RankedCause,
     RCAReport,
+    RegressionChange,
     ReportConclusion,
 )
 from roottrace.verification.schema import (
@@ -163,6 +164,27 @@ def test_evidence_round_trip() -> None:
     assert rebuilt == evidence
     assert rebuilt.id == "ev-1"
     assert rebuilt.provenance.source == "issue.md:12"
+
+
+def test_git_evidence_round_trip_preserves_full_commit_ids() -> None:
+    commit = "b" * 40
+    evidence = make_evidence(
+        evidence_id="ev-git-1",
+        agent=AgentRole.GIT_HISTORY,
+        kind=EvidenceKind.GIT_LOG,
+        provenance=make_provenance(tool="git_history", commit=commit),
+        excerpt=f"{commit} 2024-01-01 change",
+        commit_ids=[commit],
+    )
+
+    rebuilt = EvidenceItem.model_validate(evidence.model_dump(mode="json"))
+
+    assert rebuilt.commit_ids == [commit]
+
+
+def test_commit_ids_are_limited_to_git_history_evidence() -> None:
+    with pytest.raises(ValidationError, match="only on Git History evidence"):
+        make_evidence(commit_ids=["b" * 40])
 
 
 def test_evidence_requires_stable_id_and_provenance() -> None:
@@ -379,6 +401,87 @@ def test_report_rank_duplicates_rejected() -> None:
 def test_report_conclusion_requires_ranked_cause() -> None:
     with pytest.raises(ValidationError):
         make_report(ranked_causes=[])
+
+
+def _git_backed_graph(commit: str = "b" * 40) -> EvidenceGraph:
+    return make_graph(
+        incident=make_incident(title="Regression in load"),
+        evidence=[
+            make_evidence(),
+            make_evidence(
+                evidence_id="ev-git-1",
+                agent=AgentRole.GIT_HISTORY,
+                kind=EvidenceKind.GIT_LOG,
+                provenance=make_provenance(tool="git_history", commit=commit),
+                excerpt=f"{commit} 2024-01-01 change",
+                commit_ids=[commit],
+            ),
+        ],
+    )
+
+
+def test_suspected_regression_requires_real_git_evidence() -> None:
+    graph = _git_backed_graph()
+    report = make_report(
+        evidence_graph=graph,
+        incident_id=graph.incident.id,
+        suspected_regression=RegressionChange(
+            commit="b" * 40,
+            evidence_ids=["ev-git-1"],
+        ),
+    )
+
+    assert report.suspected_regression is not None
+
+    with pytest.raises(ValidationError, match="real Git tool evidence"):
+        make_report(
+            evidence_graph=graph,
+            incident_id=graph.incident.id,
+            suspected_regression=RegressionChange(
+                commit="b" * 40,
+                evidence_ids=["ev-1"],
+            ),
+        )
+
+
+def test_suspected_regression_commit_must_match_git_evidence() -> None:
+    graph = _git_backed_graph()
+
+    with pytest.raises(ValidationError, match="not verifiable"):
+        make_report(
+            evidence_graph=graph,
+            incident_id=graph.incident.id,
+            suspected_regression=RegressionChange(
+                commit="c" * 40,
+                evidence_ids=["ev-git-1"],
+            ),
+        )
+
+
+def test_suspected_regression_is_rejected_when_policy_is_disabled() -> None:
+    graph = make_graph(
+        evidence=[
+            make_evidence(),
+            make_evidence(
+                evidence_id="ev-git-1",
+                agent=AgentRole.GIT_HISTORY,
+                kind=EvidenceKind.GIT_LOG,
+                provenance=make_provenance(tool="git_history"),
+                excerpt=f"{'b' * 40} 2024-01-01 change",
+                commit_ids=["b" * 40],
+            ),
+        ]
+    )
+
+    with pytest.raises(ValidationError, match="enabled Git verification"):
+        make_report(
+            evidence_graph=graph,
+            incident_id=graph.incident.id,
+            suspected_regression=RegressionChange(
+                commit="b" * 40,
+                evidence_ids=["ev-git-1"],
+            ),
+        )
 
 
 def test_plan_assignments_derived_from_questions() -> None:

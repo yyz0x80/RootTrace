@@ -29,28 +29,57 @@ from roottrace.verification import (
 )
 
 
-def _graph(git_repo, hypotheses: list[Hypothesis]) -> EvidenceGraph:
+def _graph(
+    git_repo,
+    hypotheses: list[Hypothesis],
+    *,
+    include_git_history: bool = False,
+) -> EvidenceGraph:
+    evidence = [
+        EvidenceItem(
+            id="ev-seed-001",
+            agent=AgentRole.CODE,
+            kind=EvidenceKind.CODE_SNIPPET,
+            observation="suspicious function",
+            provenance=Provenance(source="test_fixture"),
+            excerpt="def multiply(a, b):\n    return a + b",
+        )
+    ]
+    title = "multiply returns a+b"
+    related_commits: list[str] = []
+    if include_git_history:
+        title = "regression: multiply returns a+b"
+        related_commits = [git_repo.base_sha]
+        evidence.append(
+            EvidenceItem(
+                id="ev-git_history-001",
+                agent=AgentRole.GIT_HISTORY,
+                kind=EvidenceKind.GIT_LOG,
+                observation="base commit history",
+                provenance=Provenance(
+                    source="test_fixture",
+                    tool="git_history",
+                    command="git log --format=%H",
+                    commit=git_repo.base_sha,
+                ),
+                excerpt=f"{git_repo.base_sha} 2024-01-01 initial implementation",
+                commit_ids=[git_repo.base_sha],
+            )
+        )
     incident = IncidentInput(
         id="inc-001",
         repo="target",
         base_commit=git_repo.base_sha,
-        title="multiply returns a+b",
+        title=title,
         problem="multiply returns a+b instead of a*b",
         logs=[],
+        related_commits=related_commits,
         provenance=Provenance(source="test_fixture"),
-    )
-    seed = EvidenceItem(
-        id="ev-seed-001",
-        agent=AgentRole.CODE,
-        kind=EvidenceKind.CODE_SNIPPET,
-        observation="suspicious function",
-        provenance=Provenance(source="test_fixture"),
-        excerpt="def multiply(a, b):\n    return a + b",
     )
     return EvidenceGraph(
         incident=incident,
         findings=[],
-        evidence=[seed],
+        evidence=evidence,
         hypotheses=hypotheses,
     )
 
@@ -70,56 +99,58 @@ def _hypothesis(hypothesis_id: str) -> Hypothesis:
     )
 
 
-def _report_json(git_repo, runtime_evidence_id: str | None = None) -> str:
+def _report_json(
+    git_repo,
+    runtime_evidence_id: str | None = None,
+    *,
+    include_regression: bool = False,
+) -> str:
     evidence_ids = ["ev-seed-001"]
     if runtime_evidence_id:
         evidence_ids.append(runtime_evidence_id)
-    return json.dumps(
-        {
-            "conclusion": "root_cause_identified",
-            "conclusion_summary": "multiply is implemented as addition",
-            "ranked_causes": [
-                {
-                    "rank": 1,
-                    "hypothesis_id": "h-001",
-                    "confidence": "medium",
-                    "rationale": "code evidence and passing regression tests",
-                    "evidence_ids": evidence_ids,
-                }
-            ],
-            "top_k_locations": [
-                {"path": "pkg/calc.py", "symbol": "multiply"}
-            ],
-            "causal_chain": [
-                {
-                    "statement": "the multiply function returns a+b",
-                    "hypothesis_id": "h-001",
-                    "evidence_ids": ["ev-seed-001"],
-                }
-            ],
-            "suspected_regression": {
-                "commit": git_repo.base_sha,
-                "summary": "initial implementation of multiply",
+    payload = {
+        "conclusion": "root_cause_identified",
+        "conclusion_summary": "multiply is implemented as addition",
+        "ranked_causes": [
+            {
+                "rank": 1,
+                "hypothesis_id": "h-001",
+                "confidence": "medium",
+                "rationale": "code evidence and passing regression tests",
+                "evidence_ids": evidence_ids,
+            }
+        ],
+        "top_k_locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
+        "causal_chain": [
+            {
+                "statement": "the multiply function returns a+b",
+                "hypothesis_id": "h-001",
                 "evidence_ids": ["ev-seed-001"],
-                "locations": [{"path": "pkg/calc.py"}],
-            },
-            "fix_recommendation": {
-                "scope": "review the multiply function in pkg/calc.py",
-                "suggestions": [
-                    "verify the arithmetic operation against expected behavior"
-                ],
-                "locations": [
-                    {"path": "pkg/calc.py", "symbol": "multiply"}
-                ],
-                "evidence_ids": ["ev-seed-001"],
-            },
-            "uncertainty": {
-                "level": "medium",
-                "insufficient_evidence": False,
-                "notes": [],
-            },
+            }
+        ],
+        "suspected_regression": None,
+        "fix_recommendation": {
+            "scope": "review the multiply function in pkg/calc.py",
+            "suggestions": [
+                "verify the arithmetic operation against expected behavior"
+            ],
+            "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
+            "evidence_ids": ["ev-seed-001"],
+        },
+        "uncertainty": {
+            "level": "medium",
+            "insufficient_evidence": False,
+            "notes": [],
         }
-    )
+    }
+    if include_regression:
+        payload["suspected_regression"] = {
+            "commit": git_repo.base_sha,
+            "summary": "initial implementation of multiply",
+            "evidence_ids": ["ev-git_history-001"],
+            "locations": [{"path": "pkg/calc.py"}],
+        }
+    return json.dumps(payload)
 
 
 class FakeProvider:
@@ -145,19 +176,36 @@ def turn(content: str) -> AssistantTurn:
     )
 
 
-def _verified_run(git_repo, tmp_path: Path) -> VerificationRun:
+def _verified_run(
+    git_repo,
+    tmp_path: Path,
+    *,
+    include_git_history: bool = False,
+) -> VerificationRun:
     with RuntimeVerificationSandbox(
         git_repo.repo,
         work_dir=tmp_path,
     ) as sandbox:
-        graph = _graph(git_repo, [_hypothesis("h-001")])
+        graph = _graph(
+            git_repo,
+            [_hypothesis("h-001")],
+            include_git_history=include_git_history,
+        )
         return RuntimeTestVerifier(sandbox).verify(graph)
 
 
 def test_synthesis_produces_validated_report(git_repo, tmp_path: Path) -> None:
-    run = _verified_run(git_repo, tmp_path)
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
     runtime_id = run.results[0].evidence_ids[0]
-    provider = FakeProvider(turn(_report_json(git_repo, runtime_id)))
+    provider = FakeProvider(
+        turn(
+            _report_json(
+                git_repo,
+                runtime_id,
+                include_regression=True,
+            )
+        )
+    )
     usage = UsageTracker()
     report = LeadSynthesizer(provider=provider, usage=usage).synthesize(
         run.graph,
@@ -326,11 +374,11 @@ def test_synthesis_retries_once_with_validation_feedback(
     git_repo,
     tmp_path: Path,
 ) -> None:
-    run = _verified_run(git_repo, tmp_path)
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
     runtime_id = run.results[0].evidence_ids[0]
     provider = FakeProvider(
         turn(_invalid_report_json()),
-        turn(_report_json(git_repo, runtime_id)),
+        turn(_report_json(git_repo, runtime_id, include_regression=True)),
     )
     usage = UsageTracker()
     report = LeadSynthesizer(provider=provider, usage=usage).synthesize(

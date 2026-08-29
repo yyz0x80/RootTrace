@@ -131,6 +131,7 @@ def test_git_history_bounded_and_scoped(registry: RcaToolRegistry) -> None:
     assert result.ok
     lines = [line for line in result.content.splitlines() if line.strip()]
     assert len(lines) == 2
+    assert all(len(line.split(maxsplit=1)[0]) == 40 for line in lines)
     assert "fix multiply" in lines[0]
     assert "initial" in lines[1]
 
@@ -151,6 +152,43 @@ def test_git_history_bounded_and_scoped(registry: RcaToolRegistry) -> None:
     assert pickaxe.ok
     assert "fix multiply" in pickaxe.content
     assert "initial" not in pickaxe.content
+
+
+def test_configured_git_tools_are_anchored_to_bounded_base_history(
+    git_repo,
+) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=1,
+    )
+
+    history = registry.execute("git_history", {"max_count": 20})
+    assert history.ok
+    history_lines = history.content.splitlines()
+    assert len(history_lines) == 1
+    assert history_lines[0].startswith(f"{git_repo.head_sha} ")
+    assert git_repo.base_sha not in history.content
+
+    blame = registry.execute("git_blame", {"path": "pkg/calc.py"})
+    assert blame.ok
+    assert git_repo.head_sha in blame.content
+    assert git_repo.base_sha not in blame.content
+    assert "bounded to the configured base history" in blame.content
+
+    visible_show = registry.execute(
+        "git_show",
+        {"revision": git_repo.head_sha[:8], "path": "pkg/calc.py"},
+    )
+    assert visible_show.ok
+    assert f"commit {git_repo.head_sha}" in visible_show.content
+
+    hidden_show = registry.execute(
+        "git_show",
+        {"revision": git_repo.base_sha},
+    )
+    assert not hidden_show.ok
+    assert "bounded base history" in hidden_show.content
 
 
 def test_git_history_rejects_unsafe_input(registry: RcaToolRegistry) -> None:
