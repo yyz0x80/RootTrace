@@ -85,6 +85,11 @@ roottrace analyze https://github.com/owner/repo/pull/456 \
 
 仓库镜像默认缓存在 `~/.cache/roottrace/github`，可通过 `--repo-cache` 修改。
 
+对于 PR 或明确带有 regression/commit 线索的 Issue，RootTrace 会按
+`8 → 16 → 32 → 50` 层逐步检查 base commit 的历史，并优先使用相关文件、
+符号和故障特征筛选候选提交。找到强相关候选后会提前停止；50 层只是硬上限，
+不是默认发送给模型的历史量。普通 Issue 仍只检查 base commit，不扩大历史。
+
 ## Benchmark
 
 基于 [SWE-bench Verified](https://github.com/princeton-nlp/SWE-bench) 派生的固定 50-case 开发集的结果：

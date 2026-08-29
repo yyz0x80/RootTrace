@@ -31,6 +31,7 @@ from roottrace.reporting.schema import (
     RegressionChange,
     ReportConclusion,
 )
+from roottrace.tools import GitSearchSummary
 from roottrace.verification.schema import (
     VerificationOutcome,
     VerificationResult,
@@ -102,6 +103,24 @@ def make_finding(**overrides) -> AgentFinding:
     }
     fields.update(overrides)
     return AgentFinding(**fields)
+
+
+def test_git_search_summary_is_limited_to_git_history_finding() -> None:
+    summary = GitSearchSummary(
+        enabled=False,
+        reached_depth=1,
+        stop_reason="disabled",
+        commands_executed=0,
+    )
+
+    with pytest.raises(ValidationError, match="only for Git History"):
+        make_finding(git_search_summary=summary)
+
+    finding = make_finding(
+        agent=AgentRole.GIT_HISTORY,
+        git_search_summary=summary,
+    )
+    assert finding.git_search_summary == summary
 
 
 def make_graph(**overrides) -> EvidenceGraph:

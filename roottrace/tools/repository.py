@@ -29,6 +29,12 @@ from typing import Any, ClassVar
 from roottrace.incident.schema import MAX_GIT_HISTORY_DEPTH, validate_commit_sha
 from roottrace.runtime.paths import validate_relative_path
 from roottrace.runtime.workspace import Workspace
+from roottrace.tools.git_search import (
+    GitSearchCommandResult,
+    GitSearchExecutor,
+    GitSearchPlan,
+    GitSearchSummary,
+)
 from roottrace.tools.registry import (
     ReadFileInput,
     SearchCodeInput,
@@ -272,6 +278,7 @@ class RcaToolRegistry(ToolRegistry):
         )
         self._history_base_commit: str | None = None
         self._history_depth: int | None = None
+        self._history_visible_depth: int | None = None
         super().__init__(workspace=workspace)
         if base_commit is not None or history_depth is not None:
             if base_commit is None or history_depth is None:
@@ -283,7 +290,13 @@ class RcaToolRegistry(ToolRegistry):
                 history_depth=history_depth,
             )
 
-    def configure_git_history(self, *, base_commit: str, history_depth: int) -> None:
+    def configure_git_history(
+        self,
+        *,
+        base_commit: str,
+        history_depth: int,
+        visible_depth: int | None = None,
+    ) -> None:
         """Anchor Git tools to a bounded ancestor history of one base commit."""
         if (
             type(history_depth) is not int
@@ -294,6 +307,26 @@ class RcaToolRegistry(ToolRegistry):
             )
         self._history_base_commit = validate_commit_sha(base_commit)
         self._history_depth = history_depth
+        if visible_depth is None:
+            visible_depth = history_depth
+        if (
+            type(visible_depth) is not int
+            or not 1 <= visible_depth <= history_depth
+        ):
+            raise ValueError(
+                "visible_depth must be between 1 and the configured history depth"
+            )
+        self._history_visible_depth = visible_depth
+
+    def set_git_history_visible_depth(self, depth: int) -> None:
+        """Expose only one already-configured layered history depth to Git tools."""
+        if (
+            self._history_depth is None
+            or type(depth) is not int
+            or not 1 <= depth <= self._history_depth
+        ):
+            raise ValueError("visible Git history depth is outside the configured bound")
+        self._history_visible_depth = depth
 
     def _register_default_tools(self) -> None:
         self.register_tool(
@@ -585,16 +618,18 @@ class RcaToolRegistry(ToolRegistry):
         resolved = result.stdout.strip()
         return resolved if _FULL_SHA_PATTERN.fullmatch(resolved) else None
 
-    def _visible_commit_ids(self) -> frozenset[str] | None:
-        """Return the bounded base ancestry visible to configured Git tools."""
+    def _visible_commit_list(self) -> list[str] | None:
+        """Return visible base ancestors in deterministic Git traversal order."""
         if self._history_base_commit is None or self._history_depth is None:
             return None
+        visible_depth = self._history_visible_depth or self._history_depth
         try:
             result = subprocess.run(
                 [
                     "git",
                     "rev-list",
                     f"--max-count={self._history_depth}",
+                    "--topo-order",
                     self._history_base_commit,
                 ],
                 cwd=self.workspace.root,
@@ -604,14 +639,20 @@ class RcaToolRegistry(ToolRegistry):
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return frozenset()
+            return []
         if result.returncode != 0:
-            return frozenset()
-        return frozenset(
+            return []
+        commits = [
             line.strip().lower()
             for line in result.stdout.splitlines()
             if _FULL_SHA_PATTERN.fullmatch(line.strip())
-        )
+        ]
+        return commits[:visible_depth]
+
+    def _visible_commit_ids(self) -> frozenset[str] | None:
+        """Return the bounded base ancestry visible to configured Git tools."""
+        commits = self._visible_commit_list()
+        return None if commits is None else frozenset(commits)
 
     def _revision_is_visible(self, revision: str) -> bool:
         """Return whether a requested commit is in the bounded base history."""
@@ -680,11 +721,56 @@ class RcaToolRegistry(ToolRegistry):
             truncated=result.truncated or truncated,
         )
 
+    def _run_git_search_command(self, argv: list[str]) -> GitSearchCommandResult:
+        """Run one internal layered-search command through the Git safety seam."""
+        result = self._run_git_capture("git_history", argv)
+        return GitSearchCommandResult(
+            ok=result.ok,
+            output=result.content,
+            command=result.command,
+            duration_seconds=result.duration_seconds,
+        )
+
+    def search_git_layers(self, plan: GitSearchPlan) -> GitSearchSummary:
+        """Execute a deterministic layered search without exposing a new tool."""
+        if not plan.enabled:
+            if self._history_depth is not None:
+                self.set_git_history_visible_depth(1)
+            return GitSearchSummary(
+                enabled=False,
+                reached_depth=1,
+                stop_reason="disabled",
+                commands_executed=0,
+            )
+        if self._history_base_commit is None:
+            return GitSearchSummary(
+                enabled=plan.enabled,
+                reached_depth=1,
+                stop_reason="git_history_unconfigured",
+                commands_executed=0,
+                errors=["Git history is not configured for this repository"],
+            )
+        if self._history_depth is None or plan.max_depth > self._history_depth:
+            return GitSearchSummary(
+                enabled=True,
+                reached_depth=1,
+                stop_reason="plan_exceeds_configured_history",
+                commands_executed=0,
+                errors=["Git search plan exceeds the configured history depth"],
+            )
+        executor = GitSearchExecutor(
+            base_commit=self._history_base_commit,
+            run_command=self._run_git_search_command,
+            set_visible_depth=self.set_git_history_visible_depth,
+        )
+        return executor.run(plan)
+
     def git_history(self, arguments: dict[str, Any]) -> RcaToolResult:
         try:
             input_data = GitHistoryInput(**arguments)
         except (TypeError, ValueError) as exc:
             return RcaToolResult(ok=False, content=f"Invalid input: {exc}", tool="git_history")
+        visible_commits = self._visible_commit_list()
         argv = [
             "git",
             "log",
@@ -693,13 +779,18 @@ class RcaToolRegistry(ToolRegistry):
             "--no-abbrev",
             "--date=short",
             "--format=%H %ad %s",
-            f"--max-count={min(input_data.max_count, self._history_depth or input_data.max_count)}",
         ]
+        if visible_commits is None:
+            argv.append(f"--max-count={input_data.max_count}")
+        else:
+            argv.insert(2, "--no-walk")
         if input_data.grep:
             argv.append(f"--grep={input_data.grep}")
         if input_data.query:
             argv.append(f"-S{input_data.query}")
-        if self._history_base_commit is not None:
+        if visible_commits is not None:
+            argv.extend(visible_commits[: input_data.max_count])
+        elif self._history_base_commit is not None:
             argv.append(self._history_base_commit)
         if input_data.path is not None:
             try:

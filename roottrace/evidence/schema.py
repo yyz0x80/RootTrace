@@ -16,6 +16,7 @@ from pydantic import (
 from roottrace.incident.schema import Provenance, StableId, validate_commit_sha
 from roottrace.llm.schema import Usage
 from roottrace.runtime.paths import validate_relative_path
+from roottrace.tools.git_search import GitSearchSummary
 
 MAX_COMMAND_CHARS = 500
 MAX_SYMBOL_CHARS = 512
@@ -168,6 +169,13 @@ class AgentFinding(BaseModel):
     timing_seconds: float | None = Field(default=None, ge=0)
     usage: Usage | None = None
     error: str | None = Field(default=None, max_length=MAX_NOTE_CHARS)
+    git_search_summary: GitSearchSummary | None = None
+
+    @model_validator(mode="after")
+    def _validate_git_search_summary(self) -> AgentFinding:
+        if self.git_search_summary is not None and self.agent is not AgentRole.GIT_HISTORY:
+            raise ValueError("git search summaries are allowed only for Git History")
+        return self
 
 
 class VerificationStep(BaseModel):

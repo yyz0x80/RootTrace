@@ -181,6 +181,7 @@ class RcaOrchestrator:
         self._registry.configure_git_history(
             base_commit=incident.base_commit,
             history_depth=incident.git_verification_policy.history_depth,
+            visible_depth=1,
         )
         writer = (
             TraceWriter(Path(output_dir) / "execution_trace.jsonl")
@@ -480,6 +481,11 @@ class RcaOrchestrator:
                 if output.finding.usage is not None
                 else None
             ),
+            git_search_summary=(
+                output.finding.git_search_summary.model_dump(mode="json")
+                if output.finding.git_search_summary is not None
+                else None
+            ),
         )
         return output
 
@@ -620,6 +626,7 @@ class RcaOrchestrator:
         retry_count: int = 0,
         degradation: dict[str, Any] | None = None,
         git_verification_policy: dict[str, Any] | None = None,
+        git_search_summary: dict[str, Any] | None = None,
     ) -> None:
         if writer is None:
             return
@@ -635,5 +642,6 @@ class RcaOrchestrator:
                 retry_count=retry_count,
                 degradation=degradation,
                 git_verification_policy=git_verification_policy,
+                git_search_summary=git_search_summary,
             )
         )

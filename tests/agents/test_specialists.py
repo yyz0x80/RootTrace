@@ -39,7 +39,7 @@ from roottrace.incident.schema import IncidentInput, Provenance
 from roottrace.llm.schema import AssistantTurn, ToolCall
 from roottrace.llm.usage import UsageTracker
 from roottrace.runtime.workspace import RepositoryFingerprint, Workspace
-from roottrace.tools import RcaToolRegistry
+from roottrace.tools import GitSearchCandidate, GitSearchSummary, RcaToolRegistry
 
 
 class FakeProvider:
@@ -532,6 +532,109 @@ def test_git_history_specialist_uses_git_tools(rca_env) -> None:
     assert all(len(commit_id) == 40 for commit_id in output.evidence[0].commit_ids)
     assert output.evidence[1].kind == EvidenceKind.GIT_BLAME
     assert output.evidence[1].location is not None
+
+
+def test_layered_git_search_does_not_add_model_calls(git_repo) -> None:
+    context = make_context(git_repo)
+    incident = IncidentInput(
+        id="inc-layered-search",
+        repo="target",
+        base_commit=git_repo.head_sha,
+        title="Regression in multiply",
+        problem="The behavior changed after the previous commit.",
+        related_commits=[git_repo.base_sha],
+        provenance=Provenance(source="test_fixture"),
+    )
+    context = context.model_copy(
+        update={
+            "incident": incident,
+            "repository": context.repository.model_copy(
+                update={"base_commit": git_repo.head_sha}
+            ),
+            "fingerprint": context.fingerprint.model_copy(
+                update={"head_sha": git_repo.head_sha}
+            ),
+        }
+    )
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=50,
+    )
+    registry.configure_git_history(
+        base_commit=git_repo.head_sha,
+        history_depth=50,
+        visible_depth=1,
+    )
+    provider = FakeProvider(turn(content=final_response()))
+
+    output = GitHistorySpecialist(
+        provider=provider,
+        registry=registry,
+        usage=UsageTracker(),
+        budgets=PlanBudgets(
+            max_llm_calls=5,
+            max_tool_calls=5,
+            timeout_seconds=60,
+        ),
+    ).run(context, _questions())
+
+    assert len(provider.calls) == 1
+    assert output.finding.git_search_summary is not None
+    assert output.finding.git_search_summary.stop_reason == "explicit_commit_verified"
+    prepared = [
+        item
+        for item in output.evidence
+        if item.observation.startswith("layered Git search candidate")
+    ]
+    assert len(prepared) == 1
+    assert prepared[0].commit_ids == [git_repo.base_sha]
+
+
+def test_weak_layered_candidate_is_not_promoted_to_evidence(
+    rca_env,
+    git_repo,
+    monkeypatch,
+) -> None:
+    weak_candidate = GitSearchCandidate(
+        commit=git_repo.base_sha,
+        depth=8,
+        score=4,
+        matched_paths=["pkg/calc.py"],
+        matched_signals=["prepared_snippet_path:pkg/calc.py"],
+        signal_kinds=["path"],
+        strong_match=False,
+        command=f"git log --no-walk {git_repo.base_sha}",
+    )
+    summary = GitSearchSummary(
+        enabled=True,
+        attempted_depths=[8],
+        reached_depth=2,
+        candidate_commits=[git_repo.base_sha],
+        candidates=[weak_candidate],
+        stop_reason="history_exhausted",
+        commands_executed=2,
+    )
+    monkeypatch.setattr(
+        rca_env["registry"],
+        "search_git_layers",
+        lambda plan: summary,
+    )
+    provider = FakeProvider(turn(content=final_response()))
+
+    output = GitHistorySpecialist(
+        provider=provider,
+        registry=rca_env["registry"],
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    ).run(rca_env["context"], _questions())
+
+    assert not any(
+        item.observation.startswith("layered Git search candidate")
+        for item in output.evidence
+    )
+    prompt = provider.calls[0]["messages"][1]["content"]
+    assert git_repo.base_sha in prompt
 
 
 def test_git_tool_failure_is_partial_and_creates_no_evidence(rca_env) -> None:

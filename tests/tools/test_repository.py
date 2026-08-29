@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from roottrace.runtime.workspace import Workspace
-from roottrace.tools import RcaToolRegistry
+from roottrace.tools import GitSearchPlan, GitSearchQuery, RcaToolRegistry
 
 
 @pytest.fixture
@@ -189,6 +189,100 @@ def test_configured_git_tools_are_anchored_to_bounded_base_history(
     )
     assert not hidden_show.ok
     assert "bounded base history" in hidden_show.content
+
+
+def test_layered_search_opens_only_attempted_history(git_repo) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=2,
+    )
+    registry.configure_git_history(
+        base_commit=git_repo.head_sha,
+        history_depth=2,
+        visible_depth=1,
+    )
+
+    hidden_before_search = registry.execute(
+        "git_show",
+        {"revision": git_repo.base_sha},
+    )
+    summary = registry.search_git_layers(
+        GitSearchPlan(
+            enabled=True,
+            max_depth=2,
+            search_depths=[2],
+            candidate_commits=[git_repo.base_sha],
+        )
+    )
+    visible_after_search = registry.execute(
+        "git_show",
+        {"revision": git_repo.base_sha},
+    )
+
+    assert not hidden_before_search.ok
+    assert summary.stop_reason == "explicit_commit_verified"
+    assert visible_after_search.ok
+
+
+def test_layered_search_combines_real_path_and_pickaxe_evidence(git_repo) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=50,
+    )
+    registry.configure_git_history(
+        base_commit=git_repo.head_sha,
+        history_depth=50,
+        visible_depth=1,
+    )
+
+    summary = registry.search_git_layers(
+        GitSearchPlan(
+            enabled=True,
+            max_depth=50,
+            search_depths=[8, 16, 32, 50],
+            queries=[
+                GitSearchQuery(
+                    kind="path",
+                    signal="path",
+                    source="test_path",
+                    value="pkg/calc.py",
+                    weight=4,
+                ),
+                GitSearchQuery(
+                    kind="content",
+                    signal="symbol",
+                    source="test_symbol",
+                    value="multiply",
+                    weight=3,
+                ),
+            ],
+        )
+    )
+
+    assert summary.stop_reason == "path_and_content_match"
+    assert summary.attempted_depths == [8]
+    assert any(candidate.strong_match for candidate in summary.candidates)
+
+
+def test_layered_search_rejects_plan_beyond_configured_history(git_repo) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=2,
+    )
+
+    summary = registry.search_git_layers(
+        GitSearchPlan(
+            enabled=True,
+            max_depth=8,
+            search_depths=[8],
+        )
+    )
+
+    assert summary.stop_reason == "plan_exceeds_configured_history"
+    assert summary.commands_executed == 0
 
 
 def test_git_history_rejects_unsafe_input(registry: RcaToolRegistry) -> None:

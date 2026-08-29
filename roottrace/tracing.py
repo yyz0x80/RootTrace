@@ -76,6 +76,7 @@ class TraceEvent(BaseModel):
         verification_result: Detailed verification command results.
         degradation: Structured metadata when a bounded fallback was used.
         git_verification_policy: Deterministic policy for bounded Git access.
+        git_search_summary: Layered Git search outcome when history was prepared.
         retry_count: Number of retry attempts for this operation.
         final_status: Final status of the operation (e.g., "SUCCESS", "FAILURE").
         prompt_tokens: Number of prompt tokens used (for model events).
@@ -99,6 +100,7 @@ class TraceEvent(BaseModel):
     verification_result: dict[str, Any] | None = None
     degradation: dict[str, Any] | None = None
     git_verification_policy: dict[str, Any] | None = None
+    git_search_summary: dict[str, Any] | None = None
     retry_count: int = 0
     final_status: str | None = None
     prompt_tokens: int | None = None

@@ -33,6 +33,7 @@ def test_ordinary_issue_keeps_git_history_at_depth_one() -> None:
         "enabled": False,
         "reasons": ["not_triggered"],
         "history_depth": 1,
+        "search_depths": [1],
         "candidate_commits": [],
         "candidate_paths": [],
         "max_tool_calls": 1,
@@ -58,6 +59,7 @@ def test_issue_regression_signals_enable_bounded_git_verification(
     assert policy.enabled is True
     assert reason in policy.reasons
     assert policy.history_depth == MAX_GIT_HISTORY_DEPTH
+    assert policy.search_depths == [8, 16, 32, 50]
     assert policy.max_tool_calls == 5
 
 

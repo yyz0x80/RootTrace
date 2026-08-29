@@ -143,6 +143,12 @@ Rules:
 - When it is enabled, prioritize the listed candidate commits and paths, stay
   within the bounded history, and never treat a PR head commit as a regression
   commit because the checkout is pinned to the base revision.
+- The prepared Git search opens history progressively and includes only its
+  final Top-K candidates. Treat 50 commits as a hard ceiling, not a default
+  amount to inspect. Do not repeat a broad unscoped history scan.
+- A path-only or commit-message-only candidate is a weak lead, not regression
+  evidence. Inspect it with git_show or a scoped history/blame call before
+  citing it as a suspected regression.
 - Every factual claim must cite one of the provided evidence ids.
 
 Tool results identify their evidence id as "Evidence id: ev-git_history-<n>".

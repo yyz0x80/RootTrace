@@ -87,6 +87,12 @@ roottrace analyze https://github.com/owner/repo/pull/456 \
 Repository mirrors are cached under `~/.cache/roottrace/github` by default;
 use `--repo-cache` to override it.
 
+For PRs and Issues with explicit regression or commit signals, RootTrace opens
+base-commit history progressively at depths `8 → 16 → 32 → 50`. It ranks
+candidates using relevant paths, symbols, and failure signatures and stops
+early on a strong match. Fifty commits is a hard ceiling, not the default
+history sent to the model. Ordinary Issues remain limited to the base commit.
+
 ## Benchmark
 
 Results on a fixed 50-case development set derived from [SWE-bench Verified](https://github.com/princeton-nlp/SWE-bench):

@@ -26,6 +26,7 @@ MAX_TOOL_CHARS = 200
 MAX_COMMAND_CHARS = 500
 MAX_LOGS = 10
 MAX_GIT_HISTORY_DEPTH = 50
+DEFAULT_GIT_SEARCH_DEPTHS = (8, 16, 32, 50)
 MAX_GIT_CANDIDATE_COMMITS = 20
 MAX_GIT_CANDIDATE_PATHS = 20
 MAX_GIT_POLICY_REASONS = 10
@@ -108,6 +109,7 @@ class GitVerificationPolicy(BaseModel):
     enabled: bool
     reasons: list[str] = Field(default_factory=list, max_length=MAX_GIT_POLICY_REASONS)
     history_depth: int = Field(ge=1, le=MAX_GIT_HISTORY_DEPTH)
+    search_depths: list[int] = Field(default_factory=list, max_length=4)
     candidate_commits: list[str] = Field(
         default_factory=list,
         max_length=MAX_GIT_CANDIDATE_COMMITS,
@@ -146,8 +148,31 @@ class GitVerificationPolicy(BaseModel):
             raise ValueError("Git verification candidate paths must be unique")
         return normalized
 
+    @field_validator("search_depths")
+    @classmethod
+    def _validate_search_depths(cls, values: list[int]) -> list[int]:
+        if any(type(value) is not int or value < 1 for value in values):
+            raise ValueError("Git search depths must be positive integers")
+        if len(set(values)) != len(values) or values != sorted(values):
+            raise ValueError("Git search depths must be unique and ascending")
+        return values
+
     @model_validator(mode="after")
     def _validate_mode(self) -> GitVerificationPolicy:
+        if not self.search_depths:
+            self.search_depths = (
+                [
+                    depth
+                    for depth in DEFAULT_GIT_SEARCH_DEPTHS
+                    if depth <= self.history_depth
+                ]
+                if self.enabled
+                else [1]
+            )
+            if self.enabled and not self.search_depths:
+                self.search_depths = [self.history_depth]
+        if self.search_depths[-1] > self.history_depth:
+            raise ValueError("Git search depths must not exceed history depth")
         if self.enabled and self.history_depth <= 1:
             raise ValueError("enabled Git verification requires history depth greater than 1")
         if not self.enabled and self.history_depth != 1:
@@ -156,6 +181,8 @@ class GitVerificationPolicy(BaseModel):
             raise ValueError("enabled Git verification requires a reason")
         if not self.enabled and (self.candidate_commits or self.candidate_paths):
             raise ValueError("disabled Git verification must not contain candidates")
+        if not self.enabled and self.search_depths != [1]:
+            raise ValueError("disabled Git verification must use search depth 1")
         return self
 
 
@@ -205,6 +232,7 @@ def build_git_verification_policy(
         enabled=enabled,
         reasons=sorted(set(reasons)) if enabled else ["not_triggered"],
         history_depth=MAX_GIT_HISTORY_DEPTH if enabled else 1,
+        search_depths=list(DEFAULT_GIT_SEARCH_DEPTHS) if enabled else [1],
         candidate_commits=sorted(candidate_commits) if enabled else [],
         candidate_paths=sorted(candidate_paths)[:MAX_GIT_CANDIDATE_PATHS]
         if enabled
