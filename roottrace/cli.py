@@ -207,7 +207,11 @@ def run_analyze_command(args: argparse.Namespace) -> int:
         else:
             normalized = ingestor.normalize(fetched)
             revision = normalized.base_commit
-        output_dir = Path(args.output_dir or "output" / normalized.incident.id)
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else Path("output") / normalized.incident.id
+        )
         with prepare_github_repository(
             fetched.reference.repository,
             revision,

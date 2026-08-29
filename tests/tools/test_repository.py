@@ -59,6 +59,24 @@ def test_search_code_and_read_file(registry: RcaToolRegistry) -> None:
     assert "def multiply" in read.content
 
 
+def test_search_code_reports_rg_errors(registry: RcaToolRegistry) -> None:
+    result = registry.execute(
+        "search_code",
+        {"query": "traceback", "path": ".src/_pytest/debugging.py"},
+    )
+
+    assert not result.ok
+    assert "Search failed" in result.content
+    assert result.command.endswith(".src/_pytest/debugging.py")
+
+
+def test_search_code_treats_no_matches_as_success(registry: RcaToolRegistry) -> None:
+    result = registry.execute("search_code", {"query": "not-present-in-repository"})
+
+    assert result.ok
+    assert result.content == ""
+
+
 def test_file_tools_reject_bad_paths(registry: RcaToolRegistry) -> None:
     for tool in ("read_file", "inspect_symbols"):
         for bad_path in ("../secret.py", "/etc/passwd", ".git/config"):

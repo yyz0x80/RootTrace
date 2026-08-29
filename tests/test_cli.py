@@ -337,7 +337,7 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
             github_token="token",
             github_timeout=30.0,
             repo_cache=str(tmp_path / "cache"),
-            output_dir=str(tmp_path / "output"),
+            output_dir=None,
             model=None,
         )
     )
@@ -345,6 +345,7 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
     assert result == 0
     assert captured["loaded"] is normalized.loaded_incident
     assert captured["repo"] == FakePrepared.repo
+    assert captured["output_dir"] == Path("output") / normalized.incident.id
 
 
 def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:

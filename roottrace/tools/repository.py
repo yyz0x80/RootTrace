@@ -393,6 +393,18 @@ class RcaToolRegistry(ToolRegistry):
                 command=" ".join(argv),
                 duration_seconds=time.monotonic() - started,
             )
+        if result.returncode not in (0, 1):
+            detail = (result.stderr or result.stdout).strip()
+            if not detail:
+                detail = f"exit code {result.returncode}"
+            return RcaToolResult(
+                ok=False,
+                content=f"Search failed: {detail[:2_000]}",
+                tool="search_code",
+                command=" ".join(argv),
+                duration_seconds=time.monotonic() - started,
+                failure_type=ToolFailureType.TOOL_FAILURE,
+            )
         output, truncated = _bound_text(result.stdout, MAX_SEARCH_OUTPUT_CHARS)
         return RcaToolResult(
             ok=True,
