@@ -178,12 +178,14 @@ class RcaOrchestrator:
         """Run the full evidence pipeline for one incident."""
         started = time.monotonic()
         incident = loaded.incident
-        context = build_incident_context(loaded, repo)
         writer = (
             TraceWriter(Path(output_dir) / "execution_trace.jsonl")
             if output_dir is not None
             else None
         )
+        if writer is not None:
+            writer.start_run()
+        context = build_incident_context(loaded, repo)
         lead_usage = UsageTracker()
         issue_ci_usage = UsageTracker()
         code_usage = UsageTracker()
@@ -262,6 +264,17 @@ class RcaOrchestrator:
             questions,
             writer,
         )
+        for role in _ROLE_ORDER:
+            output = outputs.get(role)
+            if output is None:
+                continue
+            finding = output.finding
+            if finding.status != FindingStatus.COMPLETED:
+                status_error = f"{role.value} finding status: {finding.status.value}"
+                if status_error not in errors:
+                    errors.append(status_error)
+            if finding.error and finding.error not in errors:
+                errors.append(finding.error)
         graph = aggregate_evidence(incident, outputs)
 
         retrieval_hints: RetrievalHints | None = None
