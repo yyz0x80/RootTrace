@@ -18,7 +18,12 @@ from roottrace.agents.prompts import (
 )
 from roottrace.agents.specialists import ProviderProtocol, extract_json_object
 from roottrace.evidence.graph import EvidenceGraph
-from roottrace.evidence.schema import HypothesisDisposition
+from roottrace.evidence.schema import (
+    MAX_LOCATIONS,
+    AgentRole,
+    HypothesisDisposition,
+    SourceLocation,
+)
 from roottrace.llm.usage import UsageTracker
 from roottrace.reporting.schema import (
     RCAReport,
@@ -108,6 +113,38 @@ def _validate_ranked_causes(report: RCAReport) -> None:
             )
 
 
+def _fallback_top_k_locations(graph: EvidenceGraph) -> list[SourceLocation]:
+    """Collect stable evidence-grounded locations when synthesis omits them."""
+    candidates: list[SourceLocation] = []
+    for hypothesis in graph.hypotheses:
+        if hypothesis.disposition is not HypothesisDisposition.REJECTED:
+            candidates.extend(hypothesis.locations)
+
+    candidates.extend(
+        location
+        for finding in graph.findings
+        if finding.agent is AgentRole.CODE
+        for location in finding.ranked_locations
+    )
+    candidates.extend(
+        location
+        for finding in graph.findings
+        if finding.agent is not AgentRole.CODE
+        for location in finding.ranked_locations
+    )
+
+    locations: list[SourceLocation] = []
+    seen_paths: set[str] = set()
+    for location in candidates:
+        if location.path in seen_paths:
+            continue
+        seen_paths.add(location.path)
+        locations.append(location)
+        if len(locations) >= MAX_LOCATIONS:
+            break
+    return locations
+
+
 class LeadSynthesizer:
     """Generate the final RCA report from graph plus verification."""
 
@@ -192,4 +229,12 @@ class LeadSynthesizer:
 
         if report is None:
             raise SynthesisError("final synthesis produced no valid report")
+        if not report.top_k_locations:
+            report = report.model_copy(
+                update={
+                    "top_k_locations": _fallback_top_k_locations(
+                        report.evidence_graph
+                    )
+                }
+            )
         return report

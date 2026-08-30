@@ -10,11 +10,14 @@ import pytest
 from roottrace.agents import LeadSynthesizer, SynthesisError
 from roottrace.evidence.graph import EvidenceGraph
 from roottrace.evidence.schema import (
+    AgentFinding,
     AgentRole,
     EvidenceItem,
     EvidenceKind,
+    FindingStatus,
     Hypothesis,
     HypothesisDisposition,
+    SourceLocation,
     VerificationStep,
 )
 from roottrace.incident.schema import IncidentInput, Provenance
@@ -96,6 +99,26 @@ def _hypothesis(hypothesis_id: str) -> Hypothesis:
                 timeout_seconds=60,
             )
         ],
+    )
+
+
+def _insufficient_report_json(
+    top_k_locations: list[dict[str, object]] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "conclusion": "insufficient_evidence",
+            "conclusion_summary": "no hypothesis was verified",
+            "ranked_causes": [],
+            "top_k_locations": top_k_locations or [],
+            "causal_chain": [],
+            "suspected_regression": None,
+            "uncertainty": {
+                "level": "high",
+                "insufficient_evidence": True,
+                "notes": [],
+            },
+        }
     )
 
 
@@ -253,6 +276,149 @@ def test_synthesis_omits_empty_suspected_regression_without_changing_report(
         "ev-seed-001",
         run.results[0].evidence_ids[0],
     ]
+
+
+def test_synthesis_falls_back_to_unverified_hypothesis_locations(
+    git_repo,
+) -> None:
+    unverified = Hypothesis(
+        id="h-unverified",
+        statement="the unverified hypothesis points to the likely failure",
+        locations=[
+            SourceLocation(
+                path="pkg/likely.py",
+                symbol="likely_failure",
+                start_line=12,
+                end_line=14,
+            )
+        ],
+        disposition=HypothesisDisposition.UNVERIFIED,
+    )
+    rejected = Hypothesis(
+        id="h-rejected",
+        statement="the rejected hypothesis is disproved",
+        locations=[SourceLocation(path="pkg/rejected.py")],
+        disposition=HypothesisDisposition.REJECTED,
+    )
+    graph = _graph(git_repo, [unverified, rejected])
+    provider = FakeProvider(turn(_insufficient_report_json()))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(graph, VerificationRun(graph=graph))
+
+    assert report.conclusion.value == "insufficient_evidence"
+    assert [location.path for location in report.top_k_locations] == [
+        "pkg/likely.py"
+    ]
+    assert report.top_k_locations[0].symbol == "likely_failure"
+    assert len(provider.calls) == 1
+
+
+def test_synthesis_location_fallback_orders_sources_deduplicates_and_caps(
+    git_repo,
+) -> None:
+    hypotheses = [
+        Hypothesis(
+            id="h-001",
+            statement="first candidate",
+            locations=[
+                SourceLocation(path="pkg/shared.py", symbol="hypothesis_shared"),
+                SourceLocation(path="pkg/hypothesis.py"),
+            ],
+            disposition=HypothesisDisposition.UNVERIFIED,
+        ),
+        Hypothesis(
+            id="h-rejected",
+            statement="disproved candidate",
+            locations=[SourceLocation(path="pkg/rejected.py")],
+            disposition=HypothesisDisposition.REJECTED,
+        ),
+    ]
+    findings = [
+        AgentFinding(
+            agent=AgentRole.CODE,
+            status=FindingStatus.COMPLETED,
+            ranked_locations=[
+                SourceLocation(path="pkg/shared.py", symbol="code_shared"),
+                SourceLocation(path="pkg/code-a.py"),
+                SourceLocation(path="pkg/code-b.py"),
+            ],
+        ),
+        AgentFinding(
+            agent=AgentRole.ISSUE_CI,
+            status=FindingStatus.PARTIAL,
+            ranked_locations=[
+                SourceLocation(path="pkg/code-a.py"),
+                SourceLocation(path="pkg/issue-a.py"),
+                SourceLocation(path="pkg/issue-b.py"),
+            ],
+        ),
+        AgentFinding(
+            agent=AgentRole.GIT_HISTORY,
+            status=FindingStatus.COMPLETED,
+            ranked_locations=[
+                SourceLocation(path="pkg/issue-a.py"),
+                SourceLocation(path="pkg/git-a.py"),
+                SourceLocation(path="pkg/git-b.py"),
+                SourceLocation(path="pkg/git-c.py"),
+                SourceLocation(path="pkg/git-d.py"),
+                SourceLocation(path="pkg/git-e.py"),
+            ],
+        ),
+    ]
+    graph = _graph(git_repo, hypotheses).model_copy(update={"findings": findings})
+    provider = FakeProvider(turn(_insufficient_report_json()))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(graph, VerificationRun(graph=graph))
+
+    assert [location.path for location in report.top_k_locations] == [
+        "pkg/shared.py",
+        "pkg/hypothesis.py",
+        "pkg/code-a.py",
+        "pkg/code-b.py",
+        "pkg/issue-a.py",
+        "pkg/issue-b.py",
+        "pkg/git-a.py",
+        "pkg/git-b.py",
+        "pkg/git-c.py",
+        "pkg/git-d.py",
+    ]
+    assert report.top_k_locations[0].symbol == "hypothesis_shared"
+    assert "pkg/rejected.py" not in {
+        location.path for location in report.top_k_locations
+    }
+    assert len(provider.calls) == 1
+
+
+def test_synthesis_preserves_non_empty_model_locations(git_repo) -> None:
+    hypothesis = Hypothesis(
+        id="h-001",
+        statement="candidate with fallback location",
+        locations=[SourceLocation(path="pkg/fallback.py")],
+        disposition=HypothesisDisposition.UNVERIFIED,
+    )
+    graph = _graph(git_repo, [hypothesis])
+    model_locations = [
+        {"path": "pkg/model.py", "symbol": "first"},
+        {"path": "pkg/model.py", "symbol": "duplicate"},
+    ]
+    provider = FakeProvider(turn(_insufficient_report_json(model_locations)))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(graph, VerificationRun(graph=graph))
+
+    assert [location.model_dump(mode="json") for location in report.top_k_locations] == [
+        {"path": "pkg/model.py", "symbol": "first", "start_line": None, "end_line": None},
+        {"path": "pkg/model.py", "symbol": "duplicate", "start_line": None, "end_line": None},
+    ]
+    assert len(provider.calls) == 1
 
 
 def test_synthesis_omits_regression_object_when_git_policy_is_disabled(
@@ -513,6 +679,9 @@ def test_final_report_prompt_bans_verification_ids_and_empty_commits() -> None:
     from roottrace.agents.prompts import FINAL_REPORT_SYSTEM_PROMPT
 
     assert "verification result ids (ver-*)" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "Supported runtime verification constrains only a confirmed root cause" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "localization unavailable" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "never use locations from rejected hypotheses" in FINAL_REPORT_SYSTEM_PROMPT
     assert '"suspected_regression": null' in FINAL_REPORT_SYSTEM_PROMPT
     assert "Never emit an empty" in FINAL_REPORT_SYSTEM_PROMPT
     assert "do not use {}" in FINAL_REPORT_SYSTEM_PROMPT

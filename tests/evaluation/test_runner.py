@@ -348,6 +348,13 @@ def test_extract_predicted_files_from_report() -> None:
         ]
     }
     assert extract_predicted_files(report) == ["src/a.py", "src/b.py"]
+    assert extract_predicted_files(
+        {
+            "conclusion": "insufficient_evidence",
+            "ranked_causes": [],
+            "top_k_locations": [{"path": "src/uncertain.py"}],
+        }
+    ) == ["src/uncertain.py"]
     assert extract_predicted_files(None) == []
     assert extract_predicted_files({"top_k_locations": "bad"}) == []
 

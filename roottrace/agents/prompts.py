@@ -306,6 +306,13 @@ Rules:
   that supported result.
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
+- Supported runtime verification constrains only a confirmed root cause,
+  ranked_causes, and a ``root_cause_identified`` conclusion. It does not make
+  localization unavailable when the conclusion is ``insufficient_evidence``.
+- Even with ``conclusion=insufficient_evidence`` and an empty ranked_causes
+  list, populate top_k_locations with evidence-grounded candidates when
+  possible. Candidates may come from non-rejected hypothesis locations or
+  specialist ranked_locations; never use locations from rejected hypotheses.
 - Report a suspected regression commit only when the INVESTIGATION STATE
   contains real Git evidence: an item from the git_history agent whose tool
   and evidence kind match git_history/GIT_LOG, git_show/GIT_DIFF, or
