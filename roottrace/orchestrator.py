@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from roottrace.agents import (
     CodeSpecialist,
@@ -44,6 +44,13 @@ from roottrace.artifacts import (
     ARTIFACT_HYPOTHESES,
     ARTIFACT_INVESTIGATION_PLAN,
     ArtifactWriter,
+)
+from roottrace.diagnostics import (
+    DiagnosticSeverity,
+    PipelineDiagnostic,
+    deduplicate_diagnostics,
+    diagnostics_from_legacy,
+    project_diagnostics,
 )
 from roottrace.evidence.graph import EvidenceGraph, aggregate_evidence
 from roottrace.evidence.schema import (
@@ -82,12 +89,23 @@ class RcaRunResult(BaseModel):
     plan: InvestigationPlan
     graph: EvidenceGraph
     status: FindingStatus
+    diagnostics: list[PipelineDiagnostic] = Field(default_factory=list, max_length=20)
     errors: list[BoundedNote] = Field(default_factory=list, max_length=20)
     timing_seconds: float | None = Field(default=None, ge=0)
     usage: Usage | None = None
     isolation_violations: int = Field(default=0, ge=0)
     enabled_roles: list[str] | None = None
     retrieval: RetrievalHints | None = None
+
+    @model_validator(mode="after")
+    def _project_legacy_errors(self) -> RcaRunResult:
+        """Keep the legacy error list as a deterministic diagnostic projection."""
+        if "diagnostics" in self.model_fields_set:
+            self.diagnostics = deduplicate_diagnostics(self.diagnostics)
+        elif self.errors:
+            self.diagnostics = diagnostics_from_legacy(self.errors)
+        self.errors = project_diagnostics(self.diagnostics)
+        return self
 
 
 def _bounded_error(text: str, limit: int = 500) -> str:
@@ -280,24 +298,42 @@ class RcaOrchestrator:
                 usage=usage,
                 budgets=specialist_budgets,
             )
-        outputs, errors, isolation_violations = self._run_workers(
+        outputs, isolation_violations = self._run_workers(
             context,
             incident,
             agents,
             questions,
             writer,
         )
+        diagnostics: list[PipelineDiagnostic] = []
         for role in _ROLE_ORDER:
             output = outputs.get(role)
             if output is None:
                 continue
             finding = output.finding
-            if finding.status != FindingStatus.COMPLETED:
-                status_error = f"{role.value} finding status: {finding.status.value}"
-                if status_error not in errors:
-                    errors.append(status_error)
-            if finding.error and finding.error not in errors:
-                errors.append(finding.error)
+            if finding.error:
+                diagnostics.append(
+                    PipelineDiagnostic(
+                        code="specialist.finding_error",
+                        stage="specialist",
+                        severity=DiagnosticSeverity.RECOVERABLE,
+                        message=finding.error,
+                        agent=role,
+                    )
+                )
+            elif finding.status != FindingStatus.COMPLETED:
+                diagnostics.append(
+                    PipelineDiagnostic(
+                        code="specialist.incomplete",
+                        stage="specialist",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=(
+                            f"{role.value} finding status: "
+                            f"{finding.status.value}"
+                        ),
+                        agent=role,
+                    )
+                )
         graph = aggregate_evidence(incident, outputs)
 
         retrieval_hints: RetrievalHints | None = None
@@ -314,7 +350,7 @@ class RcaOrchestrator:
             "hypotheses_start",
             self._lead_provider.model,
         )
-        hypotheses, hypothesis_errors = self._generate_hypotheses(
+        hypotheses, hypothesis_diagnostics = self._generate_hypotheses(
             context,
             graph,
             lead_usage,
@@ -325,12 +361,16 @@ class RcaOrchestrator:
             incident.id,
             "hypotheses_end",
             self._lead_provider.model,
-            final_status="COMPLETED" if not hypothesis_errors else "PARTIAL",
+            final_status=(
+                "COMPLETED" if not hypothesis_diagnostics else "PARTIAL"
+            ),
             prompt_tokens=lead_usage.snapshot().prompt_tokens,
             completion_tokens=lead_usage.snapshot().completion_tokens,
         )
-        errors.extend(hypothesis_errors)
+        diagnostics.extend(hypothesis_diagnostics)
         graph = graph.model_copy(update={"hypotheses": hypotheses})
+        diagnostics = deduplicate_diagnostics(diagnostics)
+        legacy_errors = project_diagnostics(diagnostics)
 
         result = RcaRunResult(
             incident_id=incident.id,
@@ -338,10 +378,10 @@ class RcaOrchestrator:
             graph=graph,
             status=(
                 FindingStatus.COMPLETED
-                if not errors
+                if not legacy_errors
                 else FindingStatus.PARTIAL
             ),
-            errors=errors,
+            diagnostics=diagnostics,
             timing_seconds=round(time.monotonic() - started, 3),
             usage=_merge_usage(
                 lead_usage.snapshot(),
@@ -378,7 +418,7 @@ class RcaOrchestrator:
         agents: dict[AgentRole, Any],
         questions: dict[AgentRole, list[PlanQuestion]],
         writer: TraceWriter | None,
-    ) -> tuple[dict[AgentRole, SpecialistOutput], list[str], int]:
+    ) -> tuple[dict[AgentRole, SpecialistOutput], int]:
         executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self._worker_concurrency, max(len(agents), 1)),
             thread_name_prefix="rca-specialist",
@@ -402,7 +442,6 @@ class RcaOrchestrator:
                 + self._worker_timeout_margin_seconds
             )
             outputs: dict[AgentRole, SpecialistOutput] = {}
-            errors: list[str] = []
             isolation_violations = 0
             for role in role_order:
                 try:
@@ -411,7 +450,6 @@ class RcaOrchestrator:
                     error = _bounded_error(
                         f"{role.value} worker timed out after {timeout}s"
                     )
-                    errors.append(error)
                     outputs[role] = self._failed_output(
                         role,
                         status=FindingStatus.PARTIAL,
@@ -423,7 +461,6 @@ class RcaOrchestrator:
                     error = _bounded_error(
                         f"{role.value} worker failed: {exc}"
                     )
-                    errors.append(error)
                     outputs[role] = self._failed_output(
                         role,
                         status=FindingStatus.FAILED,
@@ -432,7 +469,7 @@ class RcaOrchestrator:
                 else:
                     isolation_violations += output.isolation_violations
                     outputs[role] = output
-            return outputs, errors, isolation_violations
+            return outputs, isolation_violations
         finally:
             for future in futures.values():
                 future.cancel()
@@ -521,7 +558,7 @@ class RcaOrchestrator:
         lead_usage: UsageTracker,
         *,
         retrieval_hints: RetrievalHints | None = None,
-    ) -> tuple[list[Hypothesis], list[str]]:
+    ) -> tuple[list[Hypothesis], list[PipelineDiagnostic]]:
         prompt = build_hypotheses_prompt(
             graph,
             retrieval_hints=retrieval_hints,
@@ -539,24 +576,58 @@ class RcaOrchestrator:
             turn.reasoning_tokens,
         )
         if turn.content is None or not turn.content.strip():
-            return [], ["hypothesis generation returned no content"]
+            return [], [
+                PipelineDiagnostic(
+                    code="hypotheses.empty",
+                    stage="hypotheses",
+                    severity=DiagnosticSeverity.RECOVERABLE,
+                    message="hypothesis generation returned no content",
+                    agent=AgentRole.LEAD,
+                )
+            ]
         try:
             data = extract_json_object(turn.content)
             raw_hypotheses = data.get("hypotheses", [])
         except (ValueError, ValidationError) as exc:
-            return [], [_bounded_error(f"malformed hypothesis output: {exc}")]
+            return [], [
+                PipelineDiagnostic(
+                    code="hypotheses.malformed",
+                    stage="hypotheses",
+                    severity=DiagnosticSeverity.RECOVERABLE,
+                    message=_bounded_error(f"malformed hypothesis output: {exc}"),
+                    agent=AgentRole.LEAD,
+                )
+            ]
         known_ids = {item.id for item in graph.evidence}
         hypotheses: list[Hypothesis] = []
-        errors: list[str] = []
+        diagnostics: list[PipelineDiagnostic] = []
         if not raw_hypotheses:
-            return [], ["hypothesis generation returned no hypotheses"]
+            return [], [
+                PipelineDiagnostic(
+                    code="hypotheses.empty",
+                    stage="hypotheses",
+                    severity=DiagnosticSeverity.WARNING,
+                    message="hypothesis generation returned no hypotheses",
+                    agent=AgentRole.LEAD,
+                )
+            ]
         for index, raw in enumerate(raw_hypotheses[: _MAX_HYPOTHESES], start=1):
             try:
                 hypothesis = Hypothesis.model_validate(
                     {**raw, "id": f"h-{index:03d}"}
                 )
             except ValidationError as exc:
-                errors.append(_bounded_error(f"hypothesis {index} invalid: {exc}"))
+                diagnostics.append(
+                    PipelineDiagnostic(
+                        code="hypotheses.invalid",
+                        stage="hypotheses",
+                        severity=DiagnosticSeverity.RECOVERABLE,
+                        message=_bounded_error(
+                            f"hypothesis {index} invalid: {exc}"
+                        ),
+                        agent=AgentRole.LEAD,
+                    )
+                )
                 continue
             referenced = (
                 *hypothesis.supporting_evidence_ids,
@@ -566,10 +637,16 @@ class RcaOrchestrator:
                 {item for item in referenced if item not in known_ids}
             )
             if unknown:
-                errors.append(
-                    _bounded_error(
-                        f"hypothesis {index} references unknown evidence ids: "
-                        f"{unknown}"
+                diagnostics.append(
+                    PipelineDiagnostic(
+                        code="hypotheses.unknown_evidence",
+                        stage="hypotheses",
+                        severity=DiagnosticSeverity.RECOVERABLE,
+                        message=_bounded_error(
+                            f"hypothesis {index} references unknown evidence ids: "
+                            f"{unknown}"
+                        ),
+                        agent=AgentRole.LEAD,
                     )
                 )
                 continue
@@ -578,10 +655,16 @@ class RcaOrchestrator:
                 command.startswith("python -m pytest")
                 for command in commands
             ):
-                errors.append(
-                    _bounded_error(
-                        f"hypothesis {index} has no sandbox-runnable pytest "
-                        "verification plan"
+                diagnostics.append(
+                    PipelineDiagnostic(
+                        code="hypotheses.invalid_verification",
+                        stage="hypotheses",
+                        severity=DiagnosticSeverity.RECOVERABLE,
+                        message=_bounded_error(
+                            f"hypothesis {index} has no sandbox-runnable pytest "
+                            "verification plan"
+                        ),
+                        agent=AgentRole.LEAD,
                     )
                 )
                 continue
@@ -592,7 +675,7 @@ class RcaOrchestrator:
                     }
                 )
             )
-        return hypotheses, errors
+        return hypotheses, diagnostics
 
     @staticmethod
     def _persist(

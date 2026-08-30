@@ -39,6 +39,7 @@ from roottrace.artifacts import (
     ARTIFACT_VERIFICATION,
     ArtifactWriter,
 )
+from roottrace.diagnostics import merge_diagnostics, project_diagnostics
 from roottrace.evidence.graph import EvidenceGraph
 from roottrace.evidence.schema import AgentRole
 from roottrace.github import (
@@ -306,6 +307,17 @@ def run_rca_pipeline(
         usage=UsageTracker(),
     )
     report = synthesizer.synthesize(verification.graph, verification)
+    if synthesizer.diagnostics:
+        diagnostics = merge_diagnostics(
+            run_result.diagnostics,
+            synthesizer.diagnostics,
+        )
+        run_result = run_result.model_copy(
+            update={
+                "diagnostics": diagnostics,
+                "errors": project_diagnostics(diagnostics),
+            }
+        )
     _trace(trace, incident.id, "synthesis_end", run_result)
 
     writer = ArtifactWriter(output)
@@ -449,6 +461,10 @@ def _persist_run_summary(
             if run_result.usage is not None
             else None,
             "synthesis_usage": synthesizer_usage.model_dump(mode="json"),
+            "diagnostics": [
+                diagnostic.model_dump(mode="json")
+                for diagnostic in run_result.diagnostics
+            ],
             "errors": run_result.errors,
             "isolation_violations": run_result.isolation_violations,
             "enabled_roles": run_result.enabled_roles,

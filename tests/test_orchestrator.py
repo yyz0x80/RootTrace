@@ -313,6 +313,14 @@ def test_worker_failure_is_partial_and_preserves_others(
     result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
     assert result.status == FindingStatus.PARTIAL
     assert any("code worker failed" in error for error in result.errors)
+    code_diagnostics = [
+        diagnostic
+        for diagnostic in result.diagnostics
+        if diagnostic.agent is AgentRole.CODE
+    ]
+    assert len(code_diagnostics) == 1
+    assert code_diagnostics[0].code == "specialist.finding_error"
+    assert "finding status" not in code_diagnostics[0].message
     findings = {finding.agent: finding for finding in result.graph.findings}
     assert findings[AgentRole.CODE].status == FindingStatus.FAILED
     assert findings[AgentRole.CODE].uncertainty.value == "high"
@@ -344,6 +352,8 @@ def test_specialist_partial_status_degrades_run_without_worker_exception(
 
     assert result.status == FindingStatus.PARTIAL
     assert "code finding status: partial" in result.errors
+    assert result.diagnostics[0].code == "specialist.incomplete"
+    assert result.diagnostics[0].severity.value == "warning"
     findings = {finding.agent: finding for finding in result.graph.findings}
     assert findings[AgentRole.CODE].status == FindingStatus.PARTIAL
     assert findings[AgentRole.ISSUE_CI].status == FindingStatus.COMPLETED

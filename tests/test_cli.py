@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -170,7 +171,9 @@ def _report_json() -> str:
     )
 
 
-def _scripted_factory() -> list[FakeProvider]:
+def _scripted_factory(
+    final_responses: list[str] | None = None,
+) -> Callable[[], FakeProvider]:
     providers = [
         FakeProvider(turn(PLAN_JSON), turn(HYPOTHESES_JSON)),
         FakeProvider(turn(ISSUE_CI_FINAL)),
@@ -182,13 +185,14 @@ def _scripted_factory() -> list[FakeProvider]:
             tool_turn("git_history", {"max_count": 10}),
             turn(GIT_FINAL),
         ),
-        FakeProvider(turn(_report_json())),
+        FakeProvider(
+            *(turn(response) for response in (final_responses or [_report_json()]))
+        ),
     ]
 
     def factory() -> FakeProvider:
         return providers.pop(0)
 
-    factory.providers = providers
     return factory
 
 
@@ -421,6 +425,45 @@ def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
 
     after = capture_repository_fingerprint(git_repo.repo)
     assert before.model_dump(mode="json") == after.model_dump(mode="json")
+
+
+def test_run_rca_pipeline_persists_synthesis_degradation_diagnostic(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    issue, ci_log = _issue_files(git_repo, tmp_path)
+    loaded = load_incident(issue, git_repo.repo, ci_log_path=ci_log)
+    payload = json.loads(_report_json())
+    payload["suspected_regression"] = {
+        "commit": git_repo.base_sha,
+        "summary": "the base commit may contain the regression",
+        "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
+    }
+    invalid_response = json.dumps(payload)
+    output_dir = tmp_path / "degraded-out"
+
+    result = run_rca_pipeline(
+        loaded,
+        git_repo.repo,
+        output_dir,
+        provider_factory=_scripted_factory(
+            [invalid_response, invalid_response]
+        ),
+        budgets=PlanBudgets(),
+        log_sources={"ci.log": ci_log},
+    )
+
+    assert result.report.suspected_regression is None
+    assert [diagnostic.code for diagnostic in result.run.diagnostics] == [
+        "synthesis.suspected_regression_removed"
+    ]
+    summary = json.loads(
+        (output_dir / "run_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["diagnostics"][0]["severity"] == "recoverable"
+    assert summary["errors"] == [
+        "Invalid suspected_regression was removed after synthesis repair failed"
+    ]
 
 
 def test_run_rca_command_with_scripted_providers(

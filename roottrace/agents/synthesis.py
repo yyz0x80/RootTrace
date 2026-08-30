@@ -17,6 +17,7 @@ from roottrace.agents.prompts import (
     build_final_report_prompt,
 )
 from roottrace.agents.specialists import ProviderProtocol, extract_json_object
+from roottrace.diagnostics import DiagnosticSeverity, PipelineDiagnostic
 from roottrace.evidence.graph import EvidenceGraph
 from roottrace.evidence.schema import (
     MAX_LOCATIONS,
@@ -67,6 +68,19 @@ def _normalize_suspected_regression(
     ):
         normalized["suspected_regression"] = None
     return normalized
+
+
+def _has_missing_regression_evidence_ids(
+    data: dict[str, object] | None,
+) -> bool:
+    """Return whether a regression object omitted its required evidence ids."""
+    if data is None:
+        return False
+    regression = data.get("suspected_regression")
+    if not isinstance(regression, dict) or not regression:
+        return False
+    evidence_ids = regression.get("evidence_ids")
+    return evidence_ids is None or evidence_ids == []
 
 
 def _validate_supported_causes(report: RCAReport) -> None:
@@ -145,6 +159,36 @@ def _fallback_top_k_locations(graph: EvidenceGraph) -> list[SourceLocation]:
     return locations
 
 
+def _build_report(
+    data: dict[str, object],
+    graph: EvidenceGraph,
+    verification: VerificationRun,
+    usage: UsageTracker,
+) -> RCAReport:
+    """Build and fully validate one candidate final report."""
+    report = RCAReport.model_validate(
+        {
+            **data,
+            "id": f"rca-{graph.incident.id}",
+            "incident_id": graph.incident.id,
+            "evidence_graph": graph,
+            "verification": [
+                result.model_dump(mode="json")
+                for result in verification.results
+            ],
+            "timing": {
+                "total_seconds": None,
+                "model_seconds": None,
+                "verification_seconds": verification.timing_seconds,
+            },
+            "usage": usage.snapshot(),
+        }
+    )
+    _validate_ranked_causes(report)
+    _validate_supported_causes(report)
+    return report
+
+
 class LeadSynthesizer:
     """Generate the final RCA report from graph plus verification."""
 
@@ -160,6 +204,42 @@ class LeadSynthesizer:
         self._provider = provider
         self._usage = usage
         self._max_attempts = max_attempts
+        self._diagnostics: list[PipelineDiagnostic] = []
+
+    @property
+    def diagnostics(self) -> list[PipelineDiagnostic]:
+        """Return diagnostics emitted while producing the final report."""
+        return list(self._diagnostics)
+
+    def _try_regression_salvage(
+        self,
+        data: dict[str, object] | None,
+        graph: EvidenceGraph,
+        verification: VerificationRun,
+    ) -> RCAReport | None:
+        """Drop only an invalid regression claim when all other fields validate."""
+        if not _has_missing_regression_evidence_ids(data):
+            return None
+        assert data is not None
+        candidate = dict(data)
+        candidate["suspected_regression"] = None
+        try:
+            report = _build_report(candidate, graph, verification, self._usage)
+        except (SynthesisError, TypeError, ValueError, ValidationError):
+            return None
+        self._diagnostics.append(
+            PipelineDiagnostic(
+                code="synthesis.suspected_regression_removed",
+                stage="synthesis",
+                severity=DiagnosticSeverity.RECOVERABLE,
+                message=(
+                    "Invalid suspected_regression was removed after "
+                    "synthesis repair failed"
+                ),
+                agent=AgentRole.LEAD,
+            )
+        )
+        return report
 
     def synthesize(
         self,
@@ -173,6 +253,7 @@ class LeadSynthesizer:
         retried once. Persistent failures still raise ``SynthesisError`` so
         malformed outputs stay explicit and usage stays honest.
         """
+        self._diagnostics = []
         prompt = build_final_report_prompt(graph, verification.results)
         report: RCAReport | None = None
         last_error: Exception | None = None
@@ -193,35 +274,25 @@ class LeadSynthesizer:
             )
             if turn.content is None or not turn.content.strip():
                 raise SynthesisError("final synthesis returned no content")
+            data: dict[str, object] | None = None
             try:
                 data = extract_json_object(turn.content)
                 if not isinstance(data, dict):
                     raise TypeError("final synthesis output must be a JSON object")
                 data = _normalize_suspected_regression(data, graph)
-                report = RCAReport.model_validate(
-                    {
-                        **data,
-                        "id": f"rca-{graph.incident.id}",
-                        "incident_id": graph.incident.id,
-                        "evidence_graph": graph,
-                        "verification": [
-                            result.model_dump(mode="json")
-                            for result in verification.results
-                        ],
-                        "timing": {
-                            "total_seconds": None,
-                            "model_seconds": None,
-                            "verification_seconds": verification.timing_seconds,
-                        },
-                        "usage": self._usage.snapshot(),
-                    }
-                )
-                _validate_ranked_causes(report)
-                _validate_supported_causes(report)
+                report = _build_report(data, graph, verification, self._usage)
             except (TypeError, ValueError, ValidationError) as exc:
                 last_error = exc
                 if attempt < self._max_attempts - 1:
                     continue
+                if attempt > 0:
+                    report = self._try_regression_salvage(
+                        data,
+                        graph,
+                        verification,
+                    )
+                    if report is not None:
+                        break
                 raise SynthesisError(
                     f"malformed final synthesis output: {exc}"
                 ) from exc

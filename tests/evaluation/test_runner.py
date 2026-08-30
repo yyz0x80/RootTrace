@@ -23,6 +23,7 @@ from evaluation.runner import (
     load_public_cases,
     run_from_args,
 )
+from roottrace.diagnostics import DiagnosticSeverity
 from roottrace.incident.schema import IncidentInput
 
 _REPO = "acme/demo"
@@ -244,6 +245,7 @@ def test_case_failure_does_not_abort_benchmark(tmp_path) -> None:
     )
     assert failed.status == "error"
     assert "simulated failure" in (failed.error or "")
+    assert failed.diagnostics[0].severity is DiagnosticSeverity.FATAL
     metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["aggregate"]["coverage"] == 0.5
     assert metrics["aggregate"]["failed_cases"] == 1
@@ -376,6 +378,27 @@ def test_rca_errors_surface_in_result(tmp_path) -> None:
     )
     assert result.status == "completed"
     assert result.rca_errors == ["code worker failed: excerpt too long"]
+    assert len(result.diagnostics) == 1
+    assert result.diagnostics[0].stage == "legacy"
+    assert result.diagnostics[0].message == result.rca_errors[0]
+
+
+def test_case_result_reads_legacy_payload_without_diagnostics(tmp_path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    output_dir = tmp_path / "out"
+    client = FakeRootTraceClient(predictions={"acme__demo-1": ["pkg/mod.py"]})
+    assert run_from_args(_args(data_root, output_dir, max_cases=1), client=client) == 0
+    result_path = output_dir / "cases" / "acme__demo-1" / "result.json"
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    payload.pop("diagnostics")
+    payload["schema_version"] = "1.0"
+    payload["rca_errors"] = ["legacy partial result"]
+
+    result = CaseResult.model_validate(payload)
+
+    assert result.schema_version == "1.0"
+    assert result.rca_errors == ["legacy partial result"]
+    assert result.diagnostics[0].code == "legacy.error"
 
 
 def test_sum_or_none_usage_merge() -> None:

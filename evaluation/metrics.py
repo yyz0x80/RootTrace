@@ -11,9 +11,17 @@ import statistics
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from roottrace.diagnostics import (
+    PipelineDiagnostic,
+    deduplicate_diagnostics,
+    diagnostics_from_legacy,
+    project_diagnostics,
+)
 
 MAX_PREDICTED_FILES = 10
+CASE_RESULT_SCHEMA_VERSION = "1.1"
 
 CaseStatus = Literal["completed", "error"]
 
@@ -45,12 +53,13 @@ class CaseMetrics(BaseModel):
 class CaseResult(BaseModel):
     """Persisted per-case evaluation record (Evaluator artifact)."""
 
-    schema_version: str = "1.0"
+    schema_version: str = CASE_RESULT_SCHEMA_VERSION
     instance_id: str
     repo: str | None = None
     base_commit: str | None = None
     status: CaseStatus
     error: str | None = None
+    diagnostics: list[PipelineDiagnostic] = Field(default_factory=list, max_length=20)
     rca_errors: list[str] = Field(default_factory=list, max_length=20)
     variant: str = ""
     config_hash: str | None = None
@@ -61,6 +70,16 @@ class CaseResult(BaseModel):
     llm_calls: int | None = None
     usage: dict | None = None
     artifacts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _project_legacy_errors(self) -> CaseResult:
+        """Keep the legacy RCA error list as a diagnostic projection."""
+        if "diagnostics" in self.model_fields_set:
+            self.diagnostics = deduplicate_diagnostics(self.diagnostics)
+        elif self.rca_errors:
+            self.diagnostics = diagnostics_from_legacy(self.rca_errors)
+        self.rca_errors = project_diagnostics(self.diagnostics)
+        return self
 
 
 class AggregateMetrics(BaseModel):

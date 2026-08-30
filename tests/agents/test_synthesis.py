@@ -819,3 +819,120 @@ def test_synthesis_raises_after_repair_retries_exhausted(
         LeadSynthesizer(provider=provider, usage=usage).synthesize(run.graph, run)
     assert len(provider.calls) == 2
     assert usage.snapshot().llm_calls == 2
+
+
+def test_synthesis_drops_regression_missing_evidence_after_repair(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    del payload["suspected_regression"]["evidence_ids"]
+    response = json.dumps(payload)
+    provider = FakeProvider(turn(response), turn(response))
+    synthesizer = LeadSynthesizer(provider=provider, usage=UsageTracker())
+
+    report = synthesizer.synthesize(run.graph, run)
+
+    assert len(provider.calls) == 2
+    assert report.suspected_regression is None
+    assert report.conclusion.value == payload["conclusion"]
+    assert [location.path for location in report.top_k_locations] == [
+        location["path"] for location in payload["top_k_locations"]
+    ]
+    assert [diagnostic.code for diagnostic in synthesizer.diagnostics] == [
+        "synthesis.suspected_regression_removed"
+    ]
+
+
+def test_synthesis_drops_regression_and_falls_back_to_graph_locations(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    payload["top_k_locations"] = []
+    del payload["suspected_regression"]["evidence_ids"]
+    response = json.dumps(payload)
+    provider = FakeProvider(turn(response), turn(response))
+    graph = run.graph.model_copy(
+        update={
+            "hypotheses": [
+                hypothesis.model_copy(
+                    update={"locations": [SourceLocation(path="pkg/calc.py")]}
+                )
+                for hypothesis in run.graph.hypotheses
+            ]
+        }
+    )
+    verification = run.model_copy(update={"graph": graph})
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(graph, verification)
+
+    assert report.suspected_regression is None
+    assert [location.path for location in report.top_k_locations] == [
+        "pkg/calc.py"
+    ]
+
+
+def test_synthesis_does_not_salvage_other_invalid_fields(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    del payload["suspected_regression"]["evidence_ids"]
+    payload["top_k_locations"] = [{"path": "../outside.py"}]
+    response = json.dumps(payload)
+    provider = FakeProvider(turn(response), turn(response))
+
+    with pytest.raises(SynthesisError, match="malformed final synthesis output"):
+        LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
+            run.graph,
+            run,
+        )
+
+
+def test_synthesis_successful_repair_emits_no_degradation_diagnostic(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    invalid = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    del invalid["suspected_regression"]["evidence_ids"]
+    valid = json.loads(json.dumps(invalid))
+    valid["suspected_regression"]["evidence_ids"] = ["ev-git_history-001"]
+    provider = FakeProvider(turn(json.dumps(invalid)), turn(json.dumps(valid)))
+    synthesizer = LeadSynthesizer(provider=provider, usage=UsageTracker())
+
+    report = synthesizer.synthesize(run.graph, run)
+
+    assert report.suspected_regression is not None
+    assert synthesizer.diagnostics == []
