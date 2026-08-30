@@ -279,6 +279,48 @@ def test_synthesis_omits_regression_object_when_git_policy_is_disabled(
     assert report.suspected_regression is None
 
 
+def test_synthesis_keeps_qualified_regression_when_git_policy_is_disabled(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    qualified_evidence = EvidenceItem(
+        id="ev-git_history-001",
+        agent=AgentRole.GIT_HISTORY,
+        kind=EvidenceKind.GIT_LOG,
+        observation="base commit history",
+        provenance=Provenance(
+            source="test_fixture",
+            tool="git_history",
+            command="git log --format=%H",
+            commit=git_repo.base_sha,
+        ),
+        excerpt=f"{git_repo.base_sha} 2024-01-01 initial implementation",
+        commit_ids=[git_repo.base_sha],
+    )
+    graph = run.graph.model_copy(
+        update={"evidence": [*run.graph.evidence, qualified_evidence]}
+    )
+    verification = run.model_copy(update={"graph": graph})
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    provider = FakeProvider(turn(json.dumps(payload)))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(graph, verification)
+
+    assert not graph.incident.git_verification_policy.enabled
+    assert report.suspected_regression is not None
+    assert report.suspected_regression.commit == git_repo.base_sha
+
+
 def test_synthesis_omits_regression_object_without_qualified_git_evidence(
     git_repo,
     tmp_path: Path,
@@ -309,6 +351,52 @@ def test_synthesis_omits_regression_object_without_qualified_git_evidence(
 
     assert graph.incident.git_verification_policy.enabled is True
     assert report.suspected_regression is None
+
+
+def test_synthesis_rejects_wrong_regression_evidence_with_qualified_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    payload["suspected_regression"]["evidence_ids"] = ["ev-seed-001"]
+    response = json.dumps(payload)
+    provider = FakeProvider(turn(response), turn(response))
+
+    with pytest.raises(SynthesisError, match="real Git tool evidence"):
+        LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
+            run.graph,
+            run,
+        )
+
+
+def test_synthesis_rejects_wrong_regression_commit_with_qualified_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    payload["suspected_regression"]["commit"] = "c" * 40
+    response = json.dumps(payload)
+    provider = FakeProvider(turn(response), turn(response))
+
+    with pytest.raises(SynthesisError, match="not verifiable"):
+        LeadSynthesizer(provider=provider, usage=UsageTracker()).synthesize(
+            run.graph,
+            run,
+        )
 
 
 def test_synthesis_rejects_malformed_output(git_repo, tmp_path: Path) -> None:
@@ -428,6 +516,8 @@ def test_final_report_prompt_bans_verification_ids_and_empty_commits() -> None:
     assert '"suspected_regression": null' in FINAL_REPORT_SYSTEM_PROMPT
     assert "Never emit an empty" in FINAL_REPORT_SYSTEM_PROMPT
     assert "do not use {}" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "controls only the bounded Git search budget" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "never determines whether a regression is admissible" in FINAL_REPORT_SYSTEM_PROMPT
 
 
 def _invalid_report_json() -> str:

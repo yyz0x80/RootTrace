@@ -310,6 +310,9 @@ Rules:
   contains real Git evidence: an item from the git_history agent whose tool
   and evidence kind match git_history/GIT_LOG, git_show/GIT_DIFF, or
   git_blame/GIT_BLAME, and whose commit_ids contains a real commit SHA.
+- git_verification_policy.enabled controls only the bounded Git search budget
+  and prioritization; it never determines whether a regression is admissible.
+  Admissibility depends solely on qualifying Git evidence.
 - suspected_regression.commit must be an exact 7-64 character hexadecimal SHA
   found in the cited evidence. When no qualifying Git evidence is available,
   set suspected_regression to null or omit it entirely. Never emit an empty

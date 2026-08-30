@@ -127,8 +127,6 @@ class Timing(BaseModel):
 
 def has_qualified_git_regression_evidence(graph: EvidenceGraph) -> bool:
     """Return whether the graph contains usable Git regression evidence."""
-    if not graph.incident.git_verification_policy.enabled:
-        return False
     return any(
         item.agent is AgentRole.GIT_HISTORY
         and _GIT_REGRESSION_EVIDENCE_KINDS.get(item.provenance.tool) is item.kind
@@ -142,11 +140,6 @@ def _validate_suspected_regression(
     graph: EvidenceGraph,
 ) -> None:
     """Require a regression commit to be backed by real Git evidence."""
-    policy = graph.incident.git_verification_policy
-    if not policy.enabled:
-        raise ValueError(
-            "suspected_regression requires enabled Git verification"
-        )
     if not change.evidence_ids:
         raise ValueError("suspected_regression requires evidence_ids")
 

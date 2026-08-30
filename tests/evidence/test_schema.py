@@ -474,7 +474,8 @@ def test_qualified_git_regression_evidence_requires_matching_tool_kind_and_commi
             graph.evidence[1],
         ]
     )
-    assert not has_qualified_git_regression_evidence(disabled_graph)
+    assert not disabled_graph.incident.git_verification_policy.enabled
+    assert has_qualified_git_regression_evidence(disabled_graph)
 
     mismatched_evidence = make_evidence(
         evidence_id="ev-git-mismatch",
@@ -504,7 +505,7 @@ def test_suspected_regression_commit_must_match_git_evidence() -> None:
         )
 
 
-def test_suspected_regression_is_rejected_when_policy_is_disabled() -> None:
+def test_suspected_regression_is_accepted_when_policy_is_disabled_with_qualified_evidence() -> None:
     graph = make_graph(
         evidence=[
             make_evidence(),
@@ -519,13 +520,42 @@ def test_suspected_regression_is_rejected_when_policy_is_disabled() -> None:
         ]
     )
 
-    with pytest.raises(ValidationError, match="enabled Git verification"):
+    assert not graph.incident.git_verification_policy.enabled
+    report = make_report(
+        evidence_graph=graph,
+        incident_id=graph.incident.id,
+        suspected_regression=RegressionChange(
+            commit="b" * 40,
+            evidence_ids=["ev-git-1"],
+        ),
+    )
+
+    assert report.suspected_regression is not None
+
+
+def test_suspected_regression_rejects_illegal_git_evidence_when_policy_is_disabled() -> None:
+    graph = make_graph(
+        evidence=[
+            make_evidence(),
+            make_evidence(
+                evidence_id="ev-git-invalid",
+                agent=AgentRole.GIT_HISTORY,
+                kind=EvidenceKind.GIT_LOG,
+                provenance=make_provenance(tool="git_show"),
+                excerpt=f"{'b' * 40} 2024-01-01 change",
+                commit_ids=["b" * 40],
+            ),
+        ]
+    )
+
+    assert not graph.incident.git_verification_policy.enabled
+    with pytest.raises(ValidationError, match="real Git tool evidence"):
         make_report(
             evidence_graph=graph,
             incident_id=graph.incident.id,
             suspected_regression=RegressionChange(
                 commit="b" * 40,
-                evidence_ids=["ev-git-1"],
+                evidence_ids=["ev-git-invalid"],
             ),
         )
 
