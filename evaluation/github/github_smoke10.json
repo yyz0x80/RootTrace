@@ -1,0 +1,121 @@
+{
+  "name": "github_smoke10",
+  "seed": 42,
+  "instances": [
+    {
+      "instance_id": "astropy__astropy-14369",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/astropy/astropy/issues/14355",
+      "repo": "astropy/astropy",
+      "base_commit": "fa4e8d1cd279acf9b24560813c8652494ccd5922",
+      "gold_files": [
+        "astropy/units/format/cds.py",
+        "astropy/units/format/cds_parsetab.py"
+      ]
+    },
+    {
+      "instance_id": "astropy__astropy-7336",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/astropy/astropy/issues/7335",
+      "repo": "astropy/astropy",
+      "base_commit": "732d89c2940156bdc0e200bb36dc38b5e424bcba",
+      "gold_files": [
+        "astropy/units/decorators.py"
+      ]
+    },
+    {
+      "instance_id": "matplotlib__matplotlib-20859",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/matplotlib/matplotlib/issues/20723",
+      "repo": "matplotlib/matplotlib",
+      "base_commit": "64619e53e9d0ed417daba287ac0d3a06943a54d5",
+      "gold_files": [
+        "lib/matplotlib/legend.py"
+      ]
+    },
+    {
+      "instance_id": "pydata__xarray-3305",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/pydata/xarray/issues/3304",
+      "repo": "pydata/xarray",
+      "base_commit": "69c7e01e5167a3137c285cb50d1978252bb8bcbf",
+      "gold_files": [
+        "xarray/core/dataset.py",
+        "xarray/core/variable.py"
+      ]
+    },
+    {
+      "instance_id": "psf__requests-1766",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/psf/requests/issues/1765",
+      "repo": "psf/requests",
+      "base_commit": "847735553aeda6e6633f2b32e14ba14ba86887a4",
+      "gold_files": [
+        "requests/auth.py"
+      ]
+    },
+    {
+      "instance_id": "pylint-dev__pylint-6386",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/pylint-dev/pylint/issues/6385",
+      "repo": "pylint-dev/pylint",
+      "base_commit": "754b487f4d892e3d4872b6fc7468a71db4e31c13",
+      "gold_files": [
+        "pylint/config/argument.py",
+        "pylint/config/arguments_manager.py",
+        "pylint/config/utils.py",
+        "pylint/lint/base_options.py"
+      ]
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5262",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/pytest-dev/pytest/issues/5257",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "58e6a09db49f34886ff13f3b7520dd0bcd7063cd",
+      "gold_files": [
+        "src/_pytest/capture.py"
+      ]
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5809",
+      "source_type": "github_issue",
+      "source_url": "https://github.com/pytest-dev/pytest/issues/5806",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "8aba863a634f40560e25055d179220f0eefabe9a",
+      "gold_files": [
+        "src/_pytest/pastebin.py"
+      ]
+    },
+    {
+      "instance_id": "pallets__flask-pr4682-regression5774",
+      "source_type": "github_pr",
+      "source_url": "https://github.com/pallets/flask/pull/4682",
+      "regression_issue_url": "https://github.com/pallets/flask/issues/5774",
+      "repo": "pallets/flask",
+      "base_commit": "cbebdae698272eeea2739988ccce54b1f14a1a67",
+      "bad_pr_base_commit": "c757882",
+      "bad_pr_head_commit": "e0dad454",
+      "expected_files": [
+        "src/flask/helpers.py"
+      ],
+      "fix_evidence_url": "https://github.com/pallets/flask/pull/5799",
+      "manual_review_required": true
+    },
+    {
+      "instance_id": "pytest__pytest-pr12414-regression13312",
+      "source_type": "github_pr",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/12414",
+      "regression_issue_url": "https://github.com/pytest-dev/pytest/issues/13312",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "214d098fcce88940f5ce9353786b3cc8f0bd3938",
+      "bad_pr_base_commit": "b41d5a52",
+      "bad_pr_head_commit": "153a436",
+      "expected_files": [
+        "src/_pytest/fixtures.py"
+      ],
+      "fix_evidence_url": "https://github.com/pytest-dev/pytest/pull/13442",
+      "manual_review_required": true
+    }
+  ]
+}
