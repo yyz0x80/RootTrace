@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -71,12 +72,13 @@ def _run_git(
 def _git_env(token: str | None) -> dict[str, str] | None:
     if not token:
         return None
+    credentials = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
     env = os.environ.copy()
     env.update(
         {
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "http.extraheader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: bearer {token}",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credentials}",
         }
     )
     return env
@@ -158,6 +160,56 @@ def _mirror_has_revision(mirror: Path, revision: str) -> bool:
     return result.returncode == 0
 
 
+def _bound_shallow_history(
+    repo: Path,
+    mirror: Path,
+    revision: str,
+    history_depth: int,
+) -> None:
+    """Cap a shallow checkout to at most ``history_depth`` visible commits.
+
+    ``git fetch --depth=N`` limits graph distance, not commit count. Merge-heavy
+    histories can therefore expose hundreds of side-branch commits for a small
+    depth. Keep the longest first-parent prefix whose merge-parent tips also fit
+    the public history budget, then mark its boundary commits as shallow.
+    """
+    raw = _run_git(
+        [
+            "rev-list",
+            "--parents",
+            "--first-parent",
+            f"--max-count={history_depth}",
+            revision,
+        ],
+        cwd=mirror,
+        timeout=30,
+    )
+    rows = [line.split() for line in raw.splitlines() if line.strip()]
+    if not rows:
+        raise GitHubRepositoryError("repository revision has no visible commit history")
+
+    selected: list[str] = []
+    side_boundaries: set[str] = set()
+    for index, row in enumerate(rows):
+        candidate_selected = [*selected, row[0]]
+        candidate_sides = set(side_boundaries)
+        if index > 0:
+            previous = rows[index - 1]
+            candidate_sides.update(previous[2:])
+        visible = set(candidate_selected) | candidate_sides
+        if len(visible) > history_depth:
+            break
+        selected = candidate_selected
+        side_boundaries = candidate_sides
+
+    shallow_boundaries = side_boundaries | {selected[-1]}
+    shallow_path = repo / ".git" / "shallow"
+    shallow_path.write_text(
+        "".join(f"{commit}\n" for commit in sorted(shallow_boundaries)),
+        encoding="ascii",
+    )
+
+
 def _verify_checkout(repo: Path, revision: str, history_depth: int) -> None:
     head = _run_git(["rev-parse", "HEAD"], cwd=repo, timeout=30)
     if head != revision:
@@ -225,7 +277,11 @@ def prepare_github_repository(
     try:
         repo.mkdir()
         _run_git(["init", "--quiet"], cwd=repo, timeout=60)
-        _run_git(["remote", "add", "origin", str(mirror)], cwd=repo, timeout=60)
+        # Git optimizes ordinary local-path transports by copying objects
+        # directly, which can ignore ``--depth`` and expose the mirror's full
+        # history.  The ``file://`` transport preserves shallow-fetch
+        # semantics while keeping the source inside the validated cache.
+        _run_git(["remote", "add", "origin", mirror.as_uri()], cwd=repo, timeout=60)
         _run_git(
             [
                 "fetch",
@@ -237,6 +293,7 @@ def prepare_github_repository(
             cwd=repo,
             env=_git_env(token),
         )
+        _bound_shallow_history(repo, mirror, revision, history_depth)
         _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo, timeout=120)
         _verify_checkout(repo, revision, history_depth)
     except Exception:
