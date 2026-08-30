@@ -30,6 +30,7 @@ from roottrace.reporting.schema import (
     RCAReport,
     RegressionChange,
     ReportConclusion,
+    has_qualified_git_regression_evidence,
 )
 from roottrace.tools import GitSearchSummary
 from roottrace.verification.schema import (
@@ -461,6 +462,32 @@ def test_suspected_regression_requires_real_git_evidence() -> None:
                 evidence_ids=["ev-1"],
             ),
         )
+
+
+def test_qualified_git_regression_evidence_requires_matching_tool_kind_and_commit() -> None:
+    graph = _git_backed_graph()
+    assert has_qualified_git_regression_evidence(graph)
+
+    disabled_graph = make_graph(
+        evidence=[
+            make_evidence(),
+            graph.evidence[1],
+        ]
+    )
+    assert not has_qualified_git_regression_evidence(disabled_graph)
+
+    mismatched_evidence = make_evidence(
+        evidence_id="ev-git-mismatch",
+        agent=AgentRole.GIT_HISTORY,
+        kind=EvidenceKind.GIT_LOG,
+        provenance=make_provenance(tool="git_show"),
+        excerpt="git show output without a matching evidence kind",
+    )
+    mismatched_graph = EvidenceGraph(
+        incident=graph.incident,
+        evidence=[make_evidence(), mismatched_evidence],
+    )
+    assert not has_qualified_git_regression_evidence(mismatched_graph)
 
 
 def test_suspected_regression_commit_must_match_git_evidence() -> None:

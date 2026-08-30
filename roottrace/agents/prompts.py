@@ -307,11 +307,13 @@ Rules:
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
 - Report a suspected regression commit only when the INVESTIGATION STATE
-  contains Git History evidence from git_history, git_show, or git_blame that
-  supports it.
+  contains real Git evidence: an item from the git_history agent whose tool
+  and evidence kind match git_history/GIT_LOG, git_show/GIT_DIFF, or
+  git_blame/GIT_BLAME, and whose commit_ids contains a real commit SHA.
 - suspected_regression.commit must be an exact 7-64 character hexadecimal SHA
-  found in the evidence; when no real commit sha is available, omit
-  suspected_regression entirely. Never emit an empty or placeholder commit.
+  found in the cited evidence. When no qualifying Git evidence is available,
+  set suspected_regression to null or omit it entirely. Never emit an empty
+  object, empty, or placeholder commit.
 - Fix recommendations are advisory text and scope only. Never embed diffs,
   patches, edit commands, or repository mutation commands.
 - Preserve uncertainty from partial worker failures and unverified
@@ -344,12 +346,7 @@ Output only one JSON object with this schema:
       "evidence_ids": ["<existing-evidence-id>"]
     }
   ],
-  "suspected_regression": {
-    "commit": "7-character-or-longer hex sha",
-    "summary": "short summary",
-    "evidence_ids": ["<existing-evidence-id>"],
-    "locations": [{"path": "<repo-relative-path>"}]
-  },
+  "suspected_regression": null,
   "fix_recommendation": {
     "scope": "advisory fix scope",
     "suggestions": ["advisory suggestion text"],
@@ -365,7 +362,9 @@ Output only one JSON object with this schema:
 Rules for fields:
 - conclusion root_cause_identified requires at least one ranked cause.
 - All hypothesis_id and evidence_id values must exist in the provided context.
-- suspected_regression is optional and only when supported.
+- suspected_regression is optional and only when supported by qualifying Git
+  evidence and a real commit SHA. Without that evidence, use null or omit it;
+  do not use {}.
 - fix_recommendation is optional and strictly advisory.
 """
 
@@ -438,7 +437,9 @@ def build_final_report_prompt(
         "\n\nEVIDENCE DOMAIN RULE:\n"
         f"Evidence was gathered only by agents: {evidence_agents}.\n"
         "Cite only evidence ids listed under evidence above; never invent ids.\n"
-        "If 'git_history' evidence is absent, omit suspected_regression entirely.\n"
+        "Include suspected_regression only for real Git evidence with a matching "
+        "Git tool/kind pair and at least one commit SHA; otherwise use null or "
+        "omit it, never {}.\n"
         "If 'issue_ci' evidence is absent, do not cite issue/CI evidence ids."
     )
     return (

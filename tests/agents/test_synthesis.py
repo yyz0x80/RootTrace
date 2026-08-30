@@ -231,6 +231,86 @@ def test_synthesis_produces_validated_report(git_repo, tmp_path: Path) -> None:
     assert report.usage.prompt_tokens == 20
 
 
+def test_synthesis_omits_empty_suspected_regression_without_changing_report(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    payload = json.loads(
+        _report_json(git_repo, run.results[0].evidence_ids[0])
+    )
+    payload["suspected_regression"] = {}
+    provider = FakeProvider(turn(json.dumps(payload)))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(run.graph, run)
+
+    assert report.suspected_regression is None
+    assert report.top_k_locations[0].path == "pkg/calc.py"
+    assert report.ranked_causes[0].evidence_ids == [
+        "ev-seed-001",
+        run.results[0].evidence_ids[0],
+    ]
+
+
+def test_synthesis_omits_regression_object_when_git_policy_is_disabled(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path)
+    payload = json.loads(
+        _report_json(git_repo, run.results[0].evidence_ids[0])
+    )
+    payload["suspected_regression"] = {
+        "commit": git_repo.base_sha,
+        "summary": "unsupported regression claim",
+        "evidence_ids": ["ev-seed-001"],
+        "locations": [],
+    }
+    provider = FakeProvider(turn(json.dumps(payload)))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(run.graph, run)
+
+    assert report.suspected_regression is None
+
+
+def test_synthesis_omits_regression_object_without_qualified_git_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    run = _verified_run(git_repo, tmp_path, include_git_history=True)
+    graph = run.graph.model_copy(
+        update={
+            "evidence": [
+                item
+                for item in run.graph.evidence
+                if item.id != "ev-git_history-001"
+            ]
+        }
+    )
+    payload = json.loads(
+        _report_json(
+            git_repo,
+            run.results[0].evidence_ids[0],
+            include_regression=True,
+        )
+    )
+    provider = FakeProvider(turn(json.dumps(payload)))
+
+    report = LeadSynthesizer(
+        provider=provider,
+        usage=UsageTracker(),
+    ).synthesize(graph, run.model_copy(update={"graph": graph}))
+
+    assert graph.incident.git_verification_policy.enabled is True
+    assert report.suspected_regression is None
+
+
 def test_synthesis_rejects_malformed_output(git_repo, tmp_path: Path) -> None:
     run = _verified_run(git_repo, tmp_path)
     provider = FakeProvider(
@@ -332,7 +412,8 @@ def test_final_report_prompt_exposes_evidence_domain_and_never_primes_ids(
     assert "EVIDENCE DOMAIN RULE" in prompt
     assert "'code'" in prompt
     assert "never invent ids" in prompt
-    assert "omit suspected_regression" in prompt
+    assert "suspected_regression" in prompt
+    assert "otherwise use null or omit it, never {}" in prompt
     # The schema must not prime the model with concrete evidence ids, which
     # caused hallucinated ids like ev-git_history-001 in partial runs.
     assert "ev-code-001" not in FINAL_REPORT_SYSTEM_PROMPT
@@ -344,7 +425,9 @@ def test_final_report_prompt_bans_verification_ids_and_empty_commits() -> None:
     from roottrace.agents.prompts import FINAL_REPORT_SYSTEM_PROMPT
 
     assert "verification result ids (ver-*)" in FINAL_REPORT_SYSTEM_PROMPT
-    assert "Never emit an empty or placeholder commit" in FINAL_REPORT_SYSTEM_PROMPT
+    assert '"suspected_regression": null' in FINAL_REPORT_SYSTEM_PROMPT
+    assert "Never emit an empty" in FINAL_REPORT_SYSTEM_PROMPT
+    assert "do not use {}" in FINAL_REPORT_SYSTEM_PROMPT
 
 
 def _invalid_report_json() -> str:
@@ -468,7 +551,10 @@ def test_synthesis_raises_after_repair_retries_exhausted(
     tmp_path: Path,
 ) -> None:
     run = _verified_run(git_repo, tmp_path)
-    provider = FakeProvider(turn(_invalid_report_json()), turn(_invalid_report_json()))
+    invalid_payload = json.loads(_invalid_report_json())
+    invalid_payload["suspected_regression"] = []
+    invalid_response = json.dumps(invalid_payload)
+    provider = FakeProvider(turn(invalid_response), turn(invalid_response))
     usage = UsageTracker()
     with pytest.raises(SynthesisError, match="malformed final synthesis output"):
         LeadSynthesizer(provider=provider, usage=usage).synthesize(run.graph, run)

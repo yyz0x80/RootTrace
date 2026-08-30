@@ -20,7 +20,11 @@ from roottrace.agents.specialists import ProviderProtocol, extract_json_object
 from roottrace.evidence.graph import EvidenceGraph
 from roottrace.evidence.schema import HypothesisDisposition
 from roottrace.llm.usage import UsageTracker
-from roottrace.reporting.schema import RCAReport, ReportConclusion
+from roottrace.reporting.schema import (
+    RCAReport,
+    ReportConclusion,
+    has_qualified_git_regression_evidence,
+)
 from roottrace.verification.schema import VerificationOutcome
 from roottrace.verification.verifier import VerificationRun
 
@@ -43,6 +47,21 @@ def _repair_feedback(error: Exception) -> str:
         "Fix exactly these validation errors and output the corrected JSON "
         f"object only:\n{text}"
     )
+
+
+def _normalize_suspected_regression(
+    data: dict[str, object],
+    graph: EvidenceGraph,
+) -> dict[str, object]:
+    """Normalize unsupported object-shaped regression claims to ``None``."""
+    normalized = dict(data)
+    regression = normalized.get("suspected_regression")
+    if regression == {} or (
+        isinstance(regression, dict)
+        and not has_qualified_git_regression_evidence(graph)
+    ):
+        normalized["suspected_regression"] = None
+    return normalized
 
 
 def _validate_supported_causes(report: RCAReport) -> None:
@@ -139,6 +158,9 @@ class LeadSynthesizer:
                 raise SynthesisError("final synthesis returned no content")
             try:
                 data = extract_json_object(turn.content)
+                if not isinstance(data, dict):
+                    raise TypeError("final synthesis output must be a JSON object")
+                data = _normalize_suspected_regression(data, graph)
                 report = RCAReport.model_validate(
                     {
                         **data,
@@ -159,7 +181,7 @@ class LeadSynthesizer:
                 )
                 _validate_ranked_causes(report)
                 _validate_supported_causes(report)
-            except (ValueError, ValidationError) as exc:
+            except (TypeError, ValueError, ValidationError) as exc:
                 last_error = exc
                 if attempt < self._max_attempts - 1:
                     continue

@@ -35,6 +35,11 @@ _FORBIDDEN_MODIFICATION_COMMANDS = (
     "git apply", "git am", "git reset --hard", "git checkout --",
     "patch -p", "apply_patch",
 )
+_GIT_REGRESSION_EVIDENCE_KINDS = {
+    "git_history": EvidenceKind.GIT_LOG,
+    "git_show": EvidenceKind.GIT_DIFF,
+    "git_blame": EvidenceKind.GIT_BLAME,
+}
 
 
 class ReportConclusion(str, Enum):
@@ -120,6 +125,18 @@ class Timing(BaseModel):
     verification_seconds: float | None = Field(default=None, ge=0)
 
 
+def has_qualified_git_regression_evidence(graph: EvidenceGraph) -> bool:
+    """Return whether the graph contains usable Git regression evidence."""
+    if not graph.incident.git_verification_policy.enabled:
+        return False
+    return any(
+        item.agent is AgentRole.GIT_HISTORY
+        and _GIT_REGRESSION_EVIDENCE_KINDS.get(item.provenance.tool) is item.kind
+        and bool(item.commit_ids)
+        for item in graph.evidence
+    )
+
+
 def _validate_suspected_regression(
     change: RegressionChange,
     graph: EvidenceGraph,
@@ -135,18 +152,12 @@ def _validate_suspected_regression(
 
     evidence_by_id = {item.id: item for item in graph.evidence}
     referenced = [evidence_by_id[item_id] for item_id in change.evidence_ids]
-    allowed_tools = {
-        "git_history": EvidenceKind.GIT_LOG,
-        "git_show": EvidenceKind.GIT_DIFF,
-        "git_blame": EvidenceKind.GIT_BLAME,
-    }
     invalid = [
         item.id
         for item in referenced
         if (
             item.agent is not AgentRole.GIT_HISTORY
-            or item.provenance.tool not in allowed_tools
-            or item.kind is not allowed_tools.get(item.provenance.tool)
+            or _GIT_REGRESSION_EVIDENCE_KINDS.get(item.provenance.tool) is not item.kind
         )
     ]
     if invalid:
