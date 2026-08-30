@@ -22,6 +22,7 @@ import ast
 import re
 import subprocess
 import time
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -85,6 +86,7 @@ class RcaToolResult:
     command: str = ""
     duration_seconds: float = 0.0
     truncated: bool = False
+    empty: bool = False
     failure_type: ToolFailureType | None = None
 
 
@@ -381,6 +383,7 @@ class RcaToolRegistry(ToolRegistry):
             command=getattr(result, "command", ""),
             duration_seconds=getattr(result, "duration_seconds", 0.0),
             truncated=getattr(result, "truncated", False),
+            empty=getattr(result, "empty", False),
             failure_type=failure_type,
         )
 
@@ -455,14 +458,19 @@ class RcaToolRegistry(ToolRegistry):
                 command=" ".join(argv),
                 duration_seconds=time.monotonic() - started,
             )
+        if result.returncode == 1:
+            return RcaToolResult(
+                ok=True,
+                content="No matches",
+                tool="search_code",
+                command=" ".join(argv),
+                duration_seconds=time.monotonic() - started,
+                empty=True,
+            )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             if not detail:
-                detail = (
-                    "no matches"
-                    if result.returncode == 1
-                    else f"exit code {result.returncode}"
-                )
+                detail = f"exit code {result.returncode}"
             return RcaToolResult(
                 ok=False,
                 content=f"Search failed: {detail[:2_000]}",
@@ -503,7 +511,10 @@ class RcaToolRegistry(ToolRegistry):
             )
         started = time.monotonic()
         try:
-            tree = ast.parse(resolved.read_text(encoding="utf-8"), filename=str(resolved))
+            source = resolved.read_text(encoding="utf-8")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(source, filename=str(resolved))
         except SyntaxError as exc:
             return RcaToolResult(
                 ok=False,

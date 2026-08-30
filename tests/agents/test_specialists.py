@@ -469,6 +469,33 @@ def test_code_specialist_records_tool_evidence_with_provenance(rca_env) -> None:
     assert output.evidence[0].location.path == "pkg/calc.py"
 
 
+def test_code_specialist_treats_empty_search_as_normal_feedback(rca_env) -> None:
+    provider = FakeProvider(
+        turn(
+            tool_calls=[
+                call(
+                    "c1",
+                    "search_code",
+                    {"query": "not-present-in-repository"},
+                )
+            ]
+        ),
+        turn(content=final_response()),
+    )
+
+    output = CodeSpecialist(
+        provider=provider,
+        registry=rca_env["registry"],
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    ).run(rca_env["context"], _questions())
+
+    assert output.finding.status == FindingStatus.COMPLETED
+    assert output.finding.error is None
+    assert output.evidence == []
+    assert provider.calls[1]["messages"][-1]["content"] == "No matches"
+
+
 def test_code_specialist_malformed_output_is_explicit(rca_env) -> None:
     provider = FakeProvider(turn(content="I think the bug is in calc.py"))
     output = CodeSpecialist(

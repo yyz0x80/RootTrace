@@ -328,6 +328,8 @@ class _Specialist:
             )
         result = self._registry.execute(call.name, call.arguments)
         if result.ok:
+            if result.empty:
+                return result.content
             evidence = self._evidence_from_tool(
                 call.name,
                 result,

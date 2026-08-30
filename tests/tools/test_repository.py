@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import warnings
 from pathlib import Path
 
 import pytest
@@ -52,9 +54,10 @@ def test_search_code_and_read_file(registry: RcaToolRegistry) -> None:
 
     # A query that looks like a flag must be treated as a literal pattern.
     literal = registry.execute("search_code", {"query": "--files"})
-    assert not literal.ok
+    assert literal.ok
+    assert literal.empty
     assert literal.command.split()[2] == "--"
-    assert "no matches" in literal.content
+    assert literal.content == "No matches"
 
     read = registry.execute("read_file", {"path": "pkg/calc.py", "raw": True})
     assert read.ok
@@ -72,13 +75,15 @@ def test_search_code_reports_rg_errors(registry: RcaToolRegistry) -> None:
     assert result.command.endswith(".src/_pytest/debugging.py")
 
 
-def test_search_code_rejects_no_matches_as_empty_evidence(
+def test_search_code_returns_no_matches_as_normal_empty_result(
     registry: RcaToolRegistry,
 ) -> None:
     result = registry.execute("search_code", {"query": "not-present-in-repository"})
 
-    assert not result.ok
-    assert result.content == "Search failed: no matches"
+    assert result.ok
+    assert result.empty
+    assert result.content == "No matches"
+    assert result.failure_type is None
 
 
 def test_file_tools_reject_bad_paths(registry: RcaToolRegistry) -> None:
@@ -107,6 +112,25 @@ def test_inspect_symbols_lists_python_symbols(registry: RcaToolRegistry) -> None
     assert filtered.ok
     assert "multiply" in filtered.content
     assert "def add" not in filtered.content
+
+
+def test_inspect_symbols_suppresses_syntax_warnings(
+    registry: RcaToolRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_parse = ast.parse
+
+    def warning_parse(*args, **kwargs):
+        warnings.warn("invalid escape sequence", SyntaxWarning, stacklevel=1)
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(ast, "parse", warning_parse)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = registry.execute("inspect_symbols", {"path": "pkg/calc.py"})
+
+    assert result.ok
+    assert caught == []
 
 
 def test_inspect_symbols_handles_invalid_files(registry: RcaToolRegistry, git_repo) -> None:
