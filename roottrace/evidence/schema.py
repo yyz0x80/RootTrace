@@ -13,13 +13,16 @@ from pydantic import (
     model_validator,
 )
 
-from roottrace.incident.schema import Provenance, StableId, validate_commit_sha
+from roottrace.incident.schema import (
+    Provenance,
+    SourceLocation,
+    StableId,
+    validate_commit_sha,
+)
 from roottrace.llm.schema import Usage
-from roottrace.runtime.paths import validate_relative_path
 from roottrace.tools.git_search import GitSearchSummary
 
 MAX_COMMAND_CHARS = 500
-MAX_SYMBOL_CHARS = 512
 MAX_EXCERPT_CHARS = 8_000
 MAX_OBSERVATION_CHARS = 2_000
 MAX_STATEMENT_CHARS = 2_000
@@ -57,6 +60,7 @@ class EvidenceKind(str, Enum):
     GIT_BLAME = "git_blame"
     GIT_DIFF = "git_diff"
     TEST_RESULT = "test_result"
+    PR_REVIEW_COMMENT = "pr_review_comment"
     OTHER = "other"
 
 
@@ -89,28 +93,6 @@ class HypothesisDisposition(str, Enum):
     SUPPORTED = "supported"
     REJECTED = "rejected"
     UNVERIFIED = "unverified"
-
-
-class SourceLocation(BaseModel):
-    path: str
-    symbol: str | None = Field(default=None, max_length=MAX_SYMBOL_CHARS)
-    start_line: int | None = Field(default=None, ge=1)
-    end_line: int | None = Field(default=None, ge=1)
-
-    @field_validator("path")
-    @classmethod
-    def _validate_path(cls, value: str) -> str:
-        return validate_relative_path(value)
-
-    @model_validator(mode="after")
-    def _validate_line_range(self) -> SourceLocation:
-        if (
-            self.start_line is not None
-            and self.end_line is not None
-            and self.end_line < self.start_line
-        ):
-            raise ValueError("end_line must be >= start_line")
-        return self
 
 
 class EvidenceItem(BaseModel):

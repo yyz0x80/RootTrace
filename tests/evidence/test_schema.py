@@ -22,7 +22,13 @@ from roottrace.evidence.schema import (
     UncertaintyLevel,
     VerificationStep,
 )
-from roottrace.incident.schema import IncidentInput, Provenance
+from roottrace.incident.schema import (
+    IncidentInput,
+    Provenance,
+    ReviewCommentEvidence,
+    ReviewCommentThread,
+    ReviewCommentTruncation,
+)
 from roottrace.llm.schema import Usage
 from roottrace.reporting.schema import (
     FixRecommendation,
@@ -184,6 +190,68 @@ def test_evidence_round_trip() -> None:
     assert rebuilt == evidence
     assert rebuilt.id == "ev-1"
     assert rebuilt.provenance.source == "issue.md:12"
+
+
+def test_review_comment_contract_round_trip_and_evidence_kind() -> None:
+    review = ReviewCommentEvidence(
+        id="ev-github-review-comment-7",
+        comment_id=7,
+        thread_id="review-thread-7",
+        author="reviewer",
+        excerpt="Please handle the empty value.",
+        provenance=Provenance(
+            source="https://github.com/acme/demo/pull/8#discussion_r7",
+            tool="github_rest_client",
+            commit="a" * 40,
+        ),
+        location=SourceLocation(
+            path="src/app.py",
+            start_line=10,
+            end_line=12,
+        ),
+        location_source_comment_id=7,
+        location_mapping="analysis_revision",
+        line=12,
+        start_line=10,
+        original_line=11,
+        original_start_line=9,
+        commit_id="a" * 40,
+        original_commit_id="b" * 40,
+        pull_request_review_id=3,
+        subject_type="line",
+    )
+    thread = ReviewCommentThread(
+        id="review-thread-7",
+        root_comment_id=7,
+        rank=1,
+        score=8,
+        score_reasons=["changed_file"],
+        comments=[review],
+    )
+    incident = make_incident(
+        resource_kind="pull_request",
+        review_threads=[thread],
+        review_comment_truncation=ReviewCommentTruncation(
+            threads_considered=1,
+            comments_considered=1,
+        ),
+    )
+
+    rebuilt = IncidentInput.model_validate(incident.model_dump(mode="json"))
+    item = EvidenceItem(
+        id=review.id,
+        agent=AgentRole.ISSUE_CI,
+        kind=EvidenceKind.PR_REVIEW_COMMENT,
+        observation="pull request review comment",
+        provenance=review.provenance,
+        location=review.location,
+        excerpt=review.excerpt,
+    )
+
+    assert rebuilt == incident
+    assert item.kind is EvidenceKind.PR_REVIEW_COMMENT
+    assert item.location == review.location
+    assert item.provenance.source.endswith("discussion_r7")
 
 
 def test_git_evidence_round_trip_preserves_full_commit_ids() -> None:

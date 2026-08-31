@@ -245,6 +245,22 @@ class _Specialist:
             )
             self._seed.append(item)
             self._evidence.append(item)
+        for thread in incident.review_threads:
+            for comment in thread.comments:
+                item = EvidenceItem(
+                    id=comment.id,
+                    agent=self.role,
+                    kind=EvidenceKind.PR_REVIEW_COMMENT,
+                    observation=(
+                        f"pull request review comment {comment.comment_id} "
+                        f"from thread {comment.thread_id}"
+                    ),
+                    provenance=comment.provenance,
+                    location=comment.location,
+                    excerpt=comment.excerpt,
+                )
+                self._seed.append(item)
+                self._evidence.append(item)
 
     def _prepare_evidence(self, context: IncidentContext) -> None:
         """Prepare deterministic evidence before the first model call."""

@@ -23,11 +23,16 @@ from roottrace.agents.prompts import (
     build_lead_prompt,
 )
 from roottrace.agents.schema import MAX_QUESTIONS, PlanBudgets, PlanQuestion
+from roottrace.evidence.graph import aggregate_evidence
 from roottrace.evidence.schema import (
     AgentRole,
     EvidenceKind,
     FindingStatus,
     UncertaintyLevel,
+)
+from roottrace.github import (
+    GitHubPullRequestReviewComment,
+    select_review_comment_threads,
 )
 from roottrace.incident.context import (
     ContextTruncation,
@@ -403,6 +408,113 @@ def test_issue_ci_seeds_incident_evidence(rca_env) -> None:
     assert all(
         item.provenance.source == "incident_input" for item in output.evidence
     )
+
+
+def test_issue_ci_seeds_one_provenance_item_per_review_comment(rca_env) -> None:
+    base_commit = rca_env["context"].incident.base_commit
+    raw_comment = GitHubPullRequestReviewComment(
+        id=101,
+        body="Review the multiplication branch.",
+        html_url="https://github.com/acme/widget/pull/8#discussion_r101",
+        path="pkg/calc.py",
+        line=8,
+        commit_id=base_commit,
+    )
+    review_threads, truncation = select_review_comment_threads(
+        [raw_comment],
+        base_commit=base_commit,
+        resource_url="https://github.com/acme/widget/pull/8",
+    )
+    incident = IncidentInput(
+        id="inc-review-001",
+        repo="target",
+        base_commit=base_commit,
+        resource_kind="pull_request",
+        title="multiply regression",
+        problem="multiply returns the wrong result",
+        review_threads=review_threads,
+        review_comment_truncation=truncation,
+        provenance=Provenance(source="test_fixture"),
+    )
+    context = rca_env["context"].model_copy(update={"incident": incident})
+    output = IssueCISpecialist(
+        provider=FakeProvider(turn(content=final_response())),
+        registry=rca_env["registry"],
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    ).run(context, _questions())
+
+    review_evidence = [
+        item for item in output.evidence if item.kind is EvidenceKind.PR_REVIEW_COMMENT
+    ]
+    assert len(review_evidence) == 1
+    item = review_evidence[0]
+    assert item.id == "ev-github-review-comment-101"
+    assert item.provenance.source.endswith("discussion_r101")
+    assert item.provenance.tool == "github_rest_client"
+    assert item.provenance.commit == base_commit
+    assert item.location is not None
+    assert item.location.path == "pkg/calc.py"
+    assert item.location.start_line == 8
+    assert item.location.end_line == 8
+    graph = aggregate_evidence(
+        incident,
+        {AgentRole.ISSUE_CI: output},
+    )
+    graph_item = next(
+        evidence
+        for evidence in graph.evidence
+        if evidence.kind is EvidenceKind.PR_REVIEW_COMMENT
+    )
+    assert graph_item.id == item.id
+    assert graph_item.provenance.source == item.provenance.source
+
+
+def test_review_comment_prompt_visibility_is_role_bounded(rca_env) -> None:
+    base_commit = rca_env["context"].incident.base_commit
+    body = "review-unique-claim " + ("context " * 200)
+    raw_comment = GitHubPullRequestReviewComment(
+        id=102,
+        body=body,
+        html_url="https://github.com/acme/widget/pull/8#discussion_r102",
+        path="pkg/calc.py",
+        line=8,
+        commit_id=base_commit,
+    )
+    review_threads, truncation = select_review_comment_threads(
+        [raw_comment],
+        base_commit=base_commit,
+        resource_url="https://github.com/acme/widget/pull/8",
+    )
+    bounded_body = review_threads[0].comments[0].excerpt
+    incident = IncidentInput(
+        id="inc-review-002",
+        repo="target",
+        base_commit=base_commit,
+        resource_kind="pull_request",
+        title="multiply regression",
+        problem="multiply returns the wrong result",
+        review_threads=review_threads,
+        review_comment_truncation=truncation,
+        provenance=Provenance(source="test_fixture"),
+    )
+    context = rca_env["context"].model_copy(update={"incident": incident})
+
+    lead_prompt = build_lead_prompt(context)
+    issue_prompt = build_issue_ci_prompt(context, _questions())
+    code_prompt = build_code_prompt(context, _questions())
+    git_prompt = build_git_history_prompt(context, _questions())
+    escaped_body = json.dumps(bounded_body, ensure_ascii=False)[1:-1]
+
+    assert escaped_body in lead_prompt
+    assert escaped_body in issue_prompt
+    assert bounded_body[:300] in code_prompt
+    assert bounded_body[500:] not in code_prompt
+    assert body not in git_prompt
+    assert "pkg/calc.py" in code_prompt
+    assert "pkg/calc.py" in git_prompt
+    assert "analysis_revision" in code_prompt
+    assert "ev-github-review-comment-102" in git_prompt
 
 
 def test_issue_ci_can_read_external_log(rca_env) -> None:
