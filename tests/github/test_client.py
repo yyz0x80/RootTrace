@@ -17,6 +17,7 @@ from roottrace.github import (
     GitHubPermissionError,
     GitHubPullRequestFile,
     GitHubPullRequestRef,
+    GitHubPullRequestReviewComment,
     GitHubRateLimitError,
     GitHubResponseError,
     GitHubTransportResponse,
@@ -153,6 +154,134 @@ def test_client_fetches_pr_files_and_commits(pull_ref) -> None:
     ]
 
 
+def test_client_deduplicates_review_comments_by_id_and_keeps_first_order(pull_ref) -> None:
+    """Review comments keep first-seen IDs and retain same-body distinct IDs."""
+    transport = FakeTransport(
+        response(
+            [
+                {"id": 2, "body": "second"},
+                {"id": 1, "body": "first"},
+                {"id": 2, "body": "later duplicate"},
+                {"id": 3, "body": "same body"},
+                {"id": 4, "body": "same body"},
+            ]
+        )
+    )
+    client = GitHubClient(transport=transport)
+
+    comments = client.list_pull_request_review_comments(pull_ref)
+
+    assert [comment.id for comment in comments] == [2, 1, 3, 4]
+    assert [comment.body for comment in comments] == [
+        "second",
+        "first",
+        "same body",
+        "same body",
+    ]
+    assert all(isinstance(comment, GitHubPullRequestReviewComment) for comment in comments)
+
+
+def test_client_deduplicates_review_comments_across_pages(pull_ref) -> None:
+    """Duplicate review IDs across API pages retain the first page's value."""
+    next_url = (
+        "https://api.github.com/repos/acme/widget/pulls/8/comments"
+        "?per_page=2&page=2"
+    )
+    transport = FakeTransport(
+        response(
+            [{"id": 10, "body": "first"}, {"id": 20, "body": "page one"}],
+            headers={"Link": f'<{next_url}>; rel="next"'},
+        ),
+        response(
+            [
+                {"id": 20, "body": "duplicate from page two"},
+                {"id": 30, "body": "page two"},
+            ]
+        ),
+    )
+    client = GitHubClient(transport=transport)
+
+    comments = client.list_pull_request_review_comments(pull_ref, per_page=2)
+
+    assert [comment.id for comment in comments] == [10, 20, 30]
+    assert [comment.body for comment in comments] == ["first", "page one", "page two"]
+    assert [request.full_url for request in transport.requests] == [
+        "https://api.github.com/repos/acme/widget/pulls/8/comments?per_page=2&page=1",
+        next_url,
+    ]
+
+
+def test_client_returns_empty_review_comment_response(pull_ref) -> None:
+    """An empty review-comment endpoint response normalizes to an empty list."""
+    client = GitHubClient(transport=FakeTransport(response([])))
+
+    assert client.list_pull_request_review_comments(pull_ref) == []
+
+
+def test_client_rejects_malformed_review_comment_response(pull_ref) -> None:
+    """Review-comment responses must be lists of objects with numeric IDs."""
+    with pytest.raises(GitHubResponseError, match="response must be a JSON list"):
+        GitHubClient(transport=FakeTransport(response({"id": 1}))).list_pull_request_review_comments(
+            pull_ref
+        )
+    with pytest.raises(GitHubResponseError, match="item 0 has an invalid shape"):
+        GitHubClient(transport=FakeTransport(response([{"body": "missing id"}]))).list_pull_request_review_comments(
+            pull_ref
+        )
+
+
+def test_client_preserves_review_comment_thread_and_location_fields(pull_ref) -> None:
+    """The dedicated model exposes threaded and source-location metadata."""
+    payload = {
+        "id": 42,
+        "body": "Please use the helper.",
+        "path": "src/app.py",
+        "line": 12,
+        "side": "RIGHT",
+        "start_line": 10,
+        "start_side": "RIGHT",
+        "original_line": 11,
+        "original_start_line": 9,
+        "position": 33,
+        "original_position": 30,
+        "commit_id": "a" * 40,
+        "in_reply_to_id": 41,
+        "diff_hunk": "@@ -9,4 +10,4 @@",
+    }
+    client = GitHubClient(transport=FakeTransport(response([payload])))
+
+    comment = client.list_pull_request_review_comments(pull_ref)[0]
+
+    assert comment.path == "src/app.py"
+    assert comment.line == 12
+    assert comment.side == "RIGHT"
+    assert comment.start_line == 10
+    assert comment.original_line == 11
+    assert comment.original_start_line == 9
+    assert comment.position == 33
+    assert comment.original_position == 30
+    assert comment.commit_id == "a" * 40
+    assert comment.in_reply_to_id == 41
+    assert comment.diff_hunk == "@@ -9,4 +10,4 @@"
+
+
+def test_client_enforces_raw_review_comment_max_items_before_deduplication(pull_ref) -> None:
+    """Duplicate IDs cannot make a raw paginated response fit the item budget."""
+    next_url = "https://api.github.com/repos/acme/widget/pulls/8/comments?page=2"
+    transport = FakeTransport(
+        response(
+            [{"id": 1, "body": "first"}, {"id": 1, "body": "duplicate"}],
+            headers={"Link": f"<{next_url}>; rel=next"},
+        )
+    )
+    client = GitHubClient(transport=transport)
+
+    with pytest.raises(GitHubPaginationError, match="max_items=2"):
+        client.list_pull_request_review_comments(pull_ref, max_items=2)
+
+    assert len(transport.requests) == 1
+
+
 @pytest.mark.parametrize(
     ("status_code", "error_type", "payload", "headers"),
     [
@@ -263,4 +392,3 @@ def test_client_pagination_query_is_well_formed(issue_ref) -> None:
 
     query = parse_qs(urlsplit(transport.requests[0].full_url).query)
     assert query == {"per_page": ["3"], "page": ["1"]}
-

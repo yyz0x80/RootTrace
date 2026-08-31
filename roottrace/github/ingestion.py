@@ -26,6 +26,7 @@ from .models import (
     GitHubPullRequestDetail,
     GitHubPullRequestFile,
     GitHubPullRequestReview,
+    GitHubPullRequestReviewComment,
     GitHubResource,
     GitHubResourceRef,
     GitHubUser,
@@ -45,6 +46,7 @@ class GitHubFetchedResource(BaseModel):
     reference: GitHubResource
     detail: GitHubIssueDetail | GitHubPullRequestDetail
     comments: list[GitHubComment] = Field(default_factory=list)
+    review_comments: list[GitHubPullRequestReviewComment] = Field(default_factory=list)
     reviews: list[GitHubPullRequestReview] = Field(default_factory=list)
     files: list[GitHubPullRequestFile] = Field(default_factory=list)
     commits: list[GitHubCommit] = Field(default_factory=list)
@@ -98,6 +100,15 @@ def _user_name(user: GitHubUser | None) -> str:
 def _comment_log(comment: GitHubComment) -> str:
     body = _bounded_text((comment.body or "").strip(), MAX_INGESTION_COMMENT_CHARS)
     return f"GitHub comment by @{_user_name(comment.user)}:\n{body}".strip()
+
+
+def _review_comment_log(comment: GitHubPullRequestReviewComment) -> str:
+    """Render bounded code-review text with source file/line provenance."""
+    body = _bounded_text((comment.body or "").strip(), MAX_INGESTION_COMMENT_CHARS)
+    path = (comment.path or "").strip()
+    line = comment.line if comment.line is not None else comment.original_line
+    location = f" on {path}:{line}" if path and line is not None else f" on {path}" if path else ""
+    return f"GitHub code review comment by @{_user_name(comment.user)}{location}:\n{body}".strip()
 
 
 def _commit_log(commit: GitHubCommit) -> str:
@@ -177,10 +188,12 @@ class GitHubIngestor:
         detail = self.client.get_resource_detail(reference)
         comments = self.client.list_comments(reference)
         if reference.kind == "pull_request":
+            review_comments = self.client.list_pull_request_review_comments(reference)
             files = self.client.list_pull_request_files(reference)
             commits = self.client.list_pull_request_commits(reference)
             reviews = self.client.list_pull_request_reviews(reference)
         else:
+            review_comments = []
             reviews = []
             files = []
             commits = []
@@ -188,6 +201,7 @@ class GitHubIngestor:
             reference=reference,
             detail=detail,
             comments=comments,
+            review_comments=review_comments,
             reviews=reviews,
             files=files,
             commits=commits,
@@ -229,6 +243,11 @@ class GitHubIngestor:
                 )
                 for item in fetched.reviews
                 if item.body
+            )
+            logs.extend(
+                _review_comment_log(item)
+                for item in fetched.review_comments
+                if item.body and item.body.strip()
             )
             logs.extend(_commit_log(item) for item in fetched.commits if item.commit)
             filenames = _changed_files(fetched.files)

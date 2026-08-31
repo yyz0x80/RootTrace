@@ -287,6 +287,31 @@ class GitHubComment(BaseModel):
     updated_at: StrictStr | None = Field(default=None, max_length=128)
 
 
+class GitHubPullRequestReviewComment(BaseModel):
+    """Typed projection of a pull request code review comment."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    id: StrictInt = Field(gt=0)
+    body: StrictStr | None = Field(default=None, max_length=MAX_GITHUB_TEXT_CHARS)
+    user: GitHubUser | None = None
+    html_url: StrictStr | None = Field(default=None, max_length=MAX_GITHUB_TEXT_CHARS)
+    path: StrictStr | None = Field(default=None, max_length=MAX_GITHUB_TEXT_CHARS)
+    line: StrictInt | None = Field(default=None, ge=1)
+    side: StrictStr | None = Field(default=None, max_length=16)
+    start_line: StrictInt | None = Field(default=None, ge=1)
+    start_side: StrictStr | None = Field(default=None, max_length=16)
+    original_line: StrictInt | None = Field(default=None, ge=1)
+    original_start_line: StrictInt | None = Field(default=None, ge=1)
+    position: StrictInt | None = Field(default=None, ge=1)
+    original_position: StrictInt | None = Field(default=None, ge=1)
+    commit_id: StrictStr | None = Field(default=None, max_length=128)
+    in_reply_to_id: StrictInt | None = Field(default=None, gt=0)
+    diff_hunk: StrictStr | None = Field(default=None, max_length=MAX_GITHUB_TEXT_CHARS)
+    created_at: StrictStr | None = Field(default=None, max_length=128)
+    updated_at: StrictStr | None = Field(default=None, max_length=128)
+
+
 class GitHubPullRequestReview(BaseModel):
     """Typed projection of a pull request review."""
 

@@ -24,6 +24,7 @@ from .models import (
     GitHubPullRequestFile,
     GitHubPullRequestRef,
     GitHubPullRequestReview,
+    GitHubPullRequestReviewComment,
     GitHubResourceRef,
 )
 
@@ -715,6 +716,38 @@ class GitHubClient:
             max_items=max_items,
         )
 
+    def list_pull_request_review_comments(
+        self,
+        reference: GitHubPullRequestRef | GitHubResourceRef,
+        *,
+        per_page: int = DEFAULT_PER_PAGE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        max_items: int = DEFAULT_MAX_ITEMS,
+    ) -> list[GitHubPullRequestReviewComment]:
+        """List deduplicated code review comments from a pull request.
+
+        Pagination and the raw item budget are enforced by the shared list
+        collector before duplicate IDs are removed.  The first occurrence of
+        each immutable numeric GitHub comment ID retains API order.
+        """
+        reference = self._require_pull_request(reference)
+        raw_comments = self._list_endpoint(
+            f"{self._repository_path(reference, 'pulls')}/comments",
+            GitHubPullRequestReviewComment,
+            "pull request review comments",
+            per_page=per_page,
+            max_pages=max_pages,
+            max_items=max_items,
+        )
+        seen_ids: set[int] = set()
+        comments: list[GitHubPullRequestReviewComment] = []
+        for comment in raw_comments:
+            if comment.id in seen_ids:
+                continue
+            seen_ids.add(comment.id)
+            comments.append(comment)
+        return comments
+
     def get_issue_detail(self, reference: GitHubIssueRef | GitHubResourceRef) -> GitHubIssueDetail:
         """Alias for :meth:`get_issue`."""
         return self.get_issue(reference)
@@ -767,9 +800,18 @@ class GitHubClient:
         """Alias for :meth:`list_pull_request_reviews`."""
         return self.list_pull_request_reviews(reference, **pagination)
 
+    def get_pull_request_review_comments(
+        self,
+        reference: GitHubPullRequestRef | GitHubResourceRef,
+        **pagination: int,
+    ) -> list[GitHubPullRequestReviewComment]:
+        """Alias for :meth:`list_pull_request_review_comments`."""
+        return self.list_pull_request_review_comments(reference, **pagination)
+
     fetch_issue = get_issue
     fetch_pull_request = get_pull_request
     fetch_comments = list_comments
     fetch_pull_request_files = list_pull_request_files
     fetch_pull_request_commits = list_pull_request_commits
     fetch_pull_request_reviews = list_pull_request_reviews
+    fetch_pull_request_review_comments = list_pull_request_review_comments
