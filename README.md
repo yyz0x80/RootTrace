@@ -87,7 +87,7 @@ roottrace analyze https://github.com/owner/repo/pull/456 \
 
 对于 PR 或明确带有 regression/commit 线索的 Issue，RootTrace 会按
 `8 → 16 → 32 → 50` 层逐步检查 base commit 的历史，并优先使用相关文件、
-符号和故障特征筛选候选提交。找到强相关候选后会提前停止；50 层只是硬上限，
+符号和故障特征筛选候选提交。找到强相关候选后会提前停止；50 层只是最大上限，
 不是默认发送给模型的历史量。普通 Issue 仍只检查 base commit，不扩大历史。
 
 ## Benchmark
