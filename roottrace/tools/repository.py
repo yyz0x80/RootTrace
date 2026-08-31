@@ -22,12 +22,20 @@ import ast
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
+from roottrace.incident.schema import MAX_GIT_HISTORY_DEPTH, validate_commit_sha
 from roottrace.runtime.paths import validate_relative_path
 from roottrace.runtime.workspace import Workspace
+from roottrace.tools.git_search import (
+    GitSearchCommandResult,
+    GitSearchExecutor,
+    GitSearchPlan,
+    GitSearchSummary,
+)
 from roottrace.tools.registry import (
     ReadFileInput,
     SearchCodeInput,
@@ -53,6 +61,8 @@ _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 _REVISION_PATTERN = re.compile(
     r"^(?:[0-9a-fA-F]{4,64}|HEAD|[A-Za-z0-9][A-Za-z0-9._/-]{0,127})$"
 )
+_FULL_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+_BLAME_LINE_PATTERN = re.compile(r"^\s*\^?([0-9a-fA-F]{40})(?:\s|$)")
 
 
 def _reject_control_chars(value: str, label: str) -> None:
@@ -76,6 +86,7 @@ class RcaToolResult:
     command: str = ""
     duration_seconds: float = 0.0
     truncated: bool = False
+    empty: bool = False
     failure_type: ToolFailureType | None = None
 
 
@@ -260,11 +271,64 @@ class RcaToolRegistry(ToolRegistry):
         self,
         workspace: Workspace,
         external_root: str | Path | None = None,
+        *,
+        base_commit: str | None = None,
+        history_depth: int | None = None,
     ) -> None:
         self.external_root = (
             Path(external_root).resolve() if external_root is not None else None
         )
+        self._history_base_commit: str | None = None
+        self._history_depth: int | None = None
+        self._history_visible_depth: int | None = None
         super().__init__(workspace=workspace)
+        if base_commit is not None or history_depth is not None:
+            if base_commit is None or history_depth is None:
+                raise ValueError(
+                    "base_commit and history_depth must be configured together"
+                )
+            self.configure_git_history(
+                base_commit=base_commit,
+                history_depth=history_depth,
+            )
+
+    def configure_git_history(
+        self,
+        *,
+        base_commit: str,
+        history_depth: int,
+        visible_depth: int | None = None,
+    ) -> None:
+        """Anchor Git tools to a bounded ancestor history of one base commit."""
+        if (
+            type(history_depth) is not int
+            or not 1 <= history_depth <= MAX_GIT_HISTORY_DEPTH
+        ):
+            raise ValueError(
+                f"history_depth must be between 1 and {MAX_GIT_HISTORY_DEPTH}"
+            )
+        self._history_base_commit = validate_commit_sha(base_commit)
+        self._history_depth = history_depth
+        if visible_depth is None:
+            visible_depth = history_depth
+        if (
+            type(visible_depth) is not int
+            or not 1 <= visible_depth <= history_depth
+        ):
+            raise ValueError(
+                "visible_depth must be between 1 and the configured history depth"
+            )
+        self._history_visible_depth = visible_depth
+
+    def set_git_history_visible_depth(self, depth: int) -> None:
+        """Expose only one already-configured layered history depth to Git tools."""
+        if (
+            self._history_depth is None
+            or type(depth) is not int
+            or not 1 <= depth <= self._history_depth
+        ):
+            raise ValueError("visible Git history depth is outside the configured bound")
+        self._history_visible_depth = depth
 
     def _register_default_tools(self) -> None:
         self.register_tool(
@@ -319,6 +383,7 @@ class RcaToolRegistry(ToolRegistry):
             command=getattr(result, "command", ""),
             duration_seconds=getattr(result, "duration_seconds", 0.0),
             truncated=getattr(result, "truncated", False),
+            empty=getattr(result, "empty", False),
             failure_type=failure_type,
         )
 
@@ -393,6 +458,27 @@ class RcaToolRegistry(ToolRegistry):
                 command=" ".join(argv),
                 duration_seconds=time.monotonic() - started,
             )
+        if result.returncode == 1:
+            return RcaToolResult(
+                ok=True,
+                content="No matches",
+                tool="search_code",
+                command=" ".join(argv),
+                duration_seconds=time.monotonic() - started,
+                empty=True,
+            )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            if not detail:
+                detail = f"exit code {result.returncode}"
+            return RcaToolResult(
+                ok=False,
+                content=f"Search failed: {detail[:2_000]}",
+                tool="search_code",
+                command=" ".join(argv),
+                duration_seconds=time.monotonic() - started,
+                failure_type=ToolFailureType.TOOL_FAILURE,
+            )
         output, truncated = _bound_text(result.stdout, MAX_SEARCH_OUTPUT_CHARS)
         return RcaToolResult(
             ok=True,
@@ -425,7 +511,10 @@ class RcaToolRegistry(ToolRegistry):
             )
         started = time.monotonic()
         try:
-            tree = ast.parse(resolved.read_text(encoding="utf-8"), filename=str(resolved))
+            source = resolved.read_text(encoding="utf-8")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(source, filename=str(resolved))
         except SyntaxError as exc:
             return RcaToolResult(
                 ok=False,
@@ -492,6 +581,15 @@ class RcaToolRegistry(ToolRegistry):
                 command=" ".join(argv),
                 duration_seconds=time.monotonic() - started,
             )
+        except OSError as exc:
+            return RcaToolResult(
+                ok=False,
+                content=f"git command failed: {type(exc).__name__}",
+                tool=tool,
+                command=" ".join(argv),
+                duration_seconds=time.monotonic() - started,
+                failure_type=ToolFailureType.TOOL_FAILURE,
+            )
         duration = time.monotonic() - started
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
@@ -513,23 +611,198 @@ class RcaToolRegistry(ToolRegistry):
             truncated=truncated,
         )
 
+    def _resolve_revision(self, revision: str) -> str | None:
+        """Resolve a revision to a commit SHA without exposing command errors."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
+                cwd=self.workspace.root,
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        resolved = result.stdout.strip()
+        return resolved if _FULL_SHA_PATTERN.fullmatch(resolved) else None
+
+    def _visible_commit_list(self) -> list[str] | None:
+        """Return visible base ancestors in deterministic Git traversal order."""
+        if self._history_base_commit is None or self._history_depth is None:
+            return None
+        visible_depth = self._history_visible_depth or self._history_depth
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "rev-list",
+                    f"--max-count={self._history_depth}",
+                    "--topo-order",
+                    self._history_base_commit,
+                ],
+                cwd=self.workspace.root,
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if result.returncode != 0:
+            return []
+        commits = [
+            line.strip().lower()
+            for line in result.stdout.splitlines()
+            if _FULL_SHA_PATTERN.fullmatch(line.strip())
+        ]
+        return commits[:visible_depth]
+
+    def _visible_commit_ids(self) -> frozenset[str] | None:
+        """Return the bounded base ancestry visible to configured Git tools."""
+        commits = self._visible_commit_list()
+        return None if commits is None else frozenset(commits)
+
+    def _revision_is_visible(self, revision: str) -> bool:
+        """Return whether a requested commit is in the bounded base history."""
+        visible = self._visible_commit_ids()
+        if visible is None:
+            return True
+        candidate = self._resolve_revision(revision)
+        return candidate is not None and candidate.lower() in visible
+
+    def _revision_error(self, revision: str) -> RcaToolResult:
+        """Return a safe failure for a commit outside the visible history."""
+        return RcaToolResult(
+            ok=False,
+            content=(
+                f"git revision is outside the configured bounded base history: "
+                f"{revision}"
+            ),
+            tool="git_show",
+            failure_type=ToolFailureType.TOOL_FAILURE,
+        )
+
+    def _bound_blame_result(self, result: RcaToolResult) -> RcaToolResult:
+        """Remove blame lines attributed outside the configured history window."""
+        visible = self._visible_commit_ids()
+        if not result.ok or visible is None:
+            return result
+        retained: list[str] = []
+        omitted = 0
+        for line in result.content.splitlines():
+            match = _BLAME_LINE_PATTERN.match(line)
+            if match is None:
+                omitted += 1
+                continue
+            if match.group(1).lower() in visible:
+                retained.append(line)
+            else:
+                omitted += 1
+        if omitted:
+            retained.insert(
+                0,
+                (
+                    "git blame output bounded to the configured base history; "
+                    f"{omitted} line(s) omitted"
+                ),
+            )
+        content, truncated = _bound_text("\n".join(retained), MAX_GIT_OUTPUT_CHARS)
+        return replace(
+            result,
+            content=content,
+            truncated=result.truncated or truncated,
+        )
+
+    def _bound_show_result(self, result: RcaToolResult) -> RcaToolResult:
+        """Remove merge-parent metadata that would expose an older commit."""
+        if not result.ok or self._history_base_commit is None:
+            return result
+        lines = [
+            line
+            for line in result.content.splitlines()
+            if not line.startswith("Merge: ")
+        ]
+        content, truncated = _bound_text("\n".join(lines), MAX_GIT_OUTPUT_CHARS)
+        return replace(
+            result,
+            content=content,
+            truncated=result.truncated or truncated,
+        )
+
+    def _run_git_search_command(self, argv: list[str]) -> GitSearchCommandResult:
+        """Run one internal layered-search command through the Git safety seam."""
+        result = self._run_git_capture("git_history", argv)
+        return GitSearchCommandResult(
+            ok=result.ok,
+            output=result.content,
+            command=result.command,
+            duration_seconds=result.duration_seconds,
+        )
+
+    def search_git_layers(self, plan: GitSearchPlan) -> GitSearchSummary:
+        """Execute a deterministic layered search without exposing a new tool."""
+        if not plan.enabled:
+            if self._history_depth is not None:
+                self.set_git_history_visible_depth(1)
+            return GitSearchSummary(
+                enabled=False,
+                reached_depth=1,
+                stop_reason="disabled",
+                commands_executed=0,
+            )
+        if self._history_base_commit is None:
+            return GitSearchSummary(
+                enabled=plan.enabled,
+                reached_depth=1,
+                stop_reason="git_history_unconfigured",
+                commands_executed=0,
+                errors=["Git history is not configured for this repository"],
+            )
+        if self._history_depth is None or plan.max_depth > self._history_depth:
+            return GitSearchSummary(
+                enabled=True,
+                reached_depth=1,
+                stop_reason="plan_exceeds_configured_history",
+                commands_executed=0,
+                errors=["Git search plan exceeds the configured history depth"],
+            )
+        executor = GitSearchExecutor(
+            base_commit=self._history_base_commit,
+            run_command=self._run_git_search_command,
+            set_visible_depth=self.set_git_history_visible_depth,
+        )
+        return executor.run(plan)
+
     def git_history(self, arguments: dict[str, Any]) -> RcaToolResult:
         try:
             input_data = GitHistoryInput(**arguments)
         except (TypeError, ValueError) as exc:
             return RcaToolResult(ok=False, content=f"Invalid input: {exc}", tool="git_history")
+        visible_commits = self._visible_commit_list()
         argv = [
             "git",
             "log",
             "--no-ext-diff",
+            "--no-decorate",
+            "--no-abbrev",
             "--date=short",
-            "--format=%h %ad %s",
-            f"--max-count={input_data.max_count}",
+            "--format=%H %ad %s",
         ]
+        if visible_commits is None:
+            argv.append(f"--max-count={input_data.max_count}")
+        else:
+            argv.insert(2, "--no-walk")
         if input_data.grep:
             argv.append(f"--grep={input_data.grep}")
         if input_data.query:
             argv.append(f"-S{input_data.query}")
+        if visible_commits is not None:
+            argv.extend(visible_commits[: input_data.max_count])
+        elif self._history_base_commit is not None:
+            argv.append(self._history_base_commit)
         if input_data.path is not None:
             try:
                 path = self._validate_git_path(input_data.path)
@@ -547,19 +820,29 @@ class RcaToolRegistry(ToolRegistry):
             path = self._validate_git_path(input_data.path)
         except (ValueError, PermissionError) as exc:
             return RcaToolResult(ok=False, content=f"Path error: {exc}", tool="git_blame")
-        argv = ["git", "blame", "--no-ext-diff", "-w"]
+        argv = ["git", "blame", "--no-ext-diff", "--no-abbrev", "-w"]
         if input_data.start_line is not None:
             end = input_data.end_line or input_data.start_line
             argv.append(f"-L{input_data.start_line},{end}")
+        if self._history_base_commit is not None:
+            argv.append(self._history_base_commit)
         argv.extend(["--", path])
-        return self._run_git_capture("git_blame", argv)
+        return self._bound_blame_result(self._run_git_capture("git_blame", argv))
 
     def git_show(self, arguments: dict[str, Any]) -> RcaToolResult:
         try:
             input_data = GitShowInput(**arguments)
         except (TypeError, ValueError) as exc:
             return RcaToolResult(ok=False, content=f"Invalid input: {exc}", tool="git_show")
-        argv = ["git", "show", "--no-ext-diff", "--format=fuller"]
+        if not self._revision_is_visible(input_data.revision):
+            return self._revision_error(input_data.revision)
+        argv = [
+            "git",
+            "show",
+            "--no-ext-diff",
+            "--no-abbrev",
+            "--format=fuller",
+        ]
         if input_data.stat:
             argv.append("--stat")
         if input_data.path is not None:
@@ -567,10 +850,10 @@ class RcaToolRegistry(ToolRegistry):
                 path = self._validate_git_path(input_data.path)
             except (ValueError, PermissionError) as exc:
                 return RcaToolResult(ok=False, content=f"Path error: {exc}", tool="git_show")
-            argv.append(f"{input_data.revision}:{path}")
+            argv.extend([input_data.revision, "--", path])
         else:
             argv.append(input_data.revision)
-        return self._run_git_capture("git_show", argv)
+        return self._bound_show_result(self._run_git_capture("git_show", argv))
 
     # -- external log tool ------------------------------------------------------
 

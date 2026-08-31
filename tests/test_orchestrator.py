@@ -241,15 +241,24 @@ def build_orchestrator(
 def test_specialists_run_concurrently(git_repo, tmp_path: Path) -> None:
     barrier = threading.Barrier(3)
 
+    def completed_without_evidence(payload: str) -> AssistantTurn:
+        response = json.loads(payload)
+        response["evidence_ids"] = []
+        return turn(json.dumps(response))
+
+    hypotheses = json.loads(HYPOTHESES_JSON)
+    hypotheses["hypotheses"][0]["supporting_evidence_ids"] = []
+
     def synchronize() -> None:
         barrier.wait(timeout=5)
 
     orchestrator, providers = build_orchestrator(
         git_repo,
         tmp_path,
-        issue_ci_responses=[turn(ISSUE_CI_FINAL)],
-        code_responses=[turn(CODE_FINAL)],
-        git_responses=[turn(GIT_FINAL)],
+        lead_responses=[turn(PLAN_JSON), turn(json.dumps(hypotheses))],
+        issue_ci_responses=[completed_without_evidence(ISSUE_CI_FINAL)],
+        code_responses=[completed_without_evidence(CODE_FINAL)],
+        git_responses=[completed_without_evidence(GIT_FINAL)],
     )
     for key in ("issue_ci", "code", "git"):
         providers[key]._on_complete = synchronize
@@ -304,12 +313,85 @@ def test_worker_failure_is_partial_and_preserves_others(
     result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
     assert result.status == FindingStatus.PARTIAL
     assert any("code worker failed" in error for error in result.errors)
+    code_diagnostics = [
+        diagnostic
+        for diagnostic in result.diagnostics
+        if diagnostic.agent is AgentRole.CODE
+    ]
+    assert len(code_diagnostics) == 1
+    assert code_diagnostics[0].code == "specialist.finding_error"
+    assert "finding status" not in code_diagnostics[0].message
     findings = {finding.agent: finding for finding in result.graph.findings}
     assert findings[AgentRole.CODE].status == FindingStatus.FAILED
     assert findings[AgentRole.CODE].uncertainty.value == "high"
     assert findings[AgentRole.ISSUE_CI].status == FindingStatus.COMPLETED
     assert any(
         item.agent == AgentRole.ISSUE_CI for item in result.graph.evidence
+    )
+
+
+def test_specialist_partial_status_degrades_run_without_worker_exception(
+    git_repo, tmp_path: Path
+) -> None:
+    partial = json.dumps(
+        {
+            "status": "partial",
+            "ranked_locations": [],
+            "evidence_ids": [],
+            "uncertainty": "high",
+            "uncertainty_note": "the code evidence is incomplete",
+        }
+    )
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        code_responses=[turn(partial)],
+    )
+
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert result.status == FindingStatus.PARTIAL
+    assert "code finding status: partial" in result.errors
+    assert result.diagnostics[0].code == "specialist.incomplete"
+    assert result.diagnostics[0].severity.value == "warning"
+    findings = {finding.agent: finding for finding in result.graph.findings}
+    assert findings[AgentRole.CODE].status == FindingStatus.PARTIAL
+    assert findings[AgentRole.ISSUE_CI].status == FindingStatus.COMPLETED
+
+
+def test_git_tool_failure_reaches_run_status_and_has_no_fake_evidence(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    empty_git_finding = json.dumps(
+        {
+            "status": "completed",
+            "ranked_locations": [],
+            "evidence_ids": [],
+            "uncertainty": "high",
+        }
+    )
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        git_responses=[
+            tool_turn("git_show", {"revision": git_repo.head_sha}),
+            turn(empty_git_finding),
+        ],
+    )
+
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert result.status == FindingStatus.PARTIAL
+    git_finding = next(
+        finding
+        for finding in result.graph.findings
+        if finding.agent is AgentRole.GIT_HISTORY
+    )
+    assert git_finding.status == FindingStatus.PARTIAL
+    assert "tool failures" in (git_finding.error or "")
+    assert not any(
+        item.agent is AgentRole.GIT_HISTORY for item in result.graph.evidence
     )
 
 
@@ -449,6 +531,20 @@ def test_specialists_do_not_share_evidence(git_repo, tmp_path: Path) -> None:
     assert "ev-issue_ci-001" not in git_prompt
 
 
+def test_git_policy_is_persisted_in_specialist_context(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    orchestrator, providers = build_orchestrator(git_repo, tmp_path)
+
+    orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    git_prompt = providers["git"].calls[0]["messages"][1]["content"]
+    assert '"enabled": false' in git_prompt
+    assert '"history_depth": 1' in git_prompt
+    assert '"max_tool_calls": 1' in git_prompt
+
+
 def test_isolation_violation_is_recorded(git_repo, tmp_path: Path) -> None:
     git_attempt = json.dumps(
         {
@@ -501,6 +597,34 @@ def test_artifacts_are_persisted(git_repo, tmp_path: Path) -> None:
     assert any("planning_end" in line for line in trace_lines)
     assert any("code_start" in line for line in trace_lines)
     assert any("hypotheses_end" in line for line in trace_lines)
+    planning_start = json.loads(trace_lines[0])
+    assert planning_start["event_type"] == "planning_start"
+    assert planning_start["git_verification_policy"]["history_depth"] == 1
+
+
+def test_trace_is_reset_for_each_run(git_repo, tmp_path: Path) -> None:
+    output_dir = tmp_path / "reused-out"
+    output_dir.mkdir()
+    trace_path = output_dir / "execution_trace.jsonl"
+    trace_path.write_text("stale event\n", encoding="utf-8")
+
+    build_orchestrator(git_repo, tmp_path)[0].run(
+        make_loaded(git_repo),
+        git_repo.repo,
+        output_dir=output_dir,
+    )
+    first_trace = trace_path.read_text(encoding="utf-8").splitlines()
+
+    build_orchestrator(git_repo, tmp_path)[0].run(
+        make_loaded(git_repo),
+        git_repo.repo,
+        output_dir=output_dir,
+    )
+    second_trace = trace_path.read_text(encoding="utf-8").splitlines()
+
+    assert "stale event" not in second_trace
+    assert len(second_trace) == len(first_trace)
+    assert sum("planning_start" in line for line in second_trace) == 1
 
 
 def test_planning_fallback_records_degradation_trace(

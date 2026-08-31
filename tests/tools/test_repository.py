@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
+import warnings
 from pathlib import Path
 
 import pytest
 
 from roottrace.runtime.workspace import Workspace
-from roottrace.tools import RcaToolRegistry
+from roottrace.tools import GitSearchPlan, GitSearchQuery, RcaToolRegistry
 
 
 @pytest.fixture
@@ -53,10 +55,35 @@ def test_search_code_and_read_file(registry: RcaToolRegistry) -> None:
     # A query that looks like a flag must be treated as a literal pattern.
     literal = registry.execute("search_code", {"query": "--files"})
     assert literal.ok
+    assert literal.empty
+    assert literal.command.split()[2] == "--"
+    assert literal.content == "No matches"
 
     read = registry.execute("read_file", {"path": "pkg/calc.py", "raw": True})
     assert read.ok
     assert "def multiply" in read.content
+
+
+def test_search_code_reports_rg_errors(registry: RcaToolRegistry) -> None:
+    result = registry.execute(
+        "search_code",
+        {"query": "traceback", "path": ".src/_pytest/debugging.py"},
+    )
+
+    assert not result.ok
+    assert "Search failed" in result.content
+    assert result.command.endswith(".src/_pytest/debugging.py")
+
+
+def test_search_code_returns_no_matches_as_normal_empty_result(
+    registry: RcaToolRegistry,
+) -> None:
+    result = registry.execute("search_code", {"query": "not-present-in-repository"})
+
+    assert result.ok
+    assert result.empty
+    assert result.content == "No matches"
+    assert result.failure_type is None
 
 
 def test_file_tools_reject_bad_paths(registry: RcaToolRegistry) -> None:
@@ -87,6 +114,25 @@ def test_inspect_symbols_lists_python_symbols(registry: RcaToolRegistry) -> None
     assert "def add" not in filtered.content
 
 
+def test_inspect_symbols_suppresses_syntax_warnings(
+    registry: RcaToolRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_parse = ast.parse
+
+    def warning_parse(*args, **kwargs):
+        warnings.warn("invalid escape sequence", SyntaxWarning, stacklevel=1)
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(ast, "parse", warning_parse)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = registry.execute("inspect_symbols", {"path": "pkg/calc.py"})
+
+    assert result.ok
+    assert caught == []
+
+
 def test_inspect_symbols_handles_invalid_files(registry: RcaToolRegistry, git_repo) -> None:
     (git_repo.repo / "pkg" / "broken.py").write_text(
         "def broken(:\n    pass\n",
@@ -109,6 +155,7 @@ def test_git_history_bounded_and_scoped(registry: RcaToolRegistry) -> None:
     assert result.ok
     lines = [line for line in result.content.splitlines() if line.strip()]
     assert len(lines) == 2
+    assert all(len(line.split(maxsplit=1)[0]) == 40 for line in lines)
     assert "fix multiply" in lines[0]
     assert "initial" in lines[1]
 
@@ -129,6 +176,137 @@ def test_git_history_bounded_and_scoped(registry: RcaToolRegistry) -> None:
     assert pickaxe.ok
     assert "fix multiply" in pickaxe.content
     assert "initial" not in pickaxe.content
+
+
+def test_configured_git_tools_are_anchored_to_bounded_base_history(
+    git_repo,
+) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=1,
+    )
+
+    history = registry.execute("git_history", {"max_count": 20})
+    assert history.ok
+    history_lines = history.content.splitlines()
+    assert len(history_lines) == 1
+    assert history_lines[0].startswith(f"{git_repo.head_sha} ")
+    assert git_repo.base_sha not in history.content
+
+    blame = registry.execute("git_blame", {"path": "pkg/calc.py"})
+    assert blame.ok
+    assert git_repo.head_sha in blame.content
+    assert git_repo.base_sha not in blame.content
+    assert "bounded to the configured base history" in blame.content
+
+    visible_show = registry.execute(
+        "git_show",
+        {"revision": git_repo.head_sha[:8], "path": "pkg/calc.py"},
+    )
+    assert visible_show.ok
+    assert f"commit {git_repo.head_sha}" in visible_show.content
+
+    hidden_show = registry.execute(
+        "git_show",
+        {"revision": git_repo.base_sha},
+    )
+    assert not hidden_show.ok
+    assert "bounded base history" in hidden_show.content
+
+
+def test_layered_search_opens_only_attempted_history(git_repo) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=2,
+    )
+    registry.configure_git_history(
+        base_commit=git_repo.head_sha,
+        history_depth=2,
+        visible_depth=1,
+    )
+
+    hidden_before_search = registry.execute(
+        "git_show",
+        {"revision": git_repo.base_sha},
+    )
+    summary = registry.search_git_layers(
+        GitSearchPlan(
+            enabled=True,
+            max_depth=2,
+            search_depths=[2],
+            candidate_commits=[git_repo.base_sha],
+        )
+    )
+    visible_after_search = registry.execute(
+        "git_show",
+        {"revision": git_repo.base_sha},
+    )
+
+    assert not hidden_before_search.ok
+    assert summary.stop_reason == "explicit_commit_verified"
+    assert visible_after_search.ok
+
+
+def test_layered_search_combines_real_path_and_pickaxe_evidence(git_repo) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=50,
+    )
+    registry.configure_git_history(
+        base_commit=git_repo.head_sha,
+        history_depth=50,
+        visible_depth=1,
+    )
+
+    summary = registry.search_git_layers(
+        GitSearchPlan(
+            enabled=True,
+            max_depth=50,
+            search_depths=[8, 16, 32, 50],
+            queries=[
+                GitSearchQuery(
+                    kind="path",
+                    signal="path",
+                    source="test_path",
+                    value="pkg/calc.py",
+                    weight=4,
+                ),
+                GitSearchQuery(
+                    kind="content",
+                    signal="symbol",
+                    source="test_symbol",
+                    value="multiply",
+                    weight=3,
+                ),
+            ],
+        )
+    )
+
+    assert summary.stop_reason == "path_and_content_match"
+    assert summary.attempted_depths == [8]
+    assert any(candidate.strong_match for candidate in summary.candidates)
+
+
+def test_layered_search_rejects_plan_beyond_configured_history(git_repo) -> None:
+    registry = RcaToolRegistry(
+        Workspace(git_repo.repo),
+        base_commit=git_repo.head_sha,
+        history_depth=2,
+    )
+
+    summary = registry.search_git_layers(
+        GitSearchPlan(
+            enabled=True,
+            max_depth=8,
+            search_depths=[8],
+        )
+    )
+
+    assert summary.stop_reason == "plan_exceeds_configured_history"
+    assert summary.commands_executed == 0
 
 
 def test_git_history_rejects_unsafe_input(registry: RcaToolRegistry) -> None:

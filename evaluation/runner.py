@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from evaluation.adapter import (
     PublicCase,
@@ -36,6 +36,7 @@ from evaluation.manifest import (
     manifest_sha256,
 )
 from evaluation.metrics import (
+    CASE_RESULT_SCHEMA_VERSION,
     MAX_PREDICTED_FILES,
     CaseResult,
     compute_case_metrics,
@@ -53,6 +54,14 @@ from evaluation.workspace import (
     create_case_workspace,
     destroy_case_workspace,
     resolve_repo_cache,
+)
+from roottrace.diagnostics import (
+    DiagnosticSeverity,
+    PipelineDiagnostic,
+    deduplicate_diagnostics,
+    diagnostics_from_legacy,
+    merge_diagnostics,
+    project_diagnostics,
 )
 from roottrace.evidence.schema import AgentRole
 from roottrace.incident.schema import IncidentInput
@@ -76,6 +85,7 @@ class RootTraceOutcome(BaseModel):
 
     status: Literal["completed", "error"]
     error: str | None = None
+    diagnostics: list[PipelineDiagnostic] = Field(default_factory=list, max_length=20)
     errors: list[str] = Field(default_factory=list, max_length=20)
     report: dict | None = None
     latency_seconds: float = Field(default=0.0, ge=0)
@@ -83,6 +93,16 @@ class RootTraceOutcome(BaseModel):
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
     reasoning_tokens: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _project_legacy_errors(self) -> RootTraceOutcome:
+        """Keep the legacy error list as a deterministic diagnostic projection."""
+        if "diagnostics" in self.model_fields_set:
+            self.diagnostics = deduplicate_diagnostics(self.diagnostics)
+        elif self.errors:
+            self.diagnostics = diagnostics_from_legacy(self.errors)
+        self.errors = project_diagnostics(self.diagnostics)
+        return self
 
 
 class RootTraceClient(Protocol):
@@ -170,7 +190,7 @@ class InProcessRootTraceClient:
         )
         return RootTraceOutcome(
             status="completed",
-            errors=list(result.run.errors),
+            diagnostics=list(result.run.diagnostics),
             report=_read_report_json(output_dir),
             latency_seconds=elapsed,
             llm_calls=calls,
@@ -309,6 +329,19 @@ def _run_case(
     # Gold is read only after the RootTrace run has completed.
     gold_files = gold_store.gold_files(case.instance_id)
     predicted = extract_predicted_files(outcome.report)
+    diagnostics = list(outcome.diagnostics)
+    if outcome.status == "error":
+        diagnostics = merge_diagnostics(
+            diagnostics,
+            [
+                PipelineDiagnostic(
+                    code="evaluation.roottrace_error",
+                    stage="evaluation",
+                    severity=DiagnosticSeverity.FATAL,
+                    message=outcome.error or "RootTrace invocation failed",
+                )
+            ],
+        )
     metrics = compute_case_metrics(
         instance_id=case.instance_id,
         predicted_files=predicted,
@@ -334,7 +367,7 @@ def _run_case(
             "total_tokens": metrics.total_tokens,
         }
     return CaseResult(
-        schema_version="1.0",
+        schema_version=CASE_RESULT_SCHEMA_VERSION,
         instance_id=case.instance_id,
         repo=case.repo,
         base_commit=case.base_commit,
@@ -342,7 +375,7 @@ def _run_case(
         config_hash=config_hash,
         status=outcome.status,
         error=outcome.error,
-        rca_errors=list(outcome.errors),
+        diagnostics=diagnostics,
         predicted_files=predicted,
         gold_files=gold_files,
         metrics=metrics,
@@ -373,8 +406,14 @@ def _error_case_result(
         status="error",
         error=_bounded_error(str(exc)),
     )
+    diagnostic = PipelineDiagnostic(
+        code="evaluation.case_failed",
+        stage="evaluation",
+        severity=DiagnosticSeverity.FATAL,
+        message=_bounded_error(str(exc)),
+    )
     return CaseResult(
-        schema_version="1.0",
+        schema_version=CASE_RESULT_SCHEMA_VERSION,
         instance_id=case.instance_id,
         repo=case.repo,
         base_commit=case.base_commit,
@@ -382,6 +421,7 @@ def _error_case_result(
         config_hash=config_hash,
         status="error",
         error=_bounded_error(str(exc)),
+        diagnostics=[diagnostic],
         gold_files=gold_files,
         metrics=metrics,
     )

@@ -50,6 +50,8 @@ Rules:
 - Do NOT state or imply a root cause, a likely fix, or a suspected regression
   before evidence has been gathered.
 - Prefer deterministic evidence collection over speculation.
+- Selected pull request review threads are bounded advisory evidence. Treat
+  reviewer statements as claims to investigate, not as established facts.
 
 Output only one JSON object with this schema:
 {
@@ -77,6 +79,9 @@ Rules:
   read, symbol, git, or runtime tools.
 - You do not produce a root cause. Report symptoms and failure signatures with
   explicit uncertainty.
+- Review-thread comments are separate, bounded evidence. Keep each comment's
+  author, thread, location, and provenance distinct, and distinguish replies
+  that support or contradict the root comment.
 - Every factual claim must cite one of the provided evidence ids.
 - When external logs are provided for this run, read_external_log accepts the
   paths "ci.log" and "stack_trace.log".
@@ -105,6 +110,9 @@ Rules:
   git, external-log, or runtime tools.
 - You do not produce a root cause. Localize suspicious code with explicit
   uncertainty.
+- Review-comment anchors are bounded leads only. Verify every reviewer claim
+  against the checked-out code with the available repository tools; do not
+  treat a comment or line number as proof of a defect.
 - Every factual claim must cite one of the provided evidence ids.
 
 Tool results identify their evidence id as "Evidence id: ev-code-<n>".
@@ -138,6 +146,20 @@ Rules:
   code-search, file read, symbol, external-log, or runtime tools.
 - You do not produce a root cause. Report historical evidence with explicit
   uncertainty; a regression is suspected only when history supports it.
+- Follow the deterministic Git verification policy in the context. When it is
+  disabled, inspect only the base commit and do not expand history.
+- When it is enabled, prioritize the listed candidate commits and paths, stay
+  within the bounded history, and never treat a PR head commit as a regression
+  commit because the checkout is pinned to the base revision.
+- The prepared Git search opens history progressively and includes only its
+  final Top-K candidates. Treat 50 commits as a hard ceiling, not a default
+  amount to inspect. Do not repeat a broad unscoped history scan.
+- A path-only or commit-message-only candidate is a weak lead, not regression
+  evidence. Inspect it with git_show or a scoped history/blame call before
+  citing it as a suspected regression.
+- Review comments are not Git evidence. Use their path, commit, and mapping
+  metadata only to scope history inspection; do not consume their discussion
+  bodies as history evidence.
 - Every factual claim must cite one of the provided evidence ids.
 
 Tool results identify their evidence id as "Evidence id: ev-git_history-<n>".
@@ -215,7 +237,9 @@ def build_hypotheses_prompt(
             "id": item.id,
             "agent": item.agent.value,
             "kind": item.kind.value,
+            "commit_ids": item.commit_ids,
             "observation": item.observation,
+            "provenance": item.provenance.model_dump(mode="json"),
             "location": item.location.model_dump(mode="json")
             if item.location is not None
             else None,
@@ -244,6 +268,10 @@ def build_hypotheses_prompt(
             "title": incident.title,
             "problem": incident.problem,
             "base_commit": incident.base_commit,
+            "resource_kind": incident.resource_kind,
+            "git_verification_policy": incident.git_verification_policy.model_dump(
+                mode="json"
+            ),
         },
         "findings": findings,
         "evidence": evidence,
@@ -285,13 +313,29 @@ Rules:
 - evidence_ids fields (ranked_causes, causal_chain, suspected_regression) may
   reference only ids from the evidence list in INVESTIGATION STATE; never cite
   verification result ids (ver-*) and never invent ids.
+- Every ranked cause must reference a hypothesis with at least one verification
+  result whose outcome is ``supported`` and cite at least one evidence id from
+  that supported result.
 - Never rank a hypothesis whose verification outcome is rejected. When no
   hypothesis is supported by verification, conclude insufficient_evidence.
+- Supported runtime verification constrains only a confirmed root cause,
+  ranked_causes, and a ``root_cause_identified`` conclusion. It does not make
+  localization unavailable when the conclusion is ``insufficient_evidence``.
+- Even with ``conclusion=insufficient_evidence`` and an empty ranked_causes
+  list, populate top_k_locations with evidence-grounded candidates when
+  possible. Candidates may come from non-rejected hypothesis locations or
+  specialist ranked_locations; never use locations from rejected hypotheses.
 - Report a suspected regression commit only when the INVESTIGATION STATE
-  contains git-history evidence that supports it.
+  contains real Git evidence: an item from the git_history agent whose tool
+  and evidence kind match git_history/GIT_LOG, git_show/GIT_DIFF, or
+  git_blame/GIT_BLAME, and whose commit_ids contains a real commit SHA.
+- git_verification_policy.enabled controls only the bounded Git search budget
+  and prioritization; it never determines whether a regression is admissible.
+  Admissibility depends solely on qualifying Git evidence.
 - suspected_regression.commit must be an exact 7-64 character hexadecimal SHA
-  found in the evidence; when no real commit sha is available, omit
-  suspected_regression entirely. Never emit an empty or placeholder commit.
+  found in the cited evidence. When no qualifying Git evidence is available,
+  set suspected_regression to null or omit it entirely. Never emit an empty
+  object, empty, or placeholder commit.
 - Fix recommendations are advisory text and scope only. Never embed diffs,
   patches, edit commands, or repository mutation commands.
 - Preserve uncertainty from partial worker failures and unverified
@@ -324,12 +368,7 @@ Output only one JSON object with this schema:
       "evidence_ids": ["<existing-evidence-id>"]
     }
   ],
-  "suspected_regression": {
-    "commit": "7-character-or-longer hex sha",
-    "summary": "short summary",
-    "evidence_ids": ["<existing-evidence-id>"],
-    "locations": [{"path": "<repo-relative-path>"}]
-  },
+  "suspected_regression": null,
   "fix_recommendation": {
     "scope": "advisory fix scope",
     "suggestions": ["advisory suggestion text"],
@@ -345,7 +384,9 @@ Output only one JSON object with this schema:
 Rules for fields:
 - conclusion root_cause_identified requires at least one ranked cause.
 - All hypothesis_id and evidence_id values must exist in the provided context.
-- suspected_regression is optional and only when supported.
+- suspected_regression is optional and only when supported by qualifying Git
+  evidence and a real commit SHA. Without that evidence, use null or omit it;
+  do not use {}.
 - fix_recommendation is optional and strictly advisory.
 """
 
@@ -376,7 +417,9 @@ def build_final_report_prompt(
             "id": item.id,
             "agent": item.agent.value,
             "kind": item.kind.value,
+            "commit_ids": item.commit_ids,
             "observation": item.observation,
+            "provenance": item.provenance.model_dump(mode="json"),
             "location": item.location.model_dump(mode="json")
             if item.location is not None
             else None,
@@ -403,6 +446,10 @@ def build_final_report_prompt(
             "title": incident.title,
             "problem": incident.problem,
             "base_commit": incident.base_commit,
+            "resource_kind": incident.resource_kind,
+            "git_verification_policy": incident.git_verification_policy.model_dump(
+                mode="json"
+            ),
         },
         "hypotheses": hypotheses,
         "verification": verification,
@@ -413,7 +460,9 @@ def build_final_report_prompt(
         "\n\nEVIDENCE DOMAIN RULE:\n"
         f"Evidence was gathered only by agents: {evidence_agents}.\n"
         "Cite only evidence ids listed under evidence above; never invent ids.\n"
-        "If 'git_history' evidence is absent, omit suspected_regression entirely.\n"
+        "Include suspected_regression only for real Git evidence with a matching "
+        "Git tool/kind pair and at least one commit SHA; otherwise use null or "
+        "omit it, never {}.\n"
         "If 'issue_ci' evidence is absent, do not cite issue/CI evidence ids."
     )
     return (
@@ -432,10 +481,51 @@ def _incident_view(context: IncidentContext) -> dict[str, object]:
         "problem": incident.problem,
         "repo": incident.repo,
         "base_commit": incident.base_commit,
+        "resource_kind": incident.resource_kind,
+        "labels": incident.labels,
+        "changed_files": incident.changed_files,
+        "git_verification_policy": incident.git_verification_policy.model_dump(
+            mode="json"
+        ),
         "logs": list(incident.logs),
+        "review_threads": [
+            thread.model_dump(mode="json") for thread in incident.review_threads
+        ],
+        "review_comment_truncation": incident.review_comment_truncation.model_dump(
+            mode="json"
+        ),
         "signals": context.signals.model_dump(mode="json"),
         "truncation": context.truncation.model_dump(mode="json"),
     }
+
+
+def _review_anchor_view(
+    context: IncidentContext,
+    *,
+    include_excerpt: bool,
+    excerpt_chars: int = 300,
+) -> list[dict[str, object]]:
+    """Return bounded review anchors for specialists that need less context."""
+    anchors: list[dict[str, object]] = []
+    for thread in context.incident.review_threads:
+        for comment in thread.comments:
+            location = comment.location.model_dump(mode="json") if comment.location else None
+            anchor: dict[str, object] = {
+                "evidence_id": comment.id,
+                "comment_id": comment.comment_id,
+                "thread_id": comment.thread_id,
+                "location": location,
+                "location_mapping": comment.location_mapping,
+                "commit": comment.provenance.commit,
+                "line": comment.line,
+                "start_line": comment.start_line,
+                "original_line": comment.original_line,
+                "original_start_line": comment.original_start_line,
+            }
+            if include_excerpt:
+                anchor["excerpt"] = comment.excerpt[:excerpt_chars]
+            anchors.append(anchor)
+    return anchors
 
 
 def _code_view(context: IncidentContext) -> dict[str, object]:
@@ -452,6 +542,10 @@ def _code_view(context: IncidentContext) -> dict[str, object]:
         "signals": context.signals.model_dump(mode="json"),
         "snippets": [snippet.model_dump(mode="json") for snippet in context.snippets],
         "diff_excerpt": context.diff_excerpt,
+        "review_comment_anchors": _review_anchor_view(
+            context,
+            include_excerpt=True,
+        ),
     }
 
 
@@ -514,6 +608,10 @@ def build_git_history_prompt(
     """Build the bounded Git History specialist prompt."""
     data = {
         "base_commit": context.incident.base_commit,
+        "resource_kind": context.incident.resource_kind,
+        "git_verification_policy": context.incident.git_verification_policy.model_dump(
+            mode="json"
+        ),
         "signals": context.signals.model_dump(mode="json"),
         "tracked_files": context.repository.tracked_files,
         "python_file_list": context.repository.python_file_list,
@@ -522,6 +620,13 @@ def build_git_history_prompt(
             for snippet in context.snippets
         ],
         "diff_excerpt": context.diff_excerpt,
+        "candidate_paths": context.incident.git_verification_policy.candidate_paths,
+        "candidate_commits": context.incident.git_verification_policy.candidate_commits,
+        "review_comment_anchors": _review_anchor_view(
+            context,
+            include_excerpt=False,
+        ),
+        "max_tool_calls": context.incident.git_verification_policy.max_tool_calls,
         "questions": _question_lines(questions),
     }
     return (

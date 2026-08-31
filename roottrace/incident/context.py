@@ -116,6 +116,11 @@ class ContextTruncation(BaseModel):
     snippet_candidates_omitted: int = Field(default=0, ge=0)
     snippets_omitted: int = Field(default=0, ge=0)
     snippet_excerpt_chars_omitted: int = Field(default=0, ge=0)
+    review_threads_omitted: int = Field(default=0, ge=0)
+    review_comments_omitted: int = Field(default=0, ge=0)
+    review_comment_chars_omitted: int = Field(default=0, ge=0)
+    review_comment_locations_unmapped: int = Field(default=0, ge=0)
+    review_comment_invalid_paths: int = Field(default=0, ge=0)
     notes: list[Annotated[str, StringConstraints(max_length=MAX_NOTE_CHARS)]] = Field(
         default_factory=list,
         max_length=20,

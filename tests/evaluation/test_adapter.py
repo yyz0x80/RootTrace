@@ -60,16 +60,30 @@ def test_public_metadata_fields_never_forwarded() -> None:
         _public(created_at="2022-01-01T00:00:00Z", difficulty="easy")
     )
     incident = build_incident_input(case).incident
-    assert incident.model_dump().keys() == {
+    assert set(incident.model_dump()) == {
         "id",
         "repo",
         "base_commit",
+        "resource_kind",
         "title",
         "problem",
         "logs",
         "diff",
+        "labels",
+        "related_commits",
+        "changed_files",
+        "review_threads",
+        "review_comment_truncation",
+        "git_verification_policy",
         "provenance",
     }
+    assert not {
+        "created_at",
+        "difficulty",
+        "version",
+        "patch",
+        "test_patch",
+    }.intersection(incident.model_dump())
 
 
 def test_write_root_trace_input_contains_exactly_four_fields(tmp_path) -> None:

@@ -49,9 +49,13 @@ from roottrace.evidence.schema import (
     UncertaintyLevel,
 )
 from roottrace.incident.context import IncidentContext
-from roottrace.incident.schema import IncidentInput, Provenance
+from roottrace.incident.schema import IncidentInput, Provenance, validate_commit_sha
 from roottrace.llm.schema import AssistantTurn, ToolCall
 from roottrace.llm.usage import UsageTracker
+from roottrace.tools.git_search import (
+    GitSearchSummary,
+    build_git_search_plan,
+)
 from roottrace.tools.repository import RcaToolRegistry
 
 _TOOL_EVIDENCE_KIND: dict[str, EvidenceKind] = {
@@ -63,6 +67,7 @@ _TOOL_EVIDENCE_KIND: dict[str, EvidenceKind] = {
     "git_show": EvidenceKind.GIT_DIFF,
     "read_external_log": EvidenceKind.CI_LOG,
 }
+_GIT_EVIDENCE_TOOLS = frozenset({"git_history", "git_blame", "git_show"})
 
 
 class ProviderProtocol(Protocol):
@@ -114,6 +119,27 @@ def _bounded_note(text: str | None, limit: int = MAX_NOTE_CHARS) -> str | None:
     if text is None or not text.strip():
         return None
     return _cap_text(text, limit)[0]
+
+
+def _extract_commit_ids(tool: str, content: str) -> list[str]:
+    """Extract commit ids from machine-formatted Git tool output."""
+    if tool not in _GIT_EVIDENCE_TOOLS:
+        return []
+    patterns = {
+        "git_history": re.compile(r"^\s*([0-9a-fA-F]{7,64})(?:\s|$)"),
+        "git_show": re.compile(r"^\s*commit\s+([0-9a-fA-F]{7,64})(?:\s|$)"),
+        "git_blame": re.compile(r"^\s*\^?([0-9a-fA-F]{7,64})(?:\s|$)"),
+    }
+    pattern = patterns[tool]
+    commit_ids: set[str] = set()
+    for line in content.splitlines():
+        match = pattern.match(line)
+        if match:
+            try:
+                commit_ids.add(validate_commit_sha(match.group(1)).lower())
+            except ValueError:
+                continue
+    return sorted(commit_ids)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -177,6 +203,10 @@ class _Specialist:
         self._counter = 0
         self._isolation_violations = 0
         self._base_commit = ""
+        self._tool_failures: list[str] = []
+        self._prepared_evidence: list[EvidenceItem] = []
+        self._git_search_summary: GitSearchSummary | None = None
+        self._prepared_context = ""
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -215,6 +245,64 @@ class _Specialist:
             )
             self._seed.append(item)
             self._evidence.append(item)
+        for thread in incident.review_threads:
+            for comment in thread.comments:
+                item = EvidenceItem(
+                    id=comment.id,
+                    agent=self.role,
+                    kind=EvidenceKind.PR_REVIEW_COMMENT,
+                    observation=(
+                        f"pull request review comment {comment.comment_id} "
+                        f"from thread {comment.thread_id}"
+                    ),
+                    provenance=comment.provenance,
+                    location=comment.location,
+                    excerpt=comment.excerpt,
+                )
+                self._seed.append(item)
+                self._evidence.append(item)
+
+    def _prepare_evidence(self, context: IncidentContext) -> None:
+        """Prepare deterministic evidence before the first model call."""
+
+    def _prepared_prompt(self) -> str:
+        """Return bounded prepared evidence context for the first model call."""
+        sections: list[str] = []
+        if self._seed:
+            sections.append(
+                json.dumps(
+                    [
+                        {
+                            "id": item.id,
+                            "kind": item.kind.value,
+                            "observation": item.observation,
+                        }
+                        for item in self._seed
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        if self._prepared_evidence:
+            sections.append(
+                json.dumps(
+                    [
+                        {
+                            "id": item.id,
+                            "kind": item.kind.value,
+                            "observation": item.observation,
+                            "excerpt": item.excerpt,
+                            "commit_ids": item.commit_ids,
+                        }
+                        for item in self._prepared_evidence
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        if self._prepared_context:
+            sections.append(self._prepared_context)
+        return "\n\n".join(sections)
 
     def _evidence_from_tool(
         self,
@@ -243,6 +331,7 @@ class _Specialist:
             ),
             location=location,
             excerpt=excerpt,
+            commit_ids=_extract_commit_ids(tool, result.content),
         )
 
     def _run_tool_call(self, call: ToolCall) -> str:
@@ -255,6 +344,8 @@ class _Specialist:
             )
         result = self._registry.execute(call.name, call.arguments)
         if result.ok:
+            if result.empty:
+                return result.content
             evidence = self._evidence_from_tool(
                 call.name,
                 result,
@@ -262,6 +353,9 @@ class _Specialist:
             )
             self._evidence.append(evidence)
             return f"Evidence id: {evidence.id}\n{result.content}"
+        failure = _bounded_note(f"{call.name} failed: {result.content}")
+        if failure is not None:
+            self._tool_failures.append(failure)
         return result.content
 
     def execute_tool_call(self, call: ToolCall) -> str:
@@ -289,22 +383,23 @@ class _Specialist:
         self._counter = 0
         self._isolation_violations = 0
         self._base_commit = context.incident.base_commit
+        self._tool_failures = []
+        self._prepared_evidence = []
+        self._git_search_summary = None
+        self._prepared_context = ""
         self._seed_evidence(context)
+        try:
+            self._prepare_evidence(context)
+        except Exception as exc:  # noqa: BLE001
+            self._tool_failures.append(
+                _bounded_note(f"prepared evidence failed: {exc}")
+                or "prepared evidence failed"
+            )
 
         prompt = self._prompt_builder(context, questions)
-        if self._seed:
-            prompt += "\n\nPREPARED EVIDENCE:\n" + json.dumps(
-                [
-                    {
-                        "id": item.id,
-                        "kind": item.kind.value,
-                        "observation": item.observation,
-                    }
-                    for item in self._seed
-                ],
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+        prepared_prompt = self._prepared_prompt()
+        if prepared_prompt:
+            prompt += "\n\nPREPARED EVIDENCE:\n" + prepared_prompt
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": prompt},
@@ -390,9 +485,20 @@ class _Specialist:
             else:
                 status = response.status
             uncertainty = response.uncertainty
-            uncertainty_note = _bounded_note(
-                response.uncertainty_note or error
+            uncertainty_note = _bounded_note(response.uncertainty_note or error)
+
+        if self._tool_failures:
+            tool_error = _bounded_note(
+                "tool failures: " + "; ".join(self._tool_failures)
             )
+            if status == FindingStatus.COMPLETED:
+                status = FindingStatus.PARTIAL
+            if error:
+                error = _bounded_note(f"{error}; {tool_error}")
+            else:
+                error = tool_error
+            uncertainty = UncertaintyLevel.HIGH
+            uncertainty_note = _bounded_note(error)
 
         finding = AgentFinding(
             agent=self.role,
@@ -404,6 +510,7 @@ class _Specialist:
             timing_seconds=round(time.monotonic() - started, 3),
             usage=self._usage.snapshot(),
             error=_bounded_note(error) if error else None,
+            git_search_summary=self._git_search_summary,
         )
         return SpecialistOutput(
             finding=finding,
@@ -484,4 +591,55 @@ class GitHistorySpecialist(_Specialist):
             registry=registry,
             usage=usage,
             budgets=budgets,
+        )
+
+    def _prepare_evidence(self, context: IncidentContext) -> None:
+        """Run layered Git search and prepare only the final Top-K candidates."""
+        plan = build_git_search_plan(context)
+        summary = self._registry.search_git_layers(plan)
+        self._git_search_summary = summary
+        for error in summary.errors:
+            self._tool_failures.append(f"prepared Git search: {error}")
+
+        for candidate in summary.candidates:
+            if not candidate.strong_match:
+                continue
+            location = None
+            if candidate.matched_paths:
+                location = SourceLocation(path=candidate.matched_paths[0])
+            excerpt = (
+                f"prepared Git candidate at depth {candidate.depth}: "
+                f"{candidate.commit} {candidate.subject}; "
+                f"score={candidate.score}; "
+                f"signals={', '.join(candidate.matched_signals)}"
+            )
+            evidence = EvidenceItem(
+                id=self._next_id(),
+                agent=self.role,
+                kind=EvidenceKind.GIT_LOG,
+                observation=(
+                    f"layered Git search candidate at depth {candidate.depth}"
+                ),
+                provenance=Provenance(
+                    source="rca_tool",
+                    tool="git_history",
+                    command=candidate.command or None,
+                    commit=self._base_commit,
+                ),
+                location=location,
+                excerpt=_cap_text(excerpt, MAX_EXCERPT_CHARS)[0],
+                commit_ids=[candidate.commit],
+            )
+            self._prepared_evidence.append(evidence)
+            self._evidence.append(evidence)
+
+        self._prepared_context = json.dumps(
+            {
+                "git_search_summary": summary.model_dump(mode="json"),
+                "prepared_evidence_ids": [
+                    item.id for item in self._prepared_evidence
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
         )

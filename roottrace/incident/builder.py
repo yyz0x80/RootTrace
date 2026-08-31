@@ -438,6 +438,17 @@ def build_incident_context(
         notes.append("no source snippets matched search signals")
     if loaded.incident.diff and diff_omitted:
         notes.append(f"PR diff excerpt truncated ({diff_omitted} chars omitted)")
+    review_truncation = loaded.incident.review_comment_truncation
+    if review_truncation.threads_omitted:
+        notes.append(
+            f"review comment threads truncated "
+            f"({review_truncation.threads_omitted} omitted)"
+        )
+    if review_truncation.comments_omitted:
+        notes.append(
+            f"review comments truncated "
+            f"({review_truncation.comments_omitted} omitted)"
+        )
 
     truncation = ContextTruncation(
         issue_body_chars_omitted=loaded.issue_chars_omitted,
@@ -455,6 +466,11 @@ def build_incident_context(
         snippet_candidates_omitted=candidates_omitted,
         snippets_omitted=snippets_omitted,
         snippet_excerpt_chars_omitted=excerpt_omitted,
+        review_threads_omitted=review_truncation.threads_omitted,
+        review_comments_omitted=review_truncation.comments_omitted,
+        review_comment_chars_omitted=review_truncation.chars_omitted,
+        review_comment_locations_unmapped=review_truncation.locations_unmapped,
+        review_comment_invalid_paths=review_truncation.invalid_paths,
         notes=notes,
     )
 

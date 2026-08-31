@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from roottrace.agents.schema import PlanBudgets
 from roottrace.cli import (
+    add_analyze_subparser,
     add_rca_subparser,
+    run_analyze_command,
     run_rca_command,
     run_rca_pipeline,
 )
+from roottrace.github import parse_github_resource_url
 from roottrace.incident.loader import load_incident
 from roottrace.llm.schema import AssistantTurn, ToolCall
 from roottrace.reporting.renderer import render_rca_markdown
@@ -166,7 +171,9 @@ def _report_json() -> str:
     )
 
 
-def _scripted_factory() -> list[FakeProvider]:
+def _scripted_factory(
+    final_responses: list[str] | None = None,
+) -> Callable[[], FakeProvider]:
     providers = [
         FakeProvider(turn(PLAN_JSON), turn(HYPOTHESES_JSON)),
         FakeProvider(turn(ISSUE_CI_FINAL)),
@@ -178,13 +185,14 @@ def _scripted_factory() -> list[FakeProvider]:
             tool_turn("git_history", {"max_count": 10}),
             turn(GIT_FINAL),
         ),
-        FakeProvider(turn(_report_json())),
+        FakeProvider(
+            *(turn(response) for response in (final_responses or [_report_json()]))
+        ),
     ]
 
     def factory() -> FakeProvider:
         return providers.pop(0)
 
-    factory.providers = providers
     return factory
 
 
@@ -229,6 +237,130 @@ def test_rca_subparser_parses_all_flags() -> None:
     assert args.stack_trace == "/tmp/stack.txt"
     assert args.ci_log == "/tmp/ci.log"
     assert args.pr_diff == "/tmp/diff.patch"
+
+
+def test_analyze_subparser_accepts_github_options() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    add_analyze_subparser(subparsers)
+
+    args = parser.parse_args(
+        [
+            "analyze",
+            "https://github.com/acme/widget/issues/7",
+            "--model",
+            "test-model",
+            "--output-dir",
+            "/tmp/out",
+            "--repo-cache",
+            "/tmp/cache",
+            "--github-token",
+            "token",
+            "--github-timeout",
+            "12.5",
+            "--include-review-comments",
+        ]
+    )
+
+    assert args.command == "analyze"
+    assert args.url.endswith("/issues/7")
+    assert args.model == "test-model"
+    assert args.output_dir == "/tmp/out"
+    assert args.repo_cache == "/tmp/cache"
+    assert args.github_token == "token"
+    assert args.github_timeout == 12.5
+    assert args.include_review_comments is True
+
+
+def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    reference = parse_github_resource_url(
+        "https://github.com/acme/widget/pull/8"
+    )
+    fetched = SimpleNamespace(reference=reference)
+    normalized = SimpleNamespace(
+        base_commit="a" * 40,
+        incident=SimpleNamespace(
+            id="github-acme-widget-pull_request-8",
+            git_verification_policy=SimpleNamespace(history_depth=50),
+        ),
+        loaded_incident=object(),
+        repository_url="https://github.com/acme/widget.git",
+    )
+
+    class FakeClient:
+        token = "token"
+
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["timeout"] == 30.0
+
+    class FakeIngestor:
+        def __init__(self, client, *, include_review_comments=False) -> None:
+            assert isinstance(client, FakeClient)
+            assert include_review_comments is True
+
+        def fetch(self, url):
+            assert url == "https://github.com/acme/widget/pull/8"
+            return fetched
+
+        def normalize(self, received):
+            assert received is fetched
+            return normalized
+
+    class FakePrepared:
+        repo = tmp_path / "prepared"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return None
+
+    captured: dict[str, Any] = {}
+
+    def fake_pipeline(loaded, repo, output_dir, *, provider_factory):
+        captured.update(
+            loaded=loaded,
+            repo=repo,
+            output_dir=output_dir,
+            provider_factory=provider_factory,
+        )
+        return SimpleNamespace(
+            incident_id="github-acme-widget-pull_request-8",
+            run=SimpleNamespace(status=SimpleNamespace(value="completed")),
+            output_dir=str(output_dir),
+        )
+
+    monkeypatch.setattr("roottrace.cli.GitHubClient", FakeClient)
+    monkeypatch.setattr("roottrace.cli.GitHubIngestor", FakeIngestor)
+    prepared_arguments: dict[str, Any] = {}
+
+    def fake_prepare(*args, **kwargs):
+        prepared_arguments.update(kwargs)
+        return FakePrepared()
+
+    monkeypatch.setattr("roottrace.cli.prepare_github_repository", fake_prepare)
+    monkeypatch.setattr("roottrace.cli.run_rca_pipeline", fake_pipeline)
+
+    result = run_analyze_command(
+        argparse.Namespace(
+            url="https://github.com/acme/widget/pull/8",
+            github_token="token",
+            github_timeout=30.0,
+            repo_cache=str(tmp_path / "cache"),
+            output_dir=None,
+            model=None,
+            include_review_comments=True,
+        )
+    )
+
+    assert result == 0
+    assert captured["loaded"] is normalized.loaded_incident
+    assert captured["repo"] == FakePrepared.repo
+    assert captured["output_dir"] == Path("output") / normalized.incident.id
+    assert prepared_arguments["history_depth"] == 50
 
 
 def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
@@ -291,9 +423,51 @@ def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
     )
     assert summary["incident_id"] == loaded.incident.id
     assert summary["conclusion"] == "root_cause_identified"
+    assert summary["resource_kind"] == "issue"
+    assert summary["git_verification_policy"]["enabled"] is False
+    assert summary["git_verification_policy"]["history_depth"] == 1
 
     after = capture_repository_fingerprint(git_repo.repo)
     assert before.model_dump(mode="json") == after.model_dump(mode="json")
+
+
+def test_run_rca_pipeline_persists_synthesis_degradation_diagnostic(
+    git_repo,
+    tmp_path: Path,
+) -> None:
+    issue, ci_log = _issue_files(git_repo, tmp_path)
+    loaded = load_incident(issue, git_repo.repo, ci_log_path=ci_log)
+    payload = json.loads(_report_json())
+    payload["suspected_regression"] = {
+        "commit": git_repo.base_sha,
+        "summary": "the base commit may contain the regression",
+        "locations": [{"path": "pkg/calc.py", "symbol": "multiply"}],
+    }
+    invalid_response = json.dumps(payload)
+    output_dir = tmp_path / "degraded-out"
+
+    result = run_rca_pipeline(
+        loaded,
+        git_repo.repo,
+        output_dir,
+        provider_factory=_scripted_factory(
+            [invalid_response, invalid_response]
+        ),
+        budgets=PlanBudgets(),
+        log_sources={"ci.log": ci_log},
+    )
+
+    assert result.report.suspected_regression is None
+    assert [diagnostic.code for diagnostic in result.run.diagnostics] == [
+        "synthesis.suspected_regression_removed"
+    ]
+    summary = json.loads(
+        (output_dir / "run_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["diagnostics"][0]["severity"] == "recoverable"
+    assert summary["errors"] == [
+        "Invalid suspected_regression was removed after synthesis repair failed"
+    ]
 
 
 def test_run_rca_command_with_scripted_providers(

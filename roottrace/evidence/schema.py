@@ -13,12 +13,16 @@ from pydantic import (
     model_validator,
 )
 
-from roottrace.incident.schema import Provenance, StableId
+from roottrace.incident.schema import (
+    Provenance,
+    SourceLocation,
+    StableId,
+    validate_commit_sha,
+)
 from roottrace.llm.schema import Usage
-from roottrace.runtime.paths import validate_relative_path
+from roottrace.tools.git_search import GitSearchSummary
 
 MAX_COMMAND_CHARS = 500
-MAX_SYMBOL_CHARS = 512
 MAX_EXCERPT_CHARS = 8_000
 MAX_OBSERVATION_CHARS = 2_000
 MAX_STATEMENT_CHARS = 2_000
@@ -29,6 +33,7 @@ MAX_EVIDENCE_IDS = 50
 MAX_STEPS = 5
 MAX_SUGGESTIONS = 5
 MAX_GRAPH_EVIDENCE = 200
+MAX_COMMIT_IDS = 20
 
 BoundedNote = Annotated[str, StringConstraints(max_length=MAX_NOTE_CHARS)]
 BoundedSuggestion = Annotated[str, StringConstraints(max_length=MAX_PROPOSAL_CHARS)]
@@ -55,6 +60,7 @@ class EvidenceKind(str, Enum):
     GIT_BLAME = "git_blame"
     GIT_DIFF = "git_diff"
     TEST_RESULT = "test_result"
+    PR_REVIEW_COMMENT = "pr_review_comment"
     OTHER = "other"
 
 
@@ -89,28 +95,6 @@ class HypothesisDisposition(str, Enum):
     UNVERIFIED = "unverified"
 
 
-class SourceLocation(BaseModel):
-    path: str
-    symbol: str | None = Field(default=None, max_length=MAX_SYMBOL_CHARS)
-    start_line: int | None = Field(default=None, ge=1)
-    end_line: int | None = Field(default=None, ge=1)
-
-    @field_validator("path")
-    @classmethod
-    def _validate_path(cls, value: str) -> str:
-        return validate_relative_path(value)
-
-    @model_validator(mode="after")
-    def _validate_line_range(self) -> SourceLocation:
-        if (
-            self.start_line is not None
-            and self.end_line is not None
-            and self.end_line < self.start_line
-        ):
-            raise ValueError("end_line must be >= start_line")
-        return self
-
-
 class EvidenceItem(BaseModel):
     id: StableId
     agent: AgentRole
@@ -119,6 +103,30 @@ class EvidenceItem(BaseModel):
     provenance: Provenance
     location: SourceLocation | None = None
     excerpt: str = Field(max_length=MAX_EXCERPT_CHARS)
+    commit_ids: list[str] = Field(default_factory=list, max_length=MAX_COMMIT_IDS)
+
+    @field_validator("commit_ids")
+    @classmethod
+    def _validate_commit_ids(cls, values: list[str]) -> list[str]:
+        normalized = [validate_commit_sha(value).lower() for value in values]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("evidence commit ids must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_commit_provenance(self) -> EvidenceItem:
+        git_kinds = {
+            EvidenceKind.GIT_LOG,
+            EvidenceKind.GIT_DIFF,
+            EvidenceKind.GIT_BLAME,
+        }
+        if self.commit_ids and (
+            self.agent is not AgentRole.GIT_HISTORY or self.kind not in git_kinds
+        ):
+            raise ValueError(
+                "commit ids are allowed only on Git History evidence"
+            )
+        return self
 
 
 class EvidenceEdge(BaseModel):
@@ -143,6 +151,13 @@ class AgentFinding(BaseModel):
     timing_seconds: float | None = Field(default=None, ge=0)
     usage: Usage | None = None
     error: str | None = Field(default=None, max_length=MAX_NOTE_CHARS)
+    git_search_summary: GitSearchSummary | None = None
+
+    @model_validator(mode="after")
+    def _validate_git_search_summary(self) -> AgentFinding:
+        if self.git_search_summary is not None and self.agent is not AgentRole.GIT_HISTORY:
+            raise ValueError("git search summaries are allowed only for Git History")
+        return self
 
 
 class VerificationStep(BaseModel):

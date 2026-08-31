@@ -1,5 +1,13 @@
 """Bounded, typed, read-only repository tools."""
 
+from roottrace.tools.git_search import (
+    GitSearchCandidate,
+    GitSearchExecutor,
+    GitSearchPlan,
+    GitSearchQuery,
+    GitSearchStage,
+    GitSearchSummary,
+)
 from roottrace.tools.registry import (
     ReadFileInput,
     SearchCodeInput,
@@ -20,8 +28,25 @@ from roottrace.tools.repository import (
 from roottrace.tools.schema import ToolFailureType, ToolResult
 
 __all__ = [
-    "GitBlameInput", "GitHistoryInput", "GitShowInput", "InspectSymbolsInput",
-    "RcaToolRegistry", "RcaToolResult", "ReadExternalLogInput", "ReadFileInput",
-    "SearchCodeInput", "ToolDefinition", "ToolFailureType", "ToolInput",
-    "ToolRegistry", "ToolResult", "generate_json_schema",
+    "GitBlameInput",
+    "GitHistoryInput",
+    "GitSearchCandidate",
+    "GitSearchExecutor",
+    "GitSearchPlan",
+    "GitSearchQuery",
+    "GitSearchStage",
+    "GitSearchSummary",
+    "GitShowInput",
+    "InspectSymbolsInput",
+    "RcaToolRegistry",
+    "RcaToolResult",
+    "ReadExternalLogInput",
+    "ReadFileInput",
+    "SearchCodeInput",
+    "ToolDefinition",
+    "ToolFailureType",
+    "ToolInput",
+    "ToolRegistry",
+    "ToolResult",
+    "generate_json_schema",
 ]
