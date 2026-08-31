@@ -258,6 +258,7 @@ def test_analyze_subparser_accepts_github_options() -> None:
             "token",
             "--github-timeout",
             "12.5",
+            "--include-review-comments",
         ]
     )
 
@@ -268,6 +269,7 @@ def test_analyze_subparser_accepts_github_options() -> None:
     assert args.repo_cache == "/tmp/cache"
     assert args.github_token == "token"
     assert args.github_timeout == 12.5
+    assert args.include_review_comments is True
 
 
 def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
@@ -295,8 +297,9 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
             assert kwargs["timeout"] == 30.0
 
     class FakeIngestor:
-        def __init__(self, client) -> None:
+        def __init__(self, client, *, include_review_comments=False) -> None:
             assert isinstance(client, FakeClient)
+            assert include_review_comments is True
 
         def fetch(self, url):
             assert url == "https://github.com/acme/widget/pull/8"
@@ -349,6 +352,7 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
             repo_cache=str(tmp_path / "cache"),
             output_dir=None,
             model=None,
+            include_review_comments=True,
         )
     )
 

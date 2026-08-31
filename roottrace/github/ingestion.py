@@ -15,6 +15,7 @@ from roottrace.incident.schema import (
     MAX_TITLE_CHARS,
     IncidentInput,
     Provenance,
+    ReviewCommentTruncation,
     validate_commit_sha,
 )
 
@@ -32,6 +33,7 @@ from .models import (
     GitHubUser,
     parse_github_resource_url,
 )
+from .review_comments import select_review_comment_threads
 
 MAX_INGESTION_COMMENTS = 10
 MAX_INGESTION_COMMENT_CHARS = 4_000
@@ -100,15 +102,6 @@ def _user_name(user: GitHubUser | None) -> str:
 def _comment_log(comment: GitHubComment) -> str:
     body = _bounded_text((comment.body or "").strip(), MAX_INGESTION_COMMENT_CHARS)
     return f"GitHub comment by @{_user_name(comment.user)}:\n{body}".strip()
-
-
-def _review_comment_log(comment: GitHubPullRequestReviewComment) -> str:
-    """Render bounded code-review text with source file/line provenance."""
-    body = _bounded_text((comment.body or "").strip(), MAX_INGESTION_COMMENT_CHARS)
-    path = (comment.path or "").strip()
-    line = comment.line if comment.line is not None else comment.original_line
-    location = f" on {path}:{line}" if path and line is not None else f" on {path}" if path else ""
-    return f"GitHub code review comment by @{_user_name(comment.user)}{location}:\n{body}".strip()
 
 
 def _commit_log(commit: GitHubCommit) -> str:
@@ -257,17 +250,27 @@ class GitHubIngestor:
                 if item.body
             )
             logs.extend(
-                _review_comment_log(item)
-                for item in fetched.review_comments
-                if item.body and item.body.strip()
+                _commit_log(item) for item in fetched.commits if item.commit
             )
-            logs.extend(_commit_log(item) for item in fetched.commits if item.commit)
             filenames = _changed_files(fetched.files)
             if filenames:
                 names = ", ".join(filenames[:MAX_INGESTION_FILE_NAMES])
                 if len(filenames) > MAX_INGESTION_FILE_NAMES:
                     names += f", ... ({len(filenames) - MAX_INGESTION_FILE_NAMES} more)"
                 logs.append(_bounded_text(f"PR changed files: {names}", MAX_LOG_CHARS))
+            if self.include_review_comments:
+                review_threads, review_comment_truncation = (
+                    select_review_comment_threads(
+                        fetched.review_comments,
+                        base_commit=selected_revision,
+                        changed_files=filenames,
+                        incident_text=f"{title}\n{body}",
+                        resource_url=reference.url,
+                    )
+                )
+            else:
+                review_threads = []
+                review_comment_truncation = ReviewCommentTruncation()
             notes = [f"PR base SHA selected: {selected_revision}"]
         else:
             if not isinstance(detail, GitHubIssueDetail):
@@ -282,6 +285,8 @@ class GitHubIngestor:
             diff = None
             logs = [_comment_log(item) for item in fetched.comments if item.body]
             filenames = []
+            review_threads = []
+            review_comment_truncation = ReviewCommentTruncation()
             notes = [f"Issue analyzed at default-branch commit: {selected_revision}"]
 
         problem = _bounded_problem(body or title)
@@ -302,6 +307,8 @@ class GitHubIngestor:
             diff=diff,
             labels=labels,
             changed_files=filenames,
+            review_threads=review_threads,
+            review_comment_truncation=review_comment_truncation,
             provenance=Provenance(
                 source=reference.url,
                 tool="github_rest_client",

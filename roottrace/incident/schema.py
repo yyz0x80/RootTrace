@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 from pydantic import (
     BaseModel,
     Field,
+    StrictInt,
     StringConstraints,
     field_validator,
     model_validator,
@@ -24,12 +25,21 @@ MAX_DIFF_CHARS = 100_000
 MAX_SOURCE_CHARS = 1_000
 MAX_TOOL_CHARS = 200
 MAX_COMMAND_CHARS = 500
+MAX_SYMBOL_CHARS = 512
 MAX_LOGS = 10
 MAX_GIT_HISTORY_DEPTH = 50
 DEFAULT_GIT_SEARCH_DEPTHS = (8, 16, 32, 50)
 MAX_GIT_CANDIDATE_COMMITS = 20
 MAX_GIT_CANDIDATE_PATHS = 20
 MAX_GIT_POLICY_REASONS = 10
+MAX_REVIEW_THREADS = 5
+MAX_REVIEW_COMMENTS_PER_THREAD = 3
+MAX_REVIEW_COMMENT_CHARS = 1_500
+MAX_REVIEW_COMMENT_TOTAL_CHARS = 8_000
+MAX_REVIEW_SCORE_REASONS = 10
+MAX_REVIEW_REASON_CHARS = 500
+MAX_REVIEW_AUTHOR_CHARS = 200
+MAX_REVIEW_SIDE_CHARS = 16
 
 StableId = Annotated[
     str,
@@ -59,12 +69,42 @@ _GENERATED_PR_COMMIT_PATTERN = re.compile(
 )
 
 ResourceKind = Literal["issue", "pull_request"]
+ReviewCommentLocationMapping = Literal[
+    "analysis_revision",
+    "current_comment_revision",
+    "original_comment_revision",
+    "unmapped",
+]
 
 
 def validate_commit_sha(value: str) -> str:
     if not isinstance(value, str) or not _SHA_PATTERN.fullmatch(value):
         raise ValueError("commit must be a 7-64 character hexadecimal SHA")
     return value
+
+
+class SourceLocation(BaseModel):
+    """Repository-relative source location optionally bounded to line range."""
+
+    path: str
+    symbol: str | None = Field(default=None, max_length=MAX_SYMBOL_CHARS)
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return validate_relative_path(value)
+
+    @model_validator(mode="after")
+    def _validate_line_range(self) -> SourceLocation:
+        if (
+            self.start_line is not None
+            and self.end_line is not None
+            and self.end_line < self.start_line
+        ):
+            raise ValueError("end_line must be >= start_line")
+        return self
 
 
 def extract_diff_paths(diff: str | None) -> list[str]:
@@ -257,6 +297,79 @@ class Provenance(BaseModel):
         return value
 
 
+class ReviewCommentEvidence(BaseModel):
+    """One bounded pull request review comment with auditable provenance."""
+
+    id: StableId
+    comment_id: StrictInt = Field(gt=0)
+    thread_id: StableId
+    parent_comment_id: StrictInt | None = Field(default=None, gt=0)
+    author: str | None = Field(default=None, max_length=MAX_REVIEW_AUTHOR_CHARS)
+    excerpt: str = Field(max_length=MAX_REVIEW_COMMENT_CHARS)
+    provenance: Provenance
+    location: SourceLocation | None = None
+    location_source_comment_id: StrictInt = Field(gt=0)
+    location_mapping: ReviewCommentLocationMapping
+    side: str | None = Field(default=None, max_length=MAX_REVIEW_SIDE_CHARS)
+    start_side: str | None = Field(default=None, max_length=MAX_REVIEW_SIDE_CHARS)
+    line: StrictInt | None = Field(default=None, ge=1)
+    start_line: StrictInt | None = Field(default=None, ge=1)
+    original_line: StrictInt | None = Field(default=None, ge=1)
+    original_start_line: StrictInt | None = Field(default=None, ge=1)
+    position: StrictInt | None = Field(default=None, ge=1)
+    original_position: StrictInt | None = Field(default=None, ge=1)
+    commit_id: str | None = None
+    original_commit_id: str | None = None
+    pull_request_review_id: StrictInt | None = Field(default=None, gt=0)
+    subject_type: str | None = Field(default=None, max_length=MAX_REVIEW_SIDE_CHARS)
+    created_at: str | None = Field(default=None, max_length=128)
+
+    @field_validator("commit_id", "original_commit_id")
+    @classmethod
+    def _validate_optional_commit(cls, value: str | None) -> str | None:
+        if value is not None:
+            return validate_commit_sha(value)
+        return value
+
+
+class ReviewCommentThread(BaseModel):
+    """Deterministically selected review comments sharing one discussion thread."""
+
+    id: StableId
+    root_comment_id: StrictInt = Field(gt=0)
+    rank: int = Field(ge=1, le=MAX_REVIEW_THREADS)
+    score: int = Field(ge=0)
+    score_reasons: list[
+        Annotated[str, StringConstraints(max_length=MAX_REVIEW_REASON_CHARS)]
+    ] = Field(default_factory=list, max_length=MAX_REVIEW_SCORE_REASONS)
+    comments: list[ReviewCommentEvidence] = Field(
+        min_length=1,
+        max_length=MAX_REVIEW_COMMENTS_PER_THREAD,
+    )
+    comments_omitted: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_members(self) -> ReviewCommentThread:
+        if any(comment.thread_id != self.id for comment in self.comments):
+            raise ValueError("review thread comments must use the thread id")
+        comment_ids = [comment.comment_id for comment in self.comments]
+        if len(set(comment_ids)) != len(comment_ids):
+            raise ValueError("review thread comments must have unique comment ids")
+        return self
+
+
+class ReviewCommentTruncation(BaseModel):
+    """Counts for deterministic review-comment selection and omission."""
+
+    threads_considered: int = Field(default=0, ge=0)
+    comments_considered: int = Field(default=0, ge=0)
+    threads_omitted: int = Field(default=0, ge=0)
+    comments_omitted: int = Field(default=0, ge=0)
+    chars_omitted: int = Field(default=0, ge=0)
+    locations_unmapped: int = Field(default=0, ge=0)
+    invalid_paths: int = Field(default=0, ge=0)
+
+
 class IncidentInput(BaseModel):
     """Normalized incident input for one RootTrace run."""
 
@@ -271,6 +384,13 @@ class IncidentInput(BaseModel):
     labels: list[str] = Field(default_factory=list, max_length=100)
     related_commits: list[str] = Field(default_factory=list, max_length=50)
     changed_files: list[str] = Field(default_factory=list, max_length=3_000)
+    review_threads: list[ReviewCommentThread] = Field(
+        default_factory=list,
+        max_length=MAX_REVIEW_THREADS,
+    )
+    review_comment_truncation: ReviewCommentTruncation = Field(
+        default_factory=ReviewCommentTruncation
+    )
     git_verification_policy: GitVerificationPolicy = Field(
         default_factory=lambda: GitVerificationPolicy(
             enabled=False,
@@ -372,6 +492,27 @@ class IncidentInput(BaseModel):
 
     @model_validator(mode="after")
     def _validate_derived_policy(self) -> IncidentInput:
+        if self.review_threads and self.resource_kind != "pull_request":
+            raise ValueError("review comment threads require a pull request incident")
+        thread_ids = [thread.id for thread in self.review_threads]
+        if len(set(thread_ids)) != len(thread_ids):
+            raise ValueError("review thread ids must be unique")
+        ranks = [thread.rank for thread in self.review_threads]
+        if ranks != list(range(1, len(ranks) + 1)):
+            raise ValueError("review thread ranks must be contiguous starting at 1")
+        comment_ids = [
+            comment.comment_id
+            for thread in self.review_threads
+            for comment in thread.comments
+        ]
+        if len(set(comment_ids)) != len(comment_ids):
+            raise ValueError("review comment ids must be unique across threads")
+        if sum(
+            len(comment.excerpt)
+            for thread in self.review_threads
+            for comment in thread.comments
+        ) > MAX_REVIEW_COMMENT_TOTAL_CHARS:
+            raise ValueError("review comment excerpts exceed the total character budget")
         expected = build_git_verification_policy(
             resource_kind=self.resource_kind,
             title=self.title,

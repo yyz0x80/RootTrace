@@ -245,7 +245,10 @@ def test_client_preserves_review_comment_thread_and_location_fields(pull_ref) ->
         "position": 33,
         "original_position": 30,
         "commit_id": "a" * 40,
+        "original_commit_id": "b" * 40,
         "in_reply_to_id": 41,
+        "pull_request_review_id": 7,
+        "subject_type": "line",
         "diff_hunk": "@@ -9,4 +10,4 @@",
     }
     client = GitHubClient(transport=FakeTransport(response([payload])))
@@ -261,7 +264,10 @@ def test_client_preserves_review_comment_thread_and_location_fields(pull_ref) ->
     assert comment.position == 33
     assert comment.original_position == 30
     assert comment.commit_id == "a" * 40
+    assert comment.original_commit_id == "b" * 40
     assert comment.in_reply_to_id == 41
+    assert comment.pull_request_review_id == 7
+    assert comment.subject_type == "line"
     assert comment.diff_hunk == "@@ -9,4 +10,4 @@"
 
 

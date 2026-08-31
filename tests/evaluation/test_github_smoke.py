@@ -15,14 +15,23 @@ from roottrace.github import (
     GitHubIssueDetail,
     GitHubPullRequestDetail,
     GitHubPullRequestFile,
+    GitHubPullRequestReviewComment,
     parse_github_resource_url,
 )
 
 
 class FakeIngestor:
-    def __init__(self, resources: dict[str, GitHubFetchedResource]) -> None:
+    def __init__(
+        self,
+        resources: dict[str, GitHubFetchedResource],
+        *,
+        include_review_comments: bool = False,
+    ) -> None:
         self.resources = resources
-        self._normalizer = GitHubIngestor(None)
+        self._normalizer = GitHubIngestor(
+            None,
+            include_review_comments=include_review_comments,
+        )
 
     def fetch(self, url: str) -> GitHubFetchedResource:
         return self.resources[url]
@@ -74,7 +83,13 @@ def _issue_resource(url: str, commit: str, body: str = "A reproducible failure")
     )
 
 
-def _pr_resource(url: str, base: str, head: str, merge: str):
+def _pr_resource(
+    url: str,
+    base: str,
+    head: str,
+    merge: str,
+    review_comments: list[GitHubPullRequestReviewComment] | None = None,
+):
     reference = parse_github_resource_url(url)
     return GitHubFetchedResource(
         reference=reference,
@@ -87,6 +102,7 @@ def _pr_resource(url: str, base: str, head: str, merge: str):
             merge_commit_sha=merge,
         ),
         files=[GitHubPullRequestFile(filename="src/app.py", patch="@@ -1 +1 @@\n-old\n+new")],
+        review_comments=review_comments or [],
     )
 
 
@@ -204,6 +220,74 @@ def test_pr_context_combines_regression_issue_and_bad_pr_without_fix_leakage(tmp
     assert result.expected_root_cause_files == ["src/app.py"]
     assert result.gold_files == []
     assert calls[0]["revision"] == merge
+
+
+def test_pr_smoke_preserves_typed_review_threads_and_redacts_fix_references(tmp_path) -> None:
+    merge = "c" * 40
+    base = "a" * 40
+    head = "b" * 40
+    pr_url = "https://github.com/acme/demo/pull/8"
+    issue_url = "https://github.com/acme/demo/issues/9"
+    fix_url = "https://github.com/acme/demo/pull/10"
+    case = GitHubSmokeCase(
+        instance_id="acme__demo-pr8-regression9",
+        source_type="github_pr",
+        source_url=pr_url,
+        regression_issue_url=issue_url,
+        repo="acme/demo",
+        base_commit=merge,
+        expected_files=["src/app.py"],
+        fix_evidence_url=fix_url,
+        manual_review_required=True,
+    )
+    resources = {
+        pr_url: _pr_resource(
+            pr_url,
+            base,
+            head,
+            merge,
+            review_comments=[
+                GitHubPullRequestReviewComment(
+                    id=77,
+                    body=f"Please compare with {fix_url}, #10, and acme/demo#10.",
+                    html_url=f"{pr_url}#discussion_r77",
+                    path="src/app.py",
+                    line=1,
+                    commit_id=base,
+                )
+            ],
+        ),
+        issue_url: _issue_resource(issue_url, merge),
+    }
+    fake_client = FakeRootTrace()
+    result = smoke_runner.run_case(
+        case,
+        ingestor=FakeIngestor(resources, include_review_comments=True),
+        roottrace_client=fake_client,
+        cache_dir=tmp_path / "github-smoke-cache",
+        case_dir=tmp_path / "case",
+        model=None,
+        prepare_fn=_prepare_factory([], tmp_path, merge),
+    )
+
+    assert result.status == "manual_review_required"
+    incident = fake_client.received[0]
+    assert len(incident.review_threads) == 1
+    review = incident.review_threads[0].comments[0]
+    assert review.comment_id == 77
+    assert fix_url not in review.excerpt
+    assert "#10" not in review.excerpt
+    assert "acme/demo#10" not in review.excerpt
+    assert review.location is not None
+    assert review.location.path == "src/app.py"
+
+
+def test_smoke_parser_exposes_review_comment_opt_in_flag() -> None:
+    args = smoke_runner.build_parser().parse_args(
+        ["--include-review-comments"]
+    )
+
+    assert args.include_review_comments is True
 
 
 def test_preflight_runs_without_roottrace_client_or_provider(tmp_path, monkeypatch) -> None:

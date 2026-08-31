@@ -93,8 +93,86 @@ def test_pull_request_uses_base_sha_and_keeps_head_as_context() -> None:
     assert result.revision_kind == "pull_request_base"
 
 
-def test_pull_request_threads_bounded_review_comments_with_source_provenance() -> None:
-    """PR logs include bounded review text and source lines, never diff positions."""
+def test_pull_request_review_comments_use_a_typed_channel() -> None:
+    """Opted-in review comments stay out of logs and retain provenance."""
+    reference = parse_github_resource_url(
+        "https://github.com/acme/widget/pull/8"
+    )
+    base_commit = "a" * 40
+    fetched = GitHubFetchedResource(
+        reference=reference,
+        detail=GitHubPullRequestDetail(
+            number=8,
+            title="Fix config loading",
+            body="Handle a missing config path.",
+            base={"sha": base_commit},
+        ),
+        review_comments=[
+            GitHubPullRequestReviewComment(
+                id=1,
+                body="x" * 5_000,
+                path="src/config.py",
+                line=12,
+                start_line=10,
+                original_line=11,
+                original_start_line=9,
+                commit_id=base_commit,
+                html_url="https://github.com/acme/widget/pull/8#discussion_r1",
+                diff_hunk="@@ unbounded diff context should not be included",
+            ),
+            GitHubPullRequestReviewComment(
+                id=2,
+                body="Please keep the reply in the same thread.",
+                path="src/config.py",
+                line=99,
+                commit_id=base_commit,
+                in_reply_to_id=1,
+                html_url="https://github.com/acme/widget/pull/8#discussion_r2",
+            ),
+            GitHubPullRequestReviewComment(id=3, body="   ", path="src/empty.py"),
+            GitHubPullRequestReviewComment(
+                id=4,
+                body="This has no source line.",
+                path="src/other.py",
+                html_url="https://github.com/acme/widget/pull/8#discussion_r4",
+            ),
+        ],
+    )
+
+    result = GitHubIngestor(
+        None,
+        include_review_comments=True,
+    ).normalize(fetched)
+
+    assert result.incident.logs == []
+    assert [
+        [comment.comment_id for comment in thread.comments]
+        for thread in result.incident.review_threads
+    ] == [[1, 2], [4]]
+    first, reply = result.incident.review_threads[0].comments
+    assert len(first.excerpt) <= 1_500
+    assert "@@ unbounded diff context" not in first.model_dump_json()
+    assert first.provenance.source.endswith("discussion_r1")
+    assert first.provenance.tool == "github_rest_client"
+    assert first.location is not None
+    assert first.location.path == "src/config.py"
+    assert first.location.start_line == 10
+    assert first.location.end_line == 12
+    assert first.location_mapping == "analysis_revision"
+    assert reply.parent_comment_id == 1
+    assert reply.location == first.location
+    assert reply.location_source_comment_id == 1
+    assert reply.line == 99
+    second = result.incident.review_threads[1].comments[0]
+    assert second.location is not None
+    assert second.location.path == "src/other.py"
+    assert second.location.start_line is None
+    assert second.location_mapping == "unmapped"
+    assert result.incident.review_comment_truncation.comments_omitted == 1
+
+
+def test_pull_request_normalization_is_opt_out_even_for_preloaded_comments() -> None:
+    """The default normalizer does not activate a preloaded review channel."""
     reference = parse_github_resource_url(
         "https://github.com/acme/widget/pull/8"
     )
@@ -107,33 +185,15 @@ def test_pull_request_threads_bounded_review_comments_with_source_provenance() -
             base={"sha": "a" * 40},
         ),
         review_comments=[
-            GitHubPullRequestReviewComment(
-                id=1,
-                body="x" * 5_000,
-                path="src/config.py",
-                line=12,
-                position=99,
-                diff_hunk="@@ unbounded diff context should not be included",
-            ),
-            GitHubPullRequestReviewComment(
-                id=2,
-                body="This has no source line.",
-                path="src/other.py",
-                position=77,
-            ),
-            GitHubPullRequestReviewComment(id=3, body="   ", path="src/empty.py"),
+            GitHubPullRequestReviewComment(id=1, body="Do not enter logs."),
         ],
     )
 
     result = GitHubIngestor(None).normalize(fetched)
 
-    assert len(result.incident.logs) == 2
-    assert "GitHub code review comment" in result.incident.logs[0]
-    assert "src/config.py:12" in result.incident.logs[0]
-    assert "@@ unbounded diff context" not in result.incident.logs[0]
-    assert len(result.incident.logs[0]) <= 20_000
-    assert "src/other.py" in result.incident.logs[1]
-    assert "src/other.py:77" not in result.incident.logs[1]
+    assert result.incident.review_threads == []
+    assert result.incident.review_comment_truncation.threads_considered == 0
+    assert result.incident.logs == []
 
 
 def test_pull_request_review_comment_fetching_is_opt_in() -> None:

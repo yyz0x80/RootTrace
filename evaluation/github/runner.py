@@ -40,10 +40,15 @@ from roottrace.github import (
     GitHubIngestor,
     GitHubRepositoryRef,
     PreparedGitHubRepository,
+    map_review_comment_threads_to_revision,
     parse_github_resource_url,
     prepare_github_repository,
 )
-from roottrace.incident.schema import IncidentInput, Provenance
+from roottrace.incident.schema import (
+    IncidentInput,
+    Provenance,
+    ReviewCommentThread,
+)
 
 from .manifest import (
     DEFAULT_MANIFEST_PATH,
@@ -353,6 +358,34 @@ def _redact_text(value: str | None, forbidden: str | None) -> str | None:
     return redacted
 
 
+def _redact_review_threads(
+    threads: list[ReviewCommentThread],
+    forbidden: str | None,
+) -> list[ReviewCommentThread]:
+    """Copy review threads while removing evaluator-only references from text."""
+    redacted_threads: list[ReviewCommentThread] = []
+    for thread in threads:
+        comments = []
+        for comment in thread.comments:
+            excerpt = _redact_text(comment.excerpt, forbidden) or ""
+            source = _redact_text(comment.provenance.source, forbidden)
+            provenance = (
+                comment.provenance
+                if source == comment.provenance.source
+                else comment.provenance.model_copy(update={"source": source or ""})
+            )
+            comments.append(
+                comment.model_copy(
+                    update={
+                        "excerpt": excerpt,
+                        "provenance": provenance,
+                    }
+                )
+            )
+        redacted_threads.append(thread.model_copy(update={"comments": comments}))
+    return redacted_threads
+
+
 def _compose_pr_incident(
     case: GitHubSmokeCase,
     issue_result: GitHubIngestionResult,
@@ -377,6 +410,19 @@ def _compose_pr_incident(
     labels = sorted(set(issue_result.incident.labels) | set(pr_result.incident.labels))
     diff = _redact_text(pr_result.incident.diff, forbidden)
     changed_files = list(dict.fromkeys(pr_result.changed_files))
+    review_threads = map_review_comment_threads_to_revision(
+        _redact_review_threads(pr_result.incident.review_threads, forbidden),
+        base_commit=case.base_commit,
+    )
+    review_comment_truncation = pr_result.incident.review_comment_truncation.model_copy(
+        update={
+            "locations_unmapped": sum(
+                comment.location_mapping == "unmapped"
+                for thread in review_threads
+                for comment in thread.comments
+            )
+        }
+    )
     return IncidentInput(
         id=issue_result.incident.id,
         repo=case.repo,
@@ -389,6 +435,8 @@ def _compose_pr_incident(
         labels=labels,
         related_commits=related_commits,
         changed_files=changed_files,
+        review_threads=review_threads,
+        review_comment_truncation=review_comment_truncation,
         provenance=Provenance(
             source=case.regression_issue_url or issue_result.incident.provenance.source,
             tool="github_smoke10",
@@ -898,6 +946,7 @@ def run_preflight(
     prepare_fn: PreparedRepositoryFactory = prepare_github_repository,
     manifest_path: str | Path = DEFAULT_MANIFEST_PATH,
     now: datetime | None = None,
+    include_review_comments: bool = False,
 ) -> GitHubSmokePreflightReport:
     """Run manifest/API/cache/checkout checks without creating a provider."""
     checks: list[PreflightCheck] = []
@@ -946,7 +995,13 @@ def run_preflight(
     )
     checks.extend(validate_external_data(manifest, data_root=data_root))
 
-    ingestor = GitHubIngestor(github_client)
+    if include_review_comments:
+        ingestor = GitHubIngestor(
+            github_client,
+            include_review_comments=True,
+        )
+    else:
+        ingestor = GitHubIngestor(github_client)
     for case in selected:
         context: CaseContext | None = None
         try:
@@ -1172,6 +1227,9 @@ def run_from_args(
             prepare_fn=prepare_fn,
             manifest_path=manifest_path,
             now=now,
+            include_review_comments=bool(
+                _arg(args, "include_review_comments", False)
+            ),
         )
         _write_preflight_report(
             report,
@@ -1197,11 +1255,15 @@ def run_from_args(
     active_client = roottrace_client or client or InProcessRootTraceClient()
     _dev50_path, gold_path = external_data_paths(data_root)
     results: list[GitHubSmokeCaseResult] = []
+    if bool(_arg(args, "include_review_comments", False)):
+        ingestor = GitHubIngestor(api_client, include_review_comments=True)
+    else:
+        ingestor = GitHubIngestor(api_client)
     for case in selected:
         try:
             result = run_case(
                 case,
-                ingestor=GitHubIngestor(api_client),
+                ingestor=ingestor,
                 roottrace_client=active_client,
                 cache_dir=cache_dir,
                 case_dir=case_root / case.instance_id,
@@ -1259,6 +1321,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--github-token", default=None, help="GitHub token (otherwise GITHUB_TOKEN)")
     parser.add_argument("--github-timeout", type=float, default=30.0)
     parser.add_argument("--model", default=None, help="RootTrace model override")
+    parser.add_argument(
+        "--include-review-comments",
+        action="store_true",
+        help="Include bounded pull request review-comment evidence",
+    )
     return parser
 
 

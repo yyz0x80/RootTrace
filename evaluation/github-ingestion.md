@@ -42,6 +42,21 @@ record `url_parse`, `fetch`, `normalization`, repository-preparation, and
 end-to-end ingestion outcomes beside the existing case results. Do not add a
 second benchmark runner.
 
+## Optional review-comment context
+
+Code-review comments are an opt-in advisory channel. Direct GitHub analysis and
+the `github_smoke10` runner enable it with `--include-review-comments`; the
+default remains unchanged and does not request the review-comment endpoint.
+When enabled, deterministic normalization deduplicates IDs, groups replies
+into at most five bounded threads (up to three comments per thread, 1,500
+characters per comment, and 8,000 characters total), and stores each selected
+comment with its own URL provenance. Review comments are persisted under
+`IncidentInput.review_threads`, not in the ordinary `logs` channel. Paths and
+line ranges are only mapped to the analyzed revision when the GitHub comment
+revision proves that mapping; otherwise the normalized record retains a path,
+mapping status, and original revision metadata without claiming a checkout
+line.
+
 ## Ground truth and revision policy
 
 For a merged PR, ground truth is the deduplicated set of non-test source files

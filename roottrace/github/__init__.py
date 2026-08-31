@@ -55,6 +55,11 @@ from .repository import (
     prepare_github_repository,
     resolve_default_branch_revision,
 )
+from .review_comments import (
+    build_review_comment_threads,
+    map_review_comment_threads_to_revision,
+    select_review_comment_threads,
+)
 
 __all__ = [
     "DEFAULT_GITHUB_API_BASE_URL",
@@ -97,11 +102,14 @@ __all__ = [
     "GitHubUnauthorizedError",
     "GitHubUser",
     "PreparedGitHubRepository",
+    "build_review_comment_threads",
     "github_clone_url",
     "ingest_github_resource",
+    "map_review_comment_threads_to_revision",
     "parse_github_ref",
     "parse_github_resource_url",
     "parse_github_url",
     "prepare_github_repository",
     "resolve_default_branch_revision",
+    "select_review_comment_threads",
 ]

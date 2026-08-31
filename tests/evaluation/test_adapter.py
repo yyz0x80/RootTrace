@@ -72,6 +72,8 @@ def test_public_metadata_fields_never_forwarded() -> None:
         "labels",
         "related_commits",
         "changed_files",
+        "review_threads",
+        "review_comment_truncation",
         "git_verification_policy",
         "provenance",
     }

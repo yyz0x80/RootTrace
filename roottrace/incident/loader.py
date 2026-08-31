@@ -23,6 +23,8 @@ from roottrace.incident.schema import (
     IncidentInput,
     Provenance,
     ResourceKind,
+    ReviewCommentThread,
+    ReviewCommentTruncation,
     extract_diff_paths,
 )
 
@@ -52,6 +54,8 @@ class _JsonIssue:
     labels: list[str]
     related_commits: list[str]
     changed_files: list[str]
+    review_threads: list[ReviewCommentThread]
+    review_comment_truncation: ReviewCommentTruncation
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -142,6 +146,8 @@ def _load_json_issue(path: Path) -> _JsonIssue:
     labels = data.get("labels", [])
     related_commits = data.get("related_commits", [])
     changed_files = data.get("changed_files", [])
+    review_threads_raw = data.get("review_threads", [])
+    truncation_raw = data.get("review_comment_truncation", {})
     if not isinstance(title, str) and title is not None:
         raise ValueError("JSON issue 'title' must be a string")
     if not isinstance(problem, str) and problem is not None:
@@ -164,6 +170,25 @@ def _load_json_issue(path: Path) -> _JsonIssue:
         not isinstance(item, str) for item in changed_files
     ):
         raise ValueError("JSON issue 'changed_files' must be a list of strings")
+    if not isinstance(review_threads_raw, list):
+        raise TypeError("JSON issue 'review_threads' must be a list")
+    if not isinstance(truncation_raw, dict):
+        raise TypeError(
+            "JSON issue 'review_comment_truncation' must be an object"
+        )
+    try:
+        review_threads = [
+            ReviewCommentThread.model_validate(item) for item in review_threads_raw
+        ]
+        review_comment_truncation = ReviewCommentTruncation.model_validate(
+            truncation_raw
+        )
+    except ValidationError as exc:
+        raise ValueError(
+            "JSON issue review-comment fields have an invalid shape"
+        ) from exc
+    if review_threads and resource_kind is None:
+        resource_kind = "pull_request"
     return _JsonIssue(
         title=title,
         problem=problem,
@@ -174,6 +199,8 @@ def _load_json_issue(path: Path) -> _JsonIssue:
         labels=labels,
         related_commits=related_commits,
         changed_files=changed_files,
+        review_threads=review_threads,
+        review_comment_truncation=review_comment_truncation,
     )
 
 
@@ -223,6 +250,8 @@ def load_incident(
         labels = parsed.labels
         related_commits = parsed.related_commits
         changed_files = parsed.changed_files
+        review_threads = parsed.review_threads
+        review_comment_truncation = parsed.review_comment_truncation
         issue_omitted = 0
     else:
         title, problem, issue_omitted = _load_markdown_issue(issue)
@@ -233,6 +262,8 @@ def load_incident(
         labels = []
         related_commits = []
         changed_files = []
+        review_threads = []
+        review_comment_truncation = ReviewCommentTruncation()
     if issue_omitted:
         notes.append(f"issue body truncated ({issue_omitted} chars omitted)")
         problem = _apply_marker(problem, issue_omitted, MAX_PROBLEM_CHARS)
@@ -328,6 +359,8 @@ def load_incident(
             labels=labels,
             related_commits=related_commits,
             changed_files=changed_files,
+            review_threads=review_threads,
+            review_comment_truncation=review_comment_truncation,
             provenance=provenance,
         )
     except ValidationError as exc:

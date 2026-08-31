@@ -148,6 +148,11 @@ def add_analyze_subparser(subparsers: Any) -> None:
         default=30.0,
         help="GitHub API request timeout in seconds",
     )
+    parser.add_argument(
+        "--include-review-comments",
+        action="store_true",
+        help="Include bounded pull request review-comment evidence",
+    )
 
 
 def run_rca_command(args: argparse.Namespace) -> int:
@@ -194,7 +199,10 @@ def run_analyze_command(args: argparse.Namespace) -> int:
     """Fetch a GitHub resource, prepare its revision, and run existing RCA."""
     try:
         client = GitHubClient(token=args.github_token, timeout=args.github_timeout)
-        ingestor = GitHubIngestor(client)
+        if getattr(args, "include_review_comments", False):
+            ingestor = GitHubIngestor(client, include_review_comments=True)
+        else:
+            ingestor = GitHubIngestor(client)
         fetched = ingestor.fetch(args.url)
         cache_dir = Path(args.repo_cache or Path.home() / ".cache" / "roottrace" / "github")
         if fetched.reference.kind == "issue":
