@@ -179,8 +179,16 @@ def _incident_id(reference: GitHubResourceRef) -> str:
 class GitHubIngestor:
     """Fetch and normalize one supported GitHub issue or pull request."""
 
-    def __init__(self, client: GitHubClient) -> None:
+    def __init__(
+        self,
+        client: GitHubClient,
+        *,
+        include_review_comments: bool = False,
+    ) -> None:
+        if type(include_review_comments) is not bool:
+            raise TypeError("include_review_comments must be a boolean")
         self.client = client
+        self.include_review_comments = include_review_comments
 
     def fetch(self, url: str) -> GitHubFetchedResource:
         """Fetch the bounded metadata required by the RCA context."""
@@ -188,7 +196,11 @@ class GitHubIngestor:
         detail = self.client.get_resource_detail(reference)
         comments = self.client.list_comments(reference)
         if reference.kind == "pull_request":
-            review_comments = self.client.list_pull_request_review_comments(reference)
+            review_comments = (
+                self.client.list_pull_request_review_comments(reference)
+                if self.include_review_comments
+                else []
+            )
             files = self.client.list_pull_request_files(reference)
             commits = self.client.list_pull_request_commits(reference)
             reviews = self.client.list_pull_request_reviews(reference)
@@ -275,7 +287,10 @@ class GitHubIngestor:
         problem = _bounded_problem(body or title)
         if not problem:
             raise ValueError("GitHub resource has no title or body")
-        logs = [_bounded_text(log, MAX_LOG_CHARS) for log in logs[:10]]
+        logs = [
+            _bounded_text(log, MAX_LOG_CHARS)
+            for log in logs[:MAX_INGESTION_COMMENTS]
+        ]
         incident = IncidentInput(
             id=_incident_id(reference),
             repo=reference.repository.full_name,
@@ -312,9 +327,13 @@ def ingest_github_resource(
     client: GitHubClient,
     *,
     base_commit: str | None = None,
+    include_review_comments: bool = False,
 ) -> GitHubIngestionResult:
     """Fetch and normalize a GitHub URL without touching a repository."""
-    ingestor = GitHubIngestor(client)
+    ingestor = GitHubIngestor(
+        client,
+        include_review_comments=include_review_comments,
+    )
     return ingestor.normalize(ingestor.fetch(url), base_commit=base_commit)
 
 

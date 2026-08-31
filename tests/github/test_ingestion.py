@@ -136,6 +136,67 @@ def test_pull_request_threads_bounded_review_comments_with_source_provenance() -
     assert "src/other.py:77" not in result.incident.logs[1]
 
 
+def test_pull_request_review_comment_fetching_is_opt_in() -> None:
+    """Default PR ingestion avoids review-comment API cost and context noise."""
+    reference = parse_github_resource_url(
+        "https://github.com/acme/widget/pull/8"
+    )
+    detail = GitHubPullRequestDetail(
+        number=8,
+        title="Fix config loading",
+        body="Handle a missing config path.",
+        base={"sha": "a" * 40},
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.review_comment_calls = 0
+
+        def get_resource_detail(self, requested_reference):
+            assert requested_reference == reference
+            return detail
+
+        def list_comments(self, requested_reference):
+            assert requested_reference == reference
+            return []
+
+        def list_pull_request_review_comments(self, requested_reference):
+            assert requested_reference == reference
+            self.review_comment_calls += 1
+            return [
+                GitHubPullRequestReviewComment(
+                    id=1,
+                    body="Use the shared helper.",
+                    path="src/config.py",
+                    line=12,
+                )
+            ]
+
+        def list_pull_request_files(self, requested_reference):
+            assert requested_reference == reference
+            return []
+
+        def list_pull_request_commits(self, requested_reference):
+            assert requested_reference == reference
+            return []
+
+        def list_pull_request_reviews(self, requested_reference):
+            assert requested_reference == reference
+            return []
+
+    client = FakeClient()
+
+    default_result = GitHubIngestor(client).fetch(reference.url)
+    opted_in_result = GitHubIngestor(
+        client,
+        include_review_comments=True,
+    ).fetch(reference.url)
+
+    assert default_result.review_comments == []
+    assert [comment.id for comment in opted_in_result.review_comments] == [1]
+    assert client.review_comment_calls == 1
+
+
 def test_issue_normalization_ignores_pull_request_review_comments() -> None:
     """Review comments are PR-only and cannot change ordinary issue results."""
     reference = parse_github_resource_url(
