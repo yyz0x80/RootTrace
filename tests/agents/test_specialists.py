@@ -16,6 +16,10 @@ from roottrace.agents import (
     PlanError,
 )
 from roottrace.agents.prompts import (
+    CODE_SYSTEM_PROMPT,
+    GIT_HISTORY_SYSTEM_PROMPT,
+    ISSUE_CI_SYSTEM_PROMPT,
+    LEAD_SYSTEM_PROMPT,
     MAX_PROMPT_CHARS,
     build_code_prompt,
     build_git_history_prompt,
@@ -845,6 +849,21 @@ def test_prompt_builders_are_bounded_and_domain_scoped(rca_env) -> None:
     assert "incident" in issue_prompt.lower()
     assert "snippets" in code_prompt
     assert "git" in git_prompt.lower()
+
+
+def test_prompt_builders_do_not_duplicate_system_prompts(rca_env) -> None:
+    """Dynamic user prompts must not repeat their system-level instructions."""
+    context = rca_env["context"]
+    questions = _questions()
+    prompts = {
+        LEAD_SYSTEM_PROMPT: build_lead_prompt(context),
+        ISSUE_CI_SYSTEM_PROMPT: build_issue_ci_prompt(context, questions),
+        CODE_SYSTEM_PROMPT: build_code_prompt(context, questions),
+        GIT_HISTORY_SYSTEM_PROMPT: build_git_history_prompt(context, questions),
+    }
+
+    for system_prompt, user_prompt in prompts.items():
+        assert system_prompt not in user_prompt
 
 
 def test_bounded_note_never_exceeds_agent_finding_limit() -> None:

@@ -276,11 +276,7 @@ def build_hypotheses_prompt(
         "findings": findings,
         "evidence": evidence,
     }
-    prompt = (
-        HYPOTHESES_SYSTEM_PROMPT
-        + "\n\nEVIDENCE GRAPH:\n"
-        + _bounded_json(data)
-    )
+    prompt = "\n\nEVIDENCE GRAPH:\n" + _bounded_json(data)
     if retrieval_hints is not None and retrieval_hints.results:
         hints_payload = [
             {
@@ -465,12 +461,7 @@ def build_final_report_prompt(
         "omit it, never {}.\n"
         "If 'issue_ci' evidence is absent, do not cite issue/CI evidence ids."
     )
-    return (
-        FINAL_REPORT_SYSTEM_PROMPT
-        + "\n\nINVESTIGATION STATE:\n"
-        + _bounded_json(data)
-        + domain_rule
-    )
+    return "\n\nINVESTIGATION STATE:\n" + _bounded_json(data) + domain_rule
 
 
 def _incident_view(context: IncidentContext) -> dict[str, object]:
@@ -562,11 +553,7 @@ def build_lead_prompt(context: IncidentContext) -> str:
         "snippets": [snippet.model_dump(mode="json") for snippet in context.snippets],
         "diff_excerpt": context.diff_excerpt,
     }
-    return (
-        LEAD_SYSTEM_PROMPT
-        + "\n\nDETERMINISTIC CONTEXT:\n"
-        + _bounded_json(data)
-    )
+    return "\n\nDETERMINISTIC CONTEXT:\n" + _bounded_json(data)
 
 
 def build_issue_ci_prompt(
@@ -578,11 +565,7 @@ def build_issue_ci_prompt(
         "incident": _incident_view(context),
         "questions": _question_lines(questions),
     }
-    return (
-        ISSUE_CI_SYSTEM_PROMPT
-        + "\n\nINCIDENT CONTEXT:\n"
-        + _bounded_json(data)
-    )
+    return "\n\nINCIDENT CONTEXT:\n" + _bounded_json(data)
 
 
 def build_code_prompt(
@@ -594,11 +577,7 @@ def build_code_prompt(
         "code_context": _code_view(context),
         "questions": _question_lines(questions),
     }
-    return (
-        CODE_SYSTEM_PROMPT
-        + "\n\nCODE CONTEXT:\n"
-        + _bounded_json(data)
-    )
+    return "\n\nCODE CONTEXT:\n" + _bounded_json(data)
 
 
 def build_git_history_prompt(
@@ -629,8 +608,4 @@ def build_git_history_prompt(
         "max_tool_calls": context.incident.git_verification_policy.max_tool_calls,
         "questions": _question_lines(questions),
     }
-    return (
-        GIT_HISTORY_SYSTEM_PROMPT
-        + "\n\nHISTORY CONTEXT:\n"
-        + _bounded_json(data)
-    )
+    return "\n\nHISTORY CONTEXT:\n" + _bounded_json(data)
