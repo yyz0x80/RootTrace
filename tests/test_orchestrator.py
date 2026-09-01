@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from roottrace.agents import PlanError
+from roottrace.agents.prompts import HYPOTHESES_SYSTEM_PROMPT
 from roottrace.agents.schema import MAX_QUESTIONS, PlanBudgets
 from roottrace.evidence.schema import (
     AgentRole,
@@ -455,7 +456,7 @@ def test_hypotheses_are_ranked_falsifiable_and_validated(
             ]
         }
     )
-    orchestrator, _ = build_orchestrator(
+    orchestrator, providers = build_orchestrator(
         git_repo,
         tmp_path,
         lead_responses=[turn(PLAN_JSON), turn(rich_hypotheses)],
@@ -472,6 +473,9 @@ def test_hypotheses_are_ranked_falsifiable_and_validated(
     assert hypothesis.verification_plan[0].command.startswith("python -m pytest")
     known_ids = {item.id for item in result.graph.evidence}
     assert set(hypothesis.supporting_evidence_ids) <= known_ids
+    assert HYPOTHESES_SYSTEM_PROMPT not in providers["lead"].calls[1]["messages"][1][
+        "content"
+    ]
 
 
 def test_invalid_hypothesis_references_are_explicit(git_repo, tmp_path: Path) -> None:

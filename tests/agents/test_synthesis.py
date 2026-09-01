@@ -668,6 +668,7 @@ def test_final_report_prompt_exposes_evidence_domain_and_never_primes_ids(
     assert "never invent ids" in prompt
     assert "suspected_regression" in prompt
     assert "otherwise use null or omit it, never {}" in prompt
+    assert FINAL_REPORT_SYSTEM_PROMPT not in prompt
     # The schema must not prime the model with concrete evidence ids, which
     # caused hallucinated ids like ev-git_history-001 in partial runs.
     assert "ev-code-001" not in FINAL_REPORT_SYSTEM_PROMPT
