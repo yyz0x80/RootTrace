@@ -224,6 +224,23 @@ def test_retrieval_flat_scores_all_candidates(tmp_path: Path) -> None:
     assert len(hints.results) <= 10
 
 
+def test_retrieval_does_not_scan_case_ids_for_positions(tmp_path: Path) -> None:
+    class IndexForbiddenList(list[str]):
+        def index(self, *args: object, **kwargs: object) -> int:
+            raise AssertionError("retrieval must use constant-time position lookup")
+
+    corpus = import_corpus(_write_corpus(tmp_path), excluded_ids={"eval-001"})
+    retriever = HistoricalRetriever(corpus, _build_index(corpus), top_k=10)
+    retriever._index.case_ids = IndexForbiddenList(retriever._index.case_ids)
+
+    hints = retriever.retrieve(
+        "multiply returns the sum instead of the product",
+        mode="flat",
+    )
+
+    assert hints.results
+
+
 def test_retrieval_leakage_guard(tmp_path: Path) -> None:
     corpus = import_corpus(_write_corpus(tmp_path), excluded_ids={"eval-001"})
     retriever = HistoricalRetriever(corpus, _build_index(corpus), top_k=10)
