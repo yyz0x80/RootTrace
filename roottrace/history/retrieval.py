@@ -64,8 +64,8 @@ class HistoricalRetriever:
         self._tfidf: TfidfModel = build_tfidf(texts)
         if index.vocabulary_size != len(self._tfidf.vocabulary):
             raise ValueError("history index vocabulary does not match the corpus")
-        self._vectors = {
-            case_id: self._tfidf.vectors[position]
+        self._position_by_id = {
+            case_id: position
             for position, case_id in enumerate(corpus_ids)
         }
         self._matrix = np.asarray(
@@ -142,7 +142,7 @@ class HistoricalRetriever:
                 case_time = parse_timestamp(case.resolved_at)
                 if case_time is not None and case_time > target_time:
                     continue
-            position = self._index.case_ids.index(case_id)
+            position = self._position_by_id[case_id]
             row = self._matrix[position]
             denominator = self._norms[position] * query_norm
             if denominator <= 0:
