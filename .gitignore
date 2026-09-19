@@ -10,3 +10,5 @@ evaluation/.DS_Store
 evaluation/github/results/
 .DS_Store
 docs/
+.roottrace/models.json
+/output
