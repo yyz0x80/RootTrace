@@ -121,6 +121,17 @@ def _bounded_note(text: str | None, limit: int = MAX_NOTE_CHARS) -> str | None:
     return _cap_text(text, limit)[0]
 
 
+def _incident_provenance(incident: IncidentInput) -> Provenance:
+    """Return an independent copy of the incident provenance for one seed item.
+
+    Seeded Issue/CI evidence is derived directly from the normalized incident,
+    so it must carry the incident's own provenance (source URL or issue file,
+    tool, and pinned commit) instead of a generic placeholder. Each seed gets
+    its own copy so no two evidence items share a mutable provenance model.
+    """
+    return incident.provenance.model_copy()
+
+
 def _extract_commit_ids(tool: str, content: str) -> list[str]:
     """Extract commit ids from machine-formatted Git tool output."""
     if tool not in _GIT_EVIDENCE_TOOLS:
@@ -223,7 +234,7 @@ class _Specialist:
             agent=self.role,
             kind=EvidenceKind.ISSUE_TEXT,
             observation="incident problem text",
-            provenance=Provenance(source="incident_input"),
+            provenance=_incident_provenance(incident),
             excerpt=problem_excerpt,
         )
         self._seed.append(problem)
@@ -240,11 +251,23 @@ class _Specialist:
                 agent=self.role,
                 kind=kind,
                 observation="incident log entry",
-                provenance=Provenance(source="incident_input"),
+                provenance=_incident_provenance(incident),
                 excerpt=log_excerpt,
             )
             self._seed.append(item)
             self._evidence.append(item)
+        if incident.diff:
+            diff_excerpt, _ = _cap_text(incident.diff, MAX_EXCERPT_CHARS)
+            diff = EvidenceItem(
+                id=self._next_id(),
+                agent=self.role,
+                kind=EvidenceKind.PR_DIFF,
+                observation="incident pull request diff",
+                provenance=_incident_provenance(incident),
+                excerpt=diff_excerpt,
+            )
+            self._seed.append(diff)
+            self._evidence.append(diff)
         for thread in incident.review_threads:
             for comment in thread.comments:
                 item = EvidenceItem(

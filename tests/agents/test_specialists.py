@@ -141,7 +141,11 @@ def make_context(git_repo) -> IncidentContext:
                 "ValueError: boom"
             )
         ],
-        provenance=Provenance(source="test_fixture"),
+        provenance=Provenance(
+            source="test_fixture",
+            tool="fixture_loader",
+            commit=base_sha,
+        ),
     )
     inventory = RepositoryInventory(
         base_commit=base_sha,
@@ -410,8 +414,65 @@ def test_issue_ci_seeds_incident_evidence(rca_env) -> None:
     assert EvidenceKind.ISSUE_TEXT in kinds
     assert EvidenceKind.STACK_TRACE in kinds
     assert all(
-        item.provenance.source == "incident_input" for item in output.evidence
+        item.provenance.source == "test_fixture" for item in output.evidence
     )
+    assert all(
+        item.provenance.tool == "fixture_loader" for item in output.evidence
+    )
+    assert all(
+        item.provenance.commit == rca_env["context"].incident.base_commit
+        for item in output.evidence
+    )
+
+
+def test_issue_ci_seeds_pull_request_diff_with_incident_provenance(rca_env) -> None:
+    """A PR diff becomes citable evidence carrying the incident provenance."""
+    base_commit = rca_env["context"].incident.base_commit
+    diff = (
+        "diff --git a/pkg/calc.py b/pkg/calc.py\n"
+        "--- a/pkg/calc.py\n"
+        "+++ b/pkg/calc.py\n"
+        "@@ -1 +1 @@\n"
+        "-    return a + b\n"
+        "+    return a * b"
+    )
+    incident = IncidentInput(
+        id="inc-pr-diff",
+        repo="target",
+        base_commit=base_commit,
+        resource_kind="pull_request",
+        title="multiply regression",
+        problem="multiply returns the wrong result",
+        diff=diff,
+        provenance=Provenance(
+            source="https://github.com/acme/widget/pull/8",
+            tool="github_rest_client",
+            commit=base_commit,
+        ),
+    )
+    context = rca_env["context"].model_copy(update={"incident": incident})
+    output = IssueCISpecialist(
+        provider=FakeProvider(turn(content=final_response())),
+        registry=rca_env["registry"],
+        usage=UsageTracker(),
+        budgets=rca_env["budgets"],
+    ).run(context, _questions())
+
+    diff_evidence = [
+        item for item in output.evidence if item.kind is EvidenceKind.PR_DIFF
+    ]
+    assert len(diff_evidence) == 1
+    item = diff_evidence[0]
+    assert item.excerpt == diff
+    assert item.provenance.source == "https://github.com/acme/widget/pull/8"
+    assert item.provenance.tool == "github_rest_client"
+    assert item.provenance.commit == base_commit
+
+    graph = aggregate_evidence(incident, {AgentRole.ISSUE_CI: output})
+    assert [item.kind for item in graph.evidence if item.kind is EvidenceKind.PR_DIFF] == [
+        EvidenceKind.PR_DIFF
+    ]
+    assert graph.incident.provenance.source == "https://github.com/acme/widget/pull/8"
 
 
 def test_issue_ci_seeds_one_provenance_item_per_review_comment(rca_env) -> None:

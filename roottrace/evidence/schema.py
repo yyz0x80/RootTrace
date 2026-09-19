@@ -60,6 +60,7 @@ class EvidenceKind(str, Enum):
     GIT_BLAME = "git_blame"
     GIT_DIFF = "git_diff"
     TEST_RESULT = "test_result"
+    PR_DIFF = "pr_diff"
     PR_REVIEW_COMMENT = "pr_review_comment"
     OTHER = "other"
 
