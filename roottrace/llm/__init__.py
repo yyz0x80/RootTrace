@@ -1,6 +1,13 @@
 """Language-model provider, configuration, schema, and usage contracts."""
 
 from roottrace.llm.config import ModelConfig, ModelConfigManager
+from roottrace.llm.errors import (
+    is_llm_error,
+    is_non_retryable_llm_error,
+    is_quota_exhausted,
+    is_retryable_llm_error,
+    llm_retry_delay_seconds,
+)
 from roottrace.llm.provider import (
     LLMProvider,
     ToolCallParseError,
@@ -19,4 +26,9 @@ __all__ = [
     "Usage",
     "UsageTracker",
     "create_provider_from_config",
+    "is_llm_error",
+    "is_non_retryable_llm_error",
+    "is_quota_exhausted",
+    "is_retryable_llm_error",
+    "llm_retry_delay_seconds",
 ]
