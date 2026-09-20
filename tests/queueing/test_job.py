@@ -6,6 +6,11 @@ import importlib
 import json
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from openai import AuthenticationError, RateLimitError
 
 from roottrace.incident.loader import load_incident
 from roottrace.llm.schema import AssistantTurn
@@ -228,3 +233,104 @@ def test_run_rca_job_reference_is_worker_importable() -> None:
     assert reference == "roottrace.queueing.job.run_rca_job"
     module = importlib.import_module(run_rca_job.__module__)
     assert getattr(module, run_rca_job.__qualname__) is run_rca_job
+
+
+def _status_error(error_class, status_code: int, message: str):
+    response = httpx.Response(
+        status_code,
+        request=httpx.Request("POST", "https://example.com/chat/completions"),
+    )
+    return error_class(message, response=response, body=None)
+
+
+def _authentication_error() -> AuthenticationError:
+    return _status_error(AuthenticationError, 401, "invalid api key")
+
+
+def _rate_limit_error() -> RateLimitError:
+    return _status_error(RateLimitError, 429, "rate limited")
+
+
+def _fail_pipeline(monkeypatch, error: Exception) -> None:
+    def boom(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("roottrace.queueing.job.run_rca_pipeline", boom)
+
+
+def test_run_rca_job_withdraws_retries_for_deterministic_llm_failure(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    issue, _ = _issue_files(tmp_path)
+    current_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr("rq.get_current_job", lambda: current_job)
+    _fail_pipeline(monkeypatch, _authentication_error())
+
+    with pytest.raises(AuthenticationError):
+        run_rca_job(
+            repo=str(git_repo.repo),
+            issue=str(issue),
+            output_dir=str(tmp_path / "out"),
+        )
+
+    assert current_job.retries_left == 0
+
+
+def test_run_rca_job_keeps_retries_for_transient_llm_failure(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    issue, _ = _issue_files(tmp_path)
+    current_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr("rq.get_current_job", lambda: current_job)
+    _fail_pipeline(monkeypatch, _rate_limit_error())
+
+    with pytest.raises(RateLimitError):
+        run_rca_job(
+            repo=str(git_repo.repo),
+            issue=str(issue),
+            output_dir=str(tmp_path / "out"),
+        )
+
+    # An opt-in RQ retry may still spend its budget on a transient failure.
+    assert current_job.retries_left == 2
+
+
+def test_run_rca_job_keeps_retries_for_non_llm_failure(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    issue, _ = _issue_files(tmp_path)
+    current_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr("rq.get_current_job", lambda: current_job)
+    _fail_pipeline(monkeypatch, RuntimeError("sandbox disk hiccup"))
+
+    with pytest.raises(RuntimeError):
+        run_rca_job(
+            repo=str(git_repo.repo),
+            issue=str(issue),
+            output_dir=str(tmp_path / "out"),
+        )
+
+    assert current_job.retries_left == 2
+
+
+def test_run_rca_job_tolerates_missing_current_job(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    issue, _ = _issue_files(tmp_path)
+    monkeypatch.setattr("rq.get_current_job", lambda: None)
+    _fail_pipeline(monkeypatch, _authentication_error())
+
+    with pytest.raises(AuthenticationError):
+        run_rca_job(
+            repo=str(git_repo.repo),
+            issue=str(issue),
+            output_dir=str(tmp_path / "out"),
+        )

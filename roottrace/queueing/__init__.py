@@ -18,6 +18,13 @@ Enqueue a job against the Redis URL configured by ``ROOTTRACE_REDIS_URL``:
 Start one or more native RQ workers, all consuming the same queue:
 
     rq worker --url "$ROOTTRACE_REDIS_URL" rca
+
+Job-level retries are an opt-in outer safety net: the Provider already retries
+transient LLM failures in place, and a failing Specialist is re-run on its own.
+Enable RQ retries per job with ``retry_max`` / ``retry_interval`` or
+deployment-wide with ``ROOTTRACE_QUEUE_RETRY_MAX`` and
+``ROOTTRACE_QUEUE_RETRY_INTERVALS``. Deterministic failures clear the job retry
+budget, so they go straight to ``FailedJobRegistry``.
 """
 
 from roottrace.queueing.adapter import (
@@ -29,10 +36,15 @@ from roottrace.queueing.adapter import (
 )
 from roottrace.queueing.config import (
     DEFAULT_RCA_QUEUE,
+    QUEUE_RETRY_INTERVALS_ENV_VAR,
+    QUEUE_RETRY_MAX_ENV_VAR,
     REDIS_URL_ENV_VAR,
+    QueueRetryConfigurationError,
     RedisConfigurationError,
     create_queue,
     resolve_redis_url,
+    resolve_retry_intervals,
+    resolve_retry_max,
 )
 from roottrace.queueing.job import RcaJobResult, run_rca_job
 from roottrace.queueing.schema import (
@@ -44,8 +56,11 @@ from roottrace.queueing.schema import (
 
 __all__ = [
     "DEFAULT_RCA_QUEUE",
+    "QUEUE_RETRY_INTERVALS_ENV_VAR",
+    "QUEUE_RETRY_MAX_ENV_VAR",
     "REDIS_URL_ENV_VAR",
     "JobNotFoundError",
+    "QueueRetryConfigurationError",
     "RcaJobMetadata",
     "RcaJobResult",
     "RcaJobStatus",
@@ -58,5 +73,7 @@ __all__ = [
     "job_metadata",
     "map_job_status",
     "resolve_redis_url",
+    "resolve_retry_intervals",
+    "resolve_retry_max",
     "run_rca_job",
 ]

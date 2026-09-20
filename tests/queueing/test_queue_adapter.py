@@ -105,6 +105,43 @@ def test_enqueue_rca_rejects_retry_interval_without_max(fake_queue, tmp_path) ->
     assert fake_queue.enqueued == []
 
 
+def test_enqueue_rca_retry_is_disabled_by_default(
+    fake_queue,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ROOTTRACE_QUEUE_RETRY_MAX", raising=False)
+    monkeypatch.delenv("ROOTTRACE_QUEUE_RETRY_INTERVALS", raising=False)
+
+    enqueue_rca(
+        repo=tmp_path / "repo",
+        issue=tmp_path / "issue.md",
+        output_dir=tmp_path / "out",
+        queue=fake_queue,
+    )
+
+    assert fake_queue.enqueued[0]["kwargs"]["retry"] is None
+
+
+def test_enqueue_rca_accepts_environment_retry_policy(
+    fake_queue,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ROOTTRACE_QUEUE_RETRY_MAX", "1")
+    monkeypatch.setenv("ROOTTRACE_QUEUE_RETRY_INTERVALS", "30, 60")
+
+    enqueue_rca(
+        repo=tmp_path / "repo",
+        issue=tmp_path / "issue.md",
+        output_dir=tmp_path / "out",
+        queue=fake_queue,
+    )
+
+    retry = fake_queue.enqueued[0]["kwargs"]["retry"]
+    assert (retry.max, retry.intervals) == (1, [30, 60])
+
+
 def test_enqueue_rca_returns_unique_job_ids(fake_queue, tmp_path) -> None:
     first = enqueue_rca(
         repo=tmp_path / "repo-a",

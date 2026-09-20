@@ -4,6 +4,11 @@ Every job runs one complete RCA workflow on the single ``rca`` queue, so RQ
 workers provide process-level parallelism across incidents while the Lead,
 Specialists, Verifier, and repair loop stay inside one job. Job status and
 timing come from RQ; this module only maps them into RootTrace terms.
+
+``enqueue_rca`` is the single enqueue surface for RootTrace: callers such as
+the CLI, GitHub ingestion, and the evaluation runners go through it instead of
+talking to ``Queue.enqueue`` directly, so the retry policy stays in one place.
+Job-level retries are opt-in because one retry re-runs the whole workflow.
 """
 
 from __future__ import annotations
@@ -12,7 +17,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from roottrace.queueing.config import create_queue
+from roottrace.queueing.config import (
+    create_queue,
+    resolve_retry_intervals,
+    resolve_retry_max,
+)
 from roottrace.queueing.job import run_rca_job
 from roottrace.queueing.schema import (
     RcaJobMetadata,
@@ -62,9 +71,13 @@ def enqueue_rca(
         result_ttl: Optional RQ result time-to-live in seconds.
         retry_max: Optional maximum number of RQ retries (at least 1) for
             transient failures such as rate limits; each retry re-runs the
-            whole RCA workflow. ``None`` disables retries.
+            whole RCA workflow. Retries stay disabled unless this argument or
+            the ``ROOTTRACE_QUEUE_RETRY_MAX`` environment variable enables
+            them. Deterministic failures never consume a retry.
         retry_interval: Optional seconds to wait before each retry, or a
             sequence of intervals used in order; requires ``retry_max``.
+            ``ROOTTRACE_QUEUE_RETRY_INTERVALS`` provides the deployment-wide
+            default as comma-separated seconds.
         job_id: Optional explicit job id, otherwise RQ generates one.
         queue: Optional pre-built RQ queue, mainly for embedding and tests.
         redis_url: Optional explicit Redis URL, otherwise
@@ -150,16 +163,20 @@ def _retry_policy(
 
     The policy is handed to RQ unchanged, so retry scheduling, attempt
     counting, and the terminal failure after the last attempt stay RQ
-    behaviour.
+    behaviour. Retries are opt-in per job or per deployment, and RQ retries a
+    failed job only while it still has retry budget left: ``run_rca_job``
+    withdraws that budget for deterministic failures.
     """
-    if retry_max is None:
+    resolved_max = resolve_retry_max(retry_max)
+    if resolved_max is None:
         if retry_interval is not None:
             raise ValueError("retry_interval requires retry_max")
         return None
 
     from rq import Retry
 
-    return Retry(retry_max, 0 if retry_interval is None else retry_interval)
+    intervals = resolve_retry_intervals(retry_interval)
+    return Retry(resolved_max, 0 if intervals is None else intervals)
 
 
 def _job_error(job: Job) -> str | None:
