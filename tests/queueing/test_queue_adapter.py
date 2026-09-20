@@ -48,6 +48,61 @@ def test_enqueue_rca_passes_workflow_arguments_and_returns_job_id(
     assert entry["kwargs"]["pr_diff"] is None
     assert entry["kwargs"]["job_timeout"] == 600
     assert entry["kwargs"]["result_ttl"] == 900
+    assert entry["kwargs"]["retry"] is None
+
+
+def test_enqueue_rca_forwards_retry_policy(fake_queue, tmp_path) -> None:
+    enqueue_rca(
+        repo=tmp_path / "repo",
+        issue=tmp_path / "issue.md",
+        output_dir=tmp_path / "out",
+        retry_max=2,
+        retry_interval=30,
+        queue=fake_queue,
+    )
+
+    retry = fake_queue.enqueued[0]["kwargs"]["retry"]
+    assert (retry.max, retry.intervals) == (2, [30])
+
+
+def test_enqueue_rca_forwards_retry_interval_sequence(fake_queue, tmp_path) -> None:
+    enqueue_rca(
+        repo=tmp_path / "repo",
+        issue=tmp_path / "issue.md",
+        output_dir=tmp_path / "out",
+        retry_max=3,
+        retry_interval=[30, 60],
+        queue=fake_queue,
+    )
+
+    retry = fake_queue.enqueued[0]["kwargs"]["retry"]
+    assert (retry.max, retry.intervals) == (3, [30, 60])
+
+
+def test_enqueue_rca_defaults_retry_interval_to_zero(fake_queue, tmp_path) -> None:
+    enqueue_rca(
+        repo=tmp_path / "repo",
+        issue=tmp_path / "issue.md",
+        output_dir=tmp_path / "out",
+        retry_max=1,
+        queue=fake_queue,
+    )
+
+    retry = fake_queue.enqueued[0]["kwargs"]["retry"]
+    assert (retry.max, retry.intervals) == (1, [0])
+
+
+def test_enqueue_rca_rejects_retry_interval_without_max(fake_queue, tmp_path) -> None:
+    with pytest.raises(ValueError, match="retry_interval requires retry_max"):
+        enqueue_rca(
+            repo=tmp_path / "repo",
+            issue=tmp_path / "issue.md",
+            output_dir=tmp_path / "out",
+            retry_interval=30,
+            queue=fake_queue,
+        )
+
+    assert fake_queue.enqueued == []
 
 
 def test_enqueue_rca_returns_unique_job_ids(fake_queue, tmp_path) -> None:
