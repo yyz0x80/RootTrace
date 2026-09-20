@@ -9,8 +9,13 @@ Guarantees:
 - Specialists never communicate directly; the typed ``EvidenceGraph`` is the
   only shared state between them.
 - No Specialist receives runtime-test execution or write-capable tools.
-- Worker timeout or failure yields partial evidence and higher uncertainty;
-  exceptions never erase the diagnostics collected by other workers.
+- Tool and logic failures inside a Specialist are isolated: the worker yields
+  partial evidence with higher uncertainty and never erases the diagnostics
+  collected by other workers.
+- Transient LLM failures re-run only the failed Specialist; once that retry is
+  exhausted, or when the failure is deterministic (bad credentials, malformed
+  request, exhausted quota), the exception propagates so the caller or the
+  queue decides what happens next.
 - Aggregation is deterministic: findings and evidence are ordered by stable
   role order, never by thread completion order.
 """
@@ -20,6 +25,7 @@ from __future__ import annotations
 import concurrent.futures
 import time
 from pathlib import Path
+from time import sleep
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -68,6 +74,11 @@ from roottrace.incident.builder import build_incident_context
 from roottrace.incident.context import IncidentContext
 from roottrace.incident.loader import LoadedIncident
 from roottrace.incident.schema import IncidentInput
+from roottrace.llm.errors import (
+    is_llm_error,
+    is_retryable_llm_error,
+    llm_retry_delay_seconds,
+)
 from roottrace.llm.schema import Usage
 from roottrace.llm.usage import UsageTracker
 from roottrace.tools.repository import RcaToolRegistry
@@ -159,6 +170,7 @@ class RcaOrchestrator:
         budgets: PlanBudgets,
         worker_timeout_margin_seconds: float = 30.0,
         worker_concurrency: int = 3,
+        specialist_retry_limit: int = 1,
         enabled_roles: frozenset[AgentRole] | None = None,
         retriever: HistoricalRetriever | None = None,
         retrieval_mode: str = "off",
@@ -166,6 +178,8 @@ class RcaOrchestrator:
     ) -> None:
         if not 1 <= worker_concurrency <= 3:
             raise ValueError("worker_concurrency must be between 1 and 3")
+        if not 0 <= specialist_retry_limit <= 3:
+            raise ValueError("specialist_retry_limit must be between 0 and 3")
         if retrieval_mode not in {"off", "clustered", "flat"}:
             raise ValueError("retrieval_mode must be off, clustered, or flat")
         self._lead_provider = lead_provider
@@ -176,6 +190,7 @@ class RcaOrchestrator:
         self._budgets = budgets
         self._worker_timeout_margin_seconds = worker_timeout_margin_seconds
         self._worker_concurrency = worker_concurrency
+        self._specialist_retry_limit = specialist_retry_limit
         self._enabled_roles = (
             frozenset(_ROLE_ORDER) if enabled_roles is None else frozenset(enabled_roles)
         )
@@ -425,17 +440,17 @@ class RcaOrchestrator:
         )
         futures: dict[AgentRole, concurrent.futures.Future[SpecialistOutput]] = {}
         role_order = [role for role in _ROLE_ORDER if role in agents]
+        attempts: dict[AgentRole, int] = {role: 0 for role in role_order}
         try:
             for role in role_order:
-                futures[role] = executor.submit(
-                    self._run_specialist,
+                futures[role] = self._submit_specialist(
+                    executor,
                     context,
                     incident,
+                    agents,
+                    questions,
                     role,
-                    agents[role],
-                    questions[role],
                     writer,
-                    self._provider_model(role),
                 )
             timeout = (
                 self._budgets.timeout_seconds
@@ -443,37 +458,112 @@ class RcaOrchestrator:
             )
             outputs: dict[AgentRole, SpecialistOutput] = {}
             isolation_violations = 0
+            # Roles stay in stable order and only the failed role is submitted
+            # again, so a transient LLM failure never restarts the whole
+            # investigation.
             for role in role_order:
-                try:
-                    output = futures[role].result(timeout=timeout)
-                except TimeoutError:
-                    error = _bounded_error(
-                        f"{role.value} worker timed out after {timeout}s"
-                    )
-                    outputs[role] = self._failed_output(
-                        role,
-                        status=FindingStatus.PARTIAL,
-                        error=error,
-                    )
-                # Worker failure isolation: any worker exception becomes a
-                # partial finding instead of aborting the whole investigation.
-                except Exception as exc:  # noqa: BLE001
-                    error = _bounded_error(
-                        f"{role.value} worker failed: {exc}"
-                    )
-                    outputs[role] = self._failed_output(
-                        role,
-                        status=FindingStatus.FAILED,
-                        error=error,
-                    )
-                else:
-                    isolation_violations += output.isolation_violations
-                    outputs[role] = output
+                while True:
+                    try:
+                        output = futures[role].result(timeout=timeout)
+                    except TimeoutError:
+                        error = _bounded_error(
+                            f"{role.value} worker timed out after {timeout}s"
+                        )
+                        outputs[role] = self._failed_output(
+                            role,
+                            status=FindingStatus.PARTIAL,
+                            error=error,
+                        )
+                        break
+                    except Exception as exc:
+                        if (
+                            attempts[role] < self._specialist_retry_limit
+                            and is_retryable_llm_error(exc)
+                        ):
+                            attempts[role] += 1
+                            self._sleep_before_specialist_retry(
+                                exc,
+                                attempts[role] - 1,
+                            )
+                            self._trace(
+                                writer,
+                                incident.id,
+                                f"{role.value}_retry",
+                                self._provider_model(role),
+                                final_status="RETRY",
+                                retry_count=attempts[role],
+                            )
+                            futures[role] = self._submit_specialist(
+                                executor,
+                                context,
+                                incident,
+                                agents,
+                                questions,
+                                role,
+                                writer,
+                            )
+                            continue
+                        if is_llm_error(exc):
+                            # Deterministic or still-failing LLM failure: fail the
+                            # run instead of reporting evidence that only looks
+                            # complete.
+                            self._trace(
+                                writer,
+                                incident.id,
+                                f"{role.value}_llm_error",
+                                self._provider_model(role),
+                                final_status="FAILED",
+                                retry_count=attempts[role],
+                            )
+                            raise
+                        # Worker failure isolation: non-LLM worker exceptions
+                        # become a partial finding instead of aborting the whole
+                        # investigation.
+                        error = _bounded_error(
+                            f"{role.value} worker failed: {exc}"
+                        )
+                        outputs[role] = self._failed_output(
+                            role,
+                            status=FindingStatus.FAILED,
+                            error=error,
+                        )
+                        break
+                    else:
+                        isolation_violations += output.isolation_violations
+                        outputs[role] = output
+                        break
             return outputs, isolation_violations
         finally:
             for future in futures.values():
                 future.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _submit_specialist(
+        self,
+        executor: concurrent.futures.ThreadPoolExecutor,
+        context: IncidentContext,
+        incident: IncidentInput,
+        agents: dict[AgentRole, Any],
+        questions: dict[AgentRole, list[PlanQuestion]],
+        role: AgentRole,
+        writer: TraceWriter | None,
+    ) -> concurrent.futures.Future[SpecialistOutput]:
+        """Submit one attempt of one Specialist to the shared executor."""
+        return executor.submit(
+            self._run_specialist,
+            context,
+            incident,
+            role,
+            agents[role],
+            questions[role],
+            writer,
+            self._provider_model(role),
+        )
+
+    @staticmethod
+    def _sleep_before_specialist_retry(error: BaseException, attempt: int) -> None:
+        """Wait out the transient window before re-running one Specialist."""
+        sleep(llm_retry_delay_seconds(error, attempt))
 
     def _run_specialist(
         self,
