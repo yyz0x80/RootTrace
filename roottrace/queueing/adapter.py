@@ -8,6 +8,7 @@ timing come from RQ; this module only maps them into RootTrace terms.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +22,7 @@ from roottrace.queueing.schema import (
 )
 
 if TYPE_CHECKING:
-    from rq import Queue
+    from rq import Queue, Retry
     from rq.job import Job
 
 
@@ -40,6 +41,8 @@ def enqueue_rca(
     pr_diff: str | Path | None = None,
     job_timeout: int | None = None,
     result_ttl: int | None = None,
+    retry_max: int | None = None,
+    retry_interval: int | Iterable[int] | None = None,
     job_id: str | None = None,
     queue: Queue | None = None,
     redis_url: str | None = None,
@@ -57,6 +60,11 @@ def enqueue_rca(
         pr_diff: Optional PR diff/context file.
         job_timeout: Optional RQ job timeout in seconds.
         result_ttl: Optional RQ result time-to-live in seconds.
+        retry_max: Optional maximum number of RQ retries (at least 1) for
+            transient failures such as rate limits; each retry re-runs the
+            whole RCA workflow. ``None`` disables retries.
+        retry_interval: Optional seconds to wait before each retry, or a
+            sequence of intervals used in order; requires ``retry_max``.
         job_id: Optional explicit job id, otherwise RQ generates one.
         queue: Optional pre-built RQ queue, mainly for embedding and tests.
         redis_url: Optional explicit Redis URL, otherwise
@@ -64,6 +72,9 @@ def enqueue_rca(
 
     Returns:
         The unique RQ job id, which also identifies the job metadata view.
+
+    Raises:
+        ValueError: If ``retry_interval`` is given without ``retry_max``.
     """
     target_queue = queue if queue is not None else create_queue(redis_url)
     job = target_queue.enqueue(
@@ -77,6 +88,7 @@ def enqueue_rca(
         pr_diff=_optional_path(pr_diff),
         job_timeout=job_timeout,
         result_ttl=result_ttl,
+        retry=_retry_policy(retry_max, retry_interval),
         job_id=job_id,
     )
     return job.id
@@ -128,6 +140,26 @@ def get_job_metadata(
 
 def _optional_path(path: str | Path | None) -> str | None:
     return None if path is None else str(Path(path))
+
+
+def _retry_policy(
+    retry_max: int | None,
+    retry_interval: int | Iterable[int] | None,
+) -> Retry | None:
+    """Build the RQ retry policy for one job, or ``None`` when disabled.
+
+    The policy is handed to RQ unchanged, so retry scheduling, attempt
+    counting, and the terminal failure after the last attempt stay RQ
+    behaviour.
+    """
+    if retry_max is None:
+        if retry_interval is not None:
+            raise ValueError("retry_interval requires retry_max")
+        return None
+
+    from rq import Retry
+
+    return Retry(retry_max, 0 if retry_interval is None else retry_interval)
 
 
 def _job_error(job: Job) -> str | None:
