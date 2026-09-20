@@ -40,13 +40,14 @@ _QUOTA_EXHAUSTED_MARKERS = (
 )
 
 
-def retry_after_seconds(error: OpenAIError) -> float | None:
+def retry_after_seconds(error: BaseException) -> float | None:
     """Return the server-requested retry delay in seconds, when advertised.
 
     OpenAI-compatible providers may include a ``Retry-After`` header (delta
     seconds or an HTTP date) on 429 or 5xx responses. Honoring it avoids
     retrying too early; a missing or unparsable header returns ``None`` so the
-    caller falls back to jittered exponential backoff.
+    caller falls back to jittered exponential backoff. Exceptions without
+    response headers also return ``None``.
     """
     response = getattr(error, "response", None)
     headers = getattr(error, "headers", None) or getattr(response, "headers", None)
@@ -94,11 +95,15 @@ def retry_delay_seconds(
 
 
 def llm_retry_delay_seconds(
-    error: OpenAIError,
+    error: BaseException,
     attempt: int,
     rng: random.Random | None = None,
 ) -> float:
-    """Return the bounded wait before retrying one transient LLM failure."""
+    """Return the bounded wait before retrying one transient LLM failure.
+
+    The wait honors an advertised ``Retry-After`` header when the failure
+    carries one and falls back to jittered exponential backoff otherwise.
+    """
     return retry_delay_seconds(
         attempt,
         retry_after_seconds=retry_after_seconds(error),
