@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from openai import AuthenticationError, RateLimitError
 
 from roottrace.agents import PlanError
 from roottrace.agents.prompts import HYPOTHESES_SYSTEM_PROMPT
@@ -71,6 +73,45 @@ def tool_turn(name: str, arguments: dict[str, Any]) -> AssistantTurn:
         prompt_tokens=10,
         completion_tokens=5,
     )
+
+
+class FlakyProvider(FakeProvider):
+    """Provider that fails its first completions with a scripted error."""
+
+    def __init__(self, *responses: AssistantTurn, failures: int, error_factory) -> None:
+        super().__init__(*responses)
+        self.failures_left = failures
+        self._error_factory = error_factory
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: str | None = None,
+    ) -> AssistantTurn:
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            self.calls.append(
+                {"messages": messages, "tools": tools, "tool_choice": tool_choice}
+            )
+            raise self._error_factory()
+        return super().complete(messages, tools, tool_choice)
+
+
+def rate_limit_error() -> RateLimitError:
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://example.com/chat/completions"),
+    )
+    return RateLimitError("rate limited", response=response, body=None)
+
+
+def authentication_error() -> AuthenticationError:
+    response = httpx.Response(
+        401,
+        request=httpx.Request("POST", "https://example.com/chat/completions"),
+    )
+    return AuthenticationError("invalid api key", response=response, body=None)
 
 
 PLAN_JSON = json.dumps(
@@ -184,6 +225,7 @@ def build_orchestrator(
     budgets: PlanBudgets | None = None,
     worker_timeout_margin_seconds: float = 30.0,
     worker_concurrency: int = 3,
+    specialist_retry_limit: int = 1,
     enabled_roles: frozenset[AgentRole] | None = None,
     retriever=None,
     retrieval_mode: str = "off",
@@ -231,6 +273,7 @@ def build_orchestrator(
         budgets=budgets or PlanBudgets(),
         worker_timeout_margin_seconds=worker_timeout_margin_seconds,
         worker_concurrency=worker_concurrency,
+        specialist_retry_limit=specialist_retry_limit,
         enabled_roles=enabled_roles,
         retriever=retriever,
         retrieval_mode=retrieval_mode,
@@ -329,6 +372,114 @@ def test_worker_failure_is_partial_and_preserves_others(
     assert any(
         item.agent == AgentRole.ISSUE_CI for item in result.graph.evidence
     )
+
+
+def test_transient_llm_failure_retries_only_the_failed_specialist(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, providers = build_orchestrator(
+        git_repo,
+        tmp_path,
+        code_responses=None,
+    )
+    orchestrator._code_provider = FlakyProvider(
+        tool_turn("read_file", {"path": "pkg/calc.py", "raw": True}),
+        turn(CODE_FINAL),
+        failures=1,
+        error_factory=rate_limit_error,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "roottrace.orchestrator.sleep",
+        lambda delay: sleeps.append(delay),
+    )
+
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert result.status == FindingStatus.COMPLETED
+    findings = {finding.agent: finding for finding in result.graph.findings}
+    assert findings[AgentRole.CODE].status == FindingStatus.COMPLETED
+    assert len(sleeps) == 1
+    # Only the failed Specialist is re-run: every other provider keeps its
+    # normal scripted call count (Lead 2, issue_ci 1, git_history 2), while the
+    # code provider adds exactly one failed attempt.
+    assert len(providers["issue_ci"].calls) == 1
+    assert len(providers["git"].calls) == 2
+    assert len(providers["lead"].calls) == 2
+    assert len(orchestrator._code_provider.calls) == 3
+
+
+def test_specialist_llm_retry_exhaustion_propagates(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        code_responses=None,
+    )
+    flaky = FlakyProvider(failures=10, error_factory=rate_limit_error)
+    orchestrator._code_provider = flaky
+    monkeypatch.setattr("roottrace.orchestrator.sleep", lambda delay: None)
+
+    with pytest.raises(RateLimitError):
+        orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    # One initial attempt plus the single configured Specialist retry.
+    assert len(flaky.calls) == 2
+
+
+def test_specialist_retry_limit_zero_disables_rerun(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        code_responses=None,
+        specialist_retry_limit=0,
+    )
+    flaky = FlakyProvider(failures=2, error_factory=rate_limit_error)
+    orchestrator._code_provider = flaky
+    monkeypatch.setattr("roottrace.orchestrator.sleep", lambda delay: None)
+
+    with pytest.raises(RateLimitError):
+        orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert len(flaky.calls) == 1
+
+
+def test_non_retryable_llm_failure_fails_without_retry(
+    git_repo,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        code_responses=None,
+    )
+    flaky = FlakyProvider(
+        turn(CODE_FINAL),
+        failures=1,
+        error_factory=authentication_error,
+    )
+    orchestrator._code_provider = flaky
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "roottrace.orchestrator.sleep",
+        lambda delay: sleeps.append(delay),
+    )
+
+    with pytest.raises(AuthenticationError):
+        orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert sleeps == []
+    assert len(flaky.calls) == 1
 
 
 def test_specialist_partial_status_degrades_run_without_worker_exception(

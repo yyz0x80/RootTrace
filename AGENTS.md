@@ -111,7 +111,10 @@ Each Agent has one role, bounded context, typed input/output, budgets, stable ID
 - Specialists never communicate directly.
 - Shared state is the `EvidenceGraph`, not chat history.
 - Every factual finding cites evidence/provenance.
-- Worker failure is explicit and increases uncertainty.
+- Worker failure is explicit and increases uncertainty, except for LLM-layer
+  failures: the Provider retries transient failures in place, a failing
+  Specialist is re-run on its own once, and a still-failing or deterministic
+  LLM failure propagates so the caller or the opt-in RQ retry decides.
 - Runtime verification returns `supported`, `rejected`, or `unverified`.
 
 ### Tools

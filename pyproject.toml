@@ -8,6 +8,8 @@ dependencies = [
     "numpy>=1.26,<3",
     "python-dotenv>=1.0,<2",
     "pydantic>=2.0,<3",
+    "redis>=5,<9",
+    "rq>=2.0,<3",
     "scikit-learn>=1.5,<2"
 ]
 

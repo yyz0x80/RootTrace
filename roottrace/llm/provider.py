@@ -1,104 +1,37 @@
 """Provider module for calling OpenAI-compatible APIs.
 
-This module handles communication with OpenAI-compatible API providers,
-including request conversion, response parsing, error handling, and retries.
+This module handles communication with OpenAI-compatible API providers:
+request conversion, response parsing, bounded in-call retries for transient LLM
+failures, and error classification shared with the queue layer.
+
+Retry layering: the Provider retries transient failures of one model call in
+place, and it never rewrites the upstream exception, so callers can still
+classify what happened. Job-level retries are a separate, opt-in outer layer
+owned by RQ; see ``roottrace.queueing``.
 """
 
 import json
 import os
-import random
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import sleep
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    OpenAI,
-    OpenAIError,
-    RateLimitError,
-)
+from openai import OpenAI, OpenAIError
 
+from roottrace.llm.errors import (
+    MAX_TOTAL_RETRY_WAIT_SECONDS,
+    is_retryable_llm_error,
+    llm_retry_delay_seconds,
+)
 from roottrace.llm.schema import AssistantTurn, ToolCall
 
 # Load environment variables from .env file if it exists
 load_dotenv()
 
-DEFAULT_MAX_RETRIES = 4
-BACKOFF_BASE_SECONDS = 1.0
-BACKOFF_CAP_SECONDS = 8.0
-MAX_RETRY_AFTER_SECONDS = 30.0
-
-
-def _retry_after_seconds(error: OpenAIError) -> float | None:
-    """Return the server-requested retry delay in seconds, when advertised.
-
-    OpenAI-compatible providers may include a ``Retry-After`` header (delta
-    seconds or an HTTP date) on 429 or 5xx responses. Honoring it avoids
-    retrying too early; a missing or unparsable header returns ``None`` so the
-    caller falls back to jittered exponential backoff.
-    """
-    response = getattr(error, "response", None)
-    headers = getattr(error, "headers", None) or getattr(response, "headers", None)
-    if not headers:
-        return None
-    value = headers.get("Retry-After") or headers.get("retry-after")
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        pass
-    try:
-        retry_at = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
-        return None
-    if retry_at.tzinfo is None:
-        now = datetime.now(UTC).replace(tzinfo=None)
-    else:
-        now = datetime.now(UTC)
-    return max((retry_at - now).total_seconds(), 0.0)
-
-
-def _retry_delay_seconds(
-    attempt: int,
-    *,
-    retry_after_seconds: float | None = None,
-    rng: random.Random | None = None,
-) -> float:
-    """Compute a bounded, jittered delay before the next transient retry.
-
-    A server-provided ``Retry-After`` value takes precedence and is capped to
-    keep total retry time bounded. Otherwise the delay uses capped exponential
-    backoff with full jitter so concurrent specialists do not retry in lockstep
-    and re-trigger the same limit together.
-    """
-    if retry_after_seconds is not None:
-        return min(max(retry_after_seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
-    backoff = min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * (2**attempt))
-    rng = rng or random
-    return rng.uniform(0.0, backoff)
-
-
-def _is_retryable(error: OpenAIError) -> bool:
-    """Return whether a provider error is transient and safe to retry.
-
-    Rate limits (429), connection failures, request timeouts, and server-side
-    (5xx) errors may succeed on a later attempt. Client errors (4xx) and other
-    terminal failures must surface immediately instead of burning retry budget.
-    """
-    if isinstance(error, (RateLimitError, APIConnectionError, APITimeoutError)):
-        return True
-    if isinstance(error, APIStatusError):
-        return error.status_code >= 500
-    return False
+# In-call retries for transient LLM failures, so one completion issues at most
+# ``DEFAULT_MAX_RETRIES + 1`` upstream requests.
+DEFAULT_MAX_RETRIES = 3
 
 
 class ToolCallParseError(Exception):
@@ -113,8 +46,9 @@ class LLMProvider:
     - API authentication and configuration
     - Message and tool conversion
     - Response parsing and tool call extraction
-    - Error handling and retries for transient failures (rate limits,
-      connection errors, timeouts, and server errors)
+    - Bounded in-call retries for transient failures (rate limits, connection
+      errors, timeouts, and server errors) with the upstream exception
+      preserved for callers
     """
 
     def __init__(
@@ -131,14 +65,15 @@ class LLMProvider:
             api_key: Optional API key. If not provided, reads from ZHIPU_API_KEY.
             base_url: Optional API base URL. If omitted, reads from
                 ROOTTRACE_BASE_URL.
-            max_retries: Total completion attempts for retryable transient
-                failures (rate limits, connection errors, timeouts, 5xx).
+            max_retries: In-call retries for retryable transient failures
+                (rate limits, connection errors, timeouts, 5xx). One completion
+                issues at most ``max_retries + 1`` upstream requests.
 
         Raises:
             ValueError: If API key or base URL cannot be determined.
         """
-        if not 1 <= max_retries <= 10:
-            raise ValueError("max_retries must be between 1 and 10")
+        if not 0 <= max_retries <= 10:
+            raise ValueError("max_retries must be between 0 and 10")
         if api_key is None:
             api_key = os.getenv("ZHIPU_API_KEY")
         if not api_key:
@@ -155,8 +90,9 @@ class LLMProvider:
                 "Model is required through --model or ROOTTRACE_MODEL"
             )
 
-        # The provider owns the retry policy, so SDK-internal retries are
-        # disabled to keep attempt counts and timing deterministic/auditable.
+        # The provider owns the in-call retry policy, so SDK-internal retries
+        # are disabled to keep attempt counts and timing deterministic and
+        # auditable.
         self._client = OpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -240,12 +176,14 @@ class LLMProvider:
 
         Raises:
             ToolCallParseError: If tool call arguments cannot be parsed as JSON
-            OpenAIError: For retryable API errors after all attempts are
-                exhausted; non-retryable errors raise immediately
+            OpenAIError: The upstream exception itself is propagated unchanged.
+                Retryable failures raise it once the provider retry budget is
+                exhausted; deterministic failures raise immediately without
+                consuming that budget.
         """
-        last_error = None
+        waited_seconds = 0.0
 
-        for attempt in range(self._max_retries):
+        for attempt in range(self._max_retries + 1):
             try:
                 api_params: dict[str, Any] = {
                     "model": self._model,
@@ -302,31 +240,23 @@ class LLMProvider:
                     reasoning_tokens=reasoning_tokens,
                 )
 
-            except OpenAIError as e:
-                if not _is_retryable(e):
+            except OpenAIError as error:
+                # Deterministic failures (authentication, malformed request,
+                # exhausted quota) surface immediately. Transient ones retry
+                # until the budget or the total wait cap is reached, and the
+                # original exception type stays intact for the caller.
+                if not is_retryable_llm_error(error):
                     raise
-                last_error = e
-                if attempt >= self._max_retries - 1:
-                    if isinstance(e, RateLimitError):
-                        message = (
-                            f"Rate limit exceeded after "
-                            f"{self._max_retries} attempts"
-                        )
-                    else:
-                        message = (
-                            f"{type(e).__name__} persisted after "
-                            f"{self._max_retries} attempts"
-                        )
-                    raise OpenAIError(message) from e
-                sleep(
-                    _retry_delay_seconds(
-                        attempt,
-                        retry_after_seconds=_retry_after_seconds(e),
-                    )
-                )
+                if attempt >= self._max_retries:
+                    raise
+                delay = llm_retry_delay_seconds(error, attempt)
+                if waited_seconds + delay > MAX_TOTAL_RETRY_WAIT_SECONDS:
+                    raise
+                sleep(delay)
+                waited_seconds += delay
 
         # This should not be reached, but kept for type safety
-        raise OpenAIError("Unexpected error in completion logic") from last_error
+        raise OpenAIError("Unexpected error in completion logic")
 
     def generate_text(self, prompt: str) -> str:
         """Generate text response from a simple prompt.

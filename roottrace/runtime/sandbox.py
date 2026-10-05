@@ -414,6 +414,9 @@ class RuntimeVerificationSandbox:
             result = subprocess.run(
                 executable,
                 cwd=self.work_root,
+                # A spawned RQ workhorse runs in a background process group;
+                # terminal reads by pytest would stop the entire group.
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
