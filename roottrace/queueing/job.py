@@ -39,6 +39,7 @@ def run_rca_job(
     output_dir: str,
     *,
     model: str | None = None,
+    repo_identifier: str | None = None,
     stack_trace: str | None = None,
     ci_log: str | None = None,
     pr_diff: str | None = None,
@@ -56,6 +57,7 @@ def run_rca_job(
         issue: Path to the local Issue Markdown/JSON file.
         output_dir: Directory that receives this job's RCA artifacts.
         model: Optional model name or model identifier from project config.
+        repo_identifier: Optional canonical owner/name for incident provenance.
         stack_trace: Optional stack trace file.
         ci_log: Optional CI log file.
         pr_diff: Optional PR diff/context file.
@@ -69,6 +71,7 @@ def run_rca_job(
             issue,
             output_dir,
             model=model,
+            repo_identifier=repo_identifier,
             stack_trace=stack_trace,
             ci_log=ci_log,
             pr_diff=pr_diff,
@@ -84,6 +87,7 @@ def _execute_rca_job(
     output_dir: str,
     *,
     model: str | None = None,
+    repo_identifier: str | None = None,
     stack_trace: str | None = None,
     ci_log: str | None = None,
     pr_diff: str | None = None,
@@ -92,6 +96,7 @@ def _execute_rca_job(
     loaded = load_incident(
         issue_path=issue,
         repo_path=repo,
+        repo_identifier=repo_identifier,
         stack_trace_path=stack_trace,
         ci_log_path=ci_log,
         pr_diff_path=pr_diff,

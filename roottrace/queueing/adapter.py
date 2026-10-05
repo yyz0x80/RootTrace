@@ -45,6 +45,7 @@ def enqueue_rca(
     output_dir: str | Path,
     *,
     model: str | None = None,
+    repo_identifier: str | None = None,
     stack_trace: str | Path | None = None,
     ci_log: str | Path | None = None,
     pr_diff: str | Path | None = None,
@@ -64,6 +65,7 @@ def enqueue_rca(
         output_dir: Directory that receives this job's RCA artifacts. Callers
             must give concurrent jobs distinct directories.
         model: Optional model name or model identifier from project config.
+        repo_identifier: Optional canonical owner/name for incident provenance.
         stack_trace: Optional stack trace file.
         ci_log: Optional CI log file.
         pr_diff: Optional PR diff/context file.
@@ -96,6 +98,7 @@ def enqueue_rca(
         str(Path(issue)),
         str(Path(output_dir)),
         model=model,
+        repo_identifier=repo_identifier,
         stack_trace=_optional_path(stack_trace),
         ci_log=_optional_path(ci_log),
         pr_diff=_optional_path(pr_diff),

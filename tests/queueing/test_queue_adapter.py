@@ -31,6 +31,7 @@ def test_enqueue_rca_passes_workflow_arguments_and_returns_job_id(
         issue=issue,
         output_dir=output_dir,
         model="fake-model",
+        repo_identifier="acme/demo",
         ci_log=ci_log,
         job_timeout=600,
         result_ttl=900,
@@ -43,6 +44,7 @@ def test_enqueue_rca_passes_workflow_arguments_and_returns_job_id(
     assert entry["func"] is run_rca_job
     assert entry["args"] == (str(repo), str(issue), str(output_dir))
     assert entry["kwargs"]["model"] == "fake-model"
+    assert entry["kwargs"]["repo_identifier"] == "acme/demo"
     assert entry["kwargs"]["ci_log"] == str(ci_log)
     assert entry["kwargs"]["stack_trace"] is None
     assert entry["kwargs"]["pr_diff"] is None
