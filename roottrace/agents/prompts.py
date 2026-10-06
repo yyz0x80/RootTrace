@@ -187,6 +187,8 @@ Rules:
 - Rank hypotheses from most to least likely.
 - Each hypothesis needs a bounded verification plan using only sandbox test
   commands of the form "python -m pytest <relative test target> [flags]".
+- Choose every test target from the EXISTING TEST FILES list in the user
+  message. Do not invent test files or propose creating them.
 - Set expect_failure to true when the verification command should exit
   non-zero to confirm the hypothesis (e.g., reproducing the reported failure
   on the analyzed commit). Set it to false when a passing command confirms the
@@ -223,6 +225,8 @@ listed in the EVIDENCE GRAPH section.
 def build_hypotheses_prompt(
     graph: EvidenceGraph,
     *,
+    test_files: list[str],
+    test_files_omitted: int = 0,
     retrieval_hints: RetrievalHintsLike | None = None,
 ) -> str:
     """Build the bounded hypothesis-generation prompt from the evidence graph.
@@ -276,7 +280,12 @@ def build_hypotheses_prompt(
         "findings": findings,
         "evidence": evidence,
     }
-    prompt = "\n\nEVIDENCE GRAPH:\n" + _bounded_json(data)
+    prompt = (
+        "\n\nEXISTING TEST FILES (repo-relative; select only from this list):\n"
+        + _bounded_json({"paths": test_files, "omitted": test_files_omitted})
+        + "\n\nEVIDENCE GRAPH:\n"
+        + _bounded_json(data)
+    )
     if retrieval_hints is not None and retrieval_hints.results:
         hints_payload = [
             {

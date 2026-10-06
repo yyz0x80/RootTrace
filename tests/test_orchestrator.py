@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -21,10 +22,18 @@ from roottrace.evidence.schema import (
     HypothesisDisposition,
 )
 from roottrace.history.schema import RetrievalHints, RetrievedCase
+from roottrace.incident.builder import (
+    build_incident_context,
+    list_tracked_test_files,
+)
 from roottrace.incident.loader import LoadedIncident
 from roottrace.incident.schema import IncidentInput, Provenance
 from roottrace.llm.schema import AssistantTurn, ToolCall
-from roottrace.orchestrator import RcaOrchestrator, _bounded_error
+from roottrace.orchestrator import (
+    RcaOrchestrator,
+    _bounded_error,
+    _rank_verification_test_files,
+)
 from roottrace.runtime.workspace import Workspace
 from roottrace.tools import RcaToolRegistry
 
@@ -627,6 +636,71 @@ def test_hypotheses_are_ranked_falsifiable_and_validated(
     assert HYPOTHESES_SYSTEM_PROMPT not in providers["lead"].calls[1]["messages"][1][
         "content"
     ]
+    assert '"tests/test_calc.py"' in (
+        providers["lead"].calls[1]["messages"][1]["content"]
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python -m pytest tests/test_missing.py",
+        "python -m pytest pkg/calc.py",
+        "python -m pytest tests/test_calc.py tests/test_missing.py",
+        "python -m pytest --rootdir=/tmp tests/test_calc.py",
+    ],
+)
+def test_hypotheses_reject_invalid_test_targets_at_plan_acceptance(
+    git_repo, tmp_path: Path, command: str,
+) -> None:
+    payload = json.loads(HYPOTHESES_JSON)
+    payload["hypotheses"][0]["verification_plan"][0]["command"] = command
+    orchestrator, _ = build_orchestrator(
+        git_repo,
+        tmp_path,
+        lead_responses=[turn(PLAN_JSON), turn(json.dumps(payload))],
+    )
+
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+
+    assert result.graph.hypotheses == []
+    assert any(
+        diagnostic.code == "hypotheses.invalid_verification"
+        for diagnostic in result.diagnostics
+    )
+
+
+def test_test_file_ranking_can_select_beyond_alphabetical_inventory(
+    git_repo, tmp_path: Path,
+) -> None:
+    orchestrator, _ = build_orchestrator(git_repo, tmp_path)
+    result = orchestrator.run(make_loaded(git_repo), git_repo.repo)
+    context = build_incident_context(make_loaded(git_repo), git_repo.repo)
+    paths = [f"tests/a_{index:03d}.py" for index in range(120)]
+    paths.append("tests/test_multiply.py")
+
+    selected = _rank_verification_test_files(paths, context, result.graph)
+
+    assert len(selected) == 100
+    assert "tests/test_multiply.py" in selected
+
+
+def test_verification_test_files_come_from_analyzed_commit(git_repo) -> None:
+    later_test = git_repo.repo / "tests/test_later.py"
+    later_test.write_text("def test_later():\n    assert True\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "tests/test_later.py"],
+        cwd=git_repo.repo, check=True, capture_output=True, timeout=30,
+    )
+    subprocess.run(
+        ["git", "commit", "-qm", "add later test"],
+        cwd=git_repo.repo, check=True, capture_output=True, timeout=30,
+    )
+
+    paths = list_tracked_test_files(git_repo.repo, git_repo.base_sha)
+
+    assert "tests/test_calc.py" in paths
+    assert "tests/test_later.py" not in paths
 
 
 def test_invalid_hypothesis_references_are_explicit(git_repo, tmp_path: Path) -> None:

@@ -23,6 +23,8 @@ Guarantees:
 from __future__ import annotations
 
 import concurrent.futures
+import re
+import shlex
 import time
 from pathlib import Path
 from time import sleep
@@ -70,7 +72,7 @@ from roottrace.evidence.schema import (
 )
 from roottrace.history.retrieval import HistoricalRetriever
 from roottrace.history.schema import RetrievalHints
-from roottrace.incident.builder import build_incident_context
+from roottrace.incident.builder import build_incident_context, list_tracked_test_files
 from roottrace.incident.context import IncidentContext
 from roottrace.incident.loader import LoadedIncident
 from roottrace.incident.schema import IncidentInput
@@ -81,6 +83,7 @@ from roottrace.llm.errors import (
 )
 from roottrace.llm.schema import Usage
 from roottrace.llm.usage import UsageTracker
+from roottrace.runtime.sandbox import validate_test_command
 from roottrace.tools.repository import RcaToolRegistry
 from roottrace.tracing import TraceEvent, TraceWriter
 
@@ -90,7 +93,30 @@ _ROLE_ORDER = (
     AgentRole.GIT_HISTORY,
 )
 _MAX_HYPOTHESES = 5
+_MAX_VERIFICATION_TEST_FILES = 100
 _TRACE_WORKFLOW_STAGE = "RCA"
+
+
+def _rank_verification_test_files(
+    paths: list[str], context: IncidentContext, graph: EvidenceGraph,
+) -> list[str]:
+    """Put test paths related to incident terms and findings first."""
+    signals = [*context.signals.terms, *context.signals.stack_symbols]
+    for finding in graph.findings:
+        for location in finding.ranked_locations[:10]:
+            signals.append(location.path)
+    terms = {
+        part
+        for signal in signals
+        for part in re.split(r"[^a-z0-9]+", signal.lower())
+        if len(part) >= 3
+    }
+
+    def rank(path: str) -> tuple[int, str]:
+        parts = set(re.split(r"[^a-z0-9]+", path.lower()))
+        return (-len(parts & terms), path)
+
+    return sorted(paths, key=rank)[:_MAX_VERIFICATION_TEST_FILES]
 
 
 class RcaRunResult(BaseModel):
@@ -369,6 +395,7 @@ class RcaOrchestrator:
             context,
             graph,
             lead_usage,
+            repo_path=Path(repo).resolve(),
             retrieval_hints=retrieval_hints,
         )
         self._trace(
@@ -647,10 +674,19 @@ class RcaOrchestrator:
         graph: EvidenceGraph,
         lead_usage: UsageTracker,
         *,
+        repo_path: Path,
         retrieval_hints: RetrievalHints | None = None,
     ) -> tuple[list[Hypothesis], list[PipelineDiagnostic]]:
+        tracked_test_files = list_tracked_test_files(
+            repo_path, context.incident.base_commit,
+        )
+        test_files = _rank_verification_test_files(
+            tracked_test_files, context, graph,
+        )
         prompt = build_hypotheses_prompt(
             graph,
+            test_files=test_files,
+            test_files_omitted=len(tracked_test_files) - len(test_files),
             retrieval_hints=retrieval_hints,
         )
         turn = self._lead_provider.complete(
@@ -740,19 +776,25 @@ class RcaOrchestrator:
                     )
                 )
                 continue
-            commands = [step.command for step in hypothesis.verification_plan]
-            if not commands or not all(
-                command.startswith("python -m pytest")
-                for command in commands
-            ):
+            try:
+                if not hypothesis.verification_plan:
+                    raise ValueError("verification plan has no pytest command")
+                for step in hypothesis.verification_plan:
+                    validate_test_command(
+                        shlex.split(step.command),
+                        repo_path,
+                        allowed_targets=frozenset(test_files),
+                        require_existing=False,
+                    )
+            except ValueError as exc:
                 diagnostics.append(
                     PipelineDiagnostic(
                         code="hypotheses.invalid_verification",
                         stage="hypotheses",
                         severity=DiagnosticSeverity.RECOVERABLE,
                         message=_bounded_error(
-                            f"hypothesis {index} has no sandbox-runnable pytest "
-                            "verification plan"
+                            f"hypothesis {index} has an invalid pytest "
+                            f"verification plan: {exc}"
                         ),
                         agent=AgentRole.LEAD,
                     )

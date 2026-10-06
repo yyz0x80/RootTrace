@@ -25,7 +25,7 @@ from roottrace.incident.context import (
     SourceSnippet,
 )
 from roottrace.incident.loader import LoadedIncident
-from roottrace.incident.schema import IncidentInput
+from roottrace.incident.schema import IncidentInput, validate_commit_sha
 from roottrace.runtime.paths import validate_relative_path
 from roottrace.runtime.workspace import (
     capture_repository_fingerprint,
@@ -110,6 +110,24 @@ def _git_ls_files(repo: Path) -> list[str]:
 def _is_test_file(path: str) -> bool:
     normalized = PurePosixPath(path)
     return "tests" in normalized.parts or normalized.name.startswith("test_")
+
+
+def list_tracked_test_files(repo: str | Path, base_commit: str) -> list[str]:
+    """Return Python test paths tracked at the exact analyzed revision."""
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", validate_commit_sha(base_commit)],
+        cwd=Path(repo).resolve(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError("cannot list test files at the analyzed commit")
+    return [
+        path for path in sorted(result.stdout.splitlines())
+        if path.endswith(".py") and _is_test_file(path)
+    ]
 
 
 def _cap_list(values: list[str], limit: int) -> tuple[list[str], int]:

@@ -94,7 +94,13 @@ class _JUnitSummary:
     skipped_nodes: int
 
 
-def _validate_test_command(tokens: list[str], root: Path) -> list[str]:
+def validate_test_command(
+    tokens: list[str],
+    root: Path,
+    *,
+    allowed_targets: frozenset[str] | None = None,
+    require_existing: bool = True,
+) -> list[str]:
     """Validate a pytest argv against the parsed allowlist."""
     if not tokens:
         raise ValueError("test command must not be empty")
@@ -121,7 +127,11 @@ def _validate_test_command(tokens: list[str], root: Path) -> list[str]:
             continue
         if token.startswith("-"):
             raise ValueError(f"disallowed pytest option: {token}")
-        _validate_target(token, root)
+        _validate_target(token, root, require_existing=require_existing)
+        if allowed_targets is not None:
+            target = token.split("::", maxsplit=1)[0]
+            if target not in allowed_targets:
+                raise ValueError(f"test target is not a tracked test file: {target}")
         targets += 1
         index += 1
     if targets == 0:
@@ -129,7 +139,7 @@ def _validate_test_command(tokens: list[str], root: Path) -> list[str]:
     return tokens
 
 
-def _validate_target(token: str, root: Path) -> None:
+def _validate_target(token: str, root: Path, *, require_existing: bool = True) -> None:
     """Validate one sandbox-relative pytest target (file or directory)."""
     if not _SAFE_TARGET_CHARS.fullmatch(token):
         raise ValueError(f"test target contains unsafe characters: {token}")
@@ -142,9 +152,9 @@ def _validate_target(token: str, root: Path) -> None:
         resolved.relative_to(root)
     except ValueError as exc:
         raise ValueError("test target escapes the sandbox") from exc
-    if not resolved.exists():
+    if require_existing and not resolved.exists():
         raise ValueError(f"test target does not exist in sandbox: {base}")
-    if resolved.is_file() and not base.endswith(".py"):
+    if (not require_existing or resolved.is_file()) and not base.endswith(".py"):
         raise ValueError("test file target must end with .py")
 
 
@@ -411,7 +421,7 @@ class RuntimeVerificationSandbox:
         if not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
             raise ValueError(f"timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}")
         tokens = [str(token) for token in argv]
-        validated = _validate_test_command(tokens, self.work_root)
+        validated = validate_test_command(tokens, self.work_root)
         if self.unavailable_reason is not None:
             raise RuntimeError(self.unavailable_reason)
         self._prepare_junit_path()
