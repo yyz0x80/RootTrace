@@ -13,17 +13,23 @@ For SWE-bench evaluation, `python -m evaluation.runner` derives the official
 `swebench/sweb.eval.x86_64.<instance_id>:latest` reference (replacing `__`
 with `_1776_`). It inspects a local image first and pulls only that derived
 Docker Hub reference when missing. Use `--no-verification-image-pull` to keep
-the run offline. The preparation stage verifies `linux/amd64`, confirms the
-target base commit is an ancestor of `/testbed` HEAD, checks Python 3 and
-pytest, and records the inspected digest. It never builds an instance
-Dockerfile or passes gold/test patches to an RCA Agent. If the official image
-lacks pytest or cannot prove the target commit, verification is `unverified`
-with a specific preparation error; RCA reporting continues.
+image pulls disabled. The preparation stage verifies `linux/amd64`, confirms the
+target base commit is an ancestor of `/testbed` HEAD, prefers the image's
+`testbed` Python, checks Python 3 and pytest, and records the inspected digest.
+If pytest is missing, it downloads a fixed, hash-pinned wheel set from PyPI,
+installs it with no network or target checkout mounted in a disposable
+container, and caches the resulting RootTrace-owned image. It never builds an
+instance Dockerfile or passes gold/test patches to an RCA Agent. An unavailable
+image, unsupported Python version, or failed setup makes verification
+`unverified` with a specific reason; RCA reporting continues.
 
 Run `python -m evaluation.runner --verification-preflight --max-cases 1`
 to inspect or pull images and check their environment without model calls.
-It emits one JSON record per case and exits 1 if any case is not ready. Pull
-and preflight share a preparation timeout; the RCA verification node has a
+It emits one JSON record per case, including `pytest_bootstrapped`,
+`image_cache_hit`, and the effective image digest, and exits 1 if any case is
+not ready. `--no-verification-pytest-bootstrap` disables automatic setup;
+combine it with `--no-verification-image-pull` to prevent downloads. Pull,
+wheel setup, and preflight share a preparation timeout; the verification node has a
 separate wait limit. The runner accepts `--verification-preparation-timeout`
 and `--verification-wait-seconds` to adjust them. The image policy and mapping
 checksum are included in the resume configuration hash.
@@ -32,10 +38,18 @@ To override automatic resolution with a prepared local image, pass
 `--verification-image-map images.json`. The JSON maps each `instance_id` to an object
 with `image`, `base_commit`, and `platform` (for example `linux/amd64`). The
 image must carry a `roottrace.base_commit` label matching the target commit.
-Docker inspection records the content digest in
+Docker inspection records the executed image's content digest in
 `verification_environment.json`; execution uses the inspected image ID so a
 mutable tag cannot change the image between inspection and use. Evaluation
 gold and test patches are never passed to the RCA pipeline.
+
+Automatic pytest setup supports Python 3.8 through 3.13 and uses a committed
+wheel lock: pytest 8.3.5 for Python 3.8–3.9, pytest 9.0.3 for Python
+3.10–3.13, and their pinned dependencies. Wheels are downloaded for universal
+Python tags, verified by SHA-256, and installed under `/roottrace-deps` without
+changing the selected base image. The cache key includes the base digest,
+platform, Python interpreter and version, lock contents, and install method.
+Only a dedicated temporary wheel directory is mounted during installation.
 
 An optional `--verification-requirements` file contains one pinned package and
 SHA-256 wheel hash per line, such as

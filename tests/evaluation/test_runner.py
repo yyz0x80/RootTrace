@@ -41,6 +41,7 @@ def test_real_runner_uses_official_images_unless_map_overrides(tmp_path: Path) -
     automatic = _make_run_client(settings, config)
     assert automatic._verification_swebench_auto is True
     assert automatic._verification_pull_missing is False
+    assert automatic._verification_bootstrap_pytest is True
     image_map = tmp_path / "images.json"
     image_map.write_text("{}", encoding="utf-8")
     mapped = _make_run_client(settings, config, image_map)
@@ -56,6 +57,8 @@ def test_verification_preflight_reports_missing_dependency_without_running_rca(
     calls: list[str] = []
 
     def fake_prepare(self, base_commit):
+        assert self.bootstrap_pytest is True
+        assert self.prefer_testbed_python is True
         calls.append(self.instance_id)
         if len(calls) == 1:
             return DockerEnvironment("sha256:" + "a" * 64, "sha256:" + "b" * 64,
@@ -89,6 +92,23 @@ def test_image_map_contents_are_part_of_resume_config(tmp_path: Path) -> None:
     image_map.write_text('{"case":"second"}', encoding="utf-8")
     second = _build_ablation_config(args, manifest, manifest_path, list(manifest.instances))
     assert first.config_hash() != second.config_hash()
+
+
+def test_pytest_bootstrap_policy_changes_resume_config(tmp_path: Path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    manifest_path = data_root / "manifests" / "smoke3.json"
+    manifest = load_manifest(manifest_path)
+    selected = list(manifest.instances)
+    enabled = _build_ablation_config(
+        _args(data_root, tmp_path / "out"), manifest, manifest_path, selected,
+    )
+    disabled = _build_ablation_config(
+        _args(data_root, tmp_path / "out", no_verification_pytest_bootstrap=True),
+        manifest, manifest_path, selected,
+    )
+    assert enabled.verification_bootstrap_pytest is True
+    assert disabled.verification_bootstrap_pytest is False
+    assert enabled.config_hash() != disabled.config_hash()
 
 
 class FakeRootTraceClient:

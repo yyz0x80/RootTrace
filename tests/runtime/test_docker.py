@@ -12,6 +12,7 @@ from roottrace.runtime.docker import (
     DockerEnvironment,
     DockerEnvironmentPreparer,
     EnvironmentPreparationError,
+    _pytest_bootstrap_requirements,
     swebench_image_reference,
 )
 from roottrace.runtime.sandbox import (
@@ -97,6 +98,89 @@ def test_environment_error_keeps_final_traceback_reason(monkeypatch) -> None:
     preparer = DockerEnvironmentPreparer(image="example:latest")
     with pytest.raises(EnvironmentPreparationError, match="No usable temporary directory"):
         preparer.prepare("c" * 40)
+
+
+def test_pytest_bootstrap_lock_is_complete_for_supported_python() -> None:
+    old = _pytest_bootstrap_requirements("Python 3.8.20").decode()
+    modern = _pytest_bootstrap_requirements("Python 3.11.5").decode()
+    assert "pytest==8.3.5" in old
+    assert "exceptiongroup==" in old and "tomli==" in old
+    assert "pytest==9.0.3" in modern and "pygments==" in modern
+    assert "tomli==" not in modern
+    for line in (old + modern).splitlines():
+        assert " --hash=sha256:" in line
+        assert len(line.rsplit(":", 1)[-1]) == 64
+    with pytest.raises(EnvironmentPreparationError, match="supports Python"):
+        _pytest_bootstrap_requirements("Python 3.7.9")
+
+
+def test_missing_pytest_bootstraps_offline_and_reuses_owned_cache(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    cached = False
+    base_id = "sha256:" + "a" * 64
+    derived_id = "sha256:" + "d" * 64
+
+    def fake_run(argv, **kwargs):
+        nonlocal cached
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            if argv[-1].startswith("roottrace-env:"):
+                if not cached:
+                    return subprocess.CompletedProcess(argv, 1, "", "No such image")
+                data = [{"Id": derived_id, "Config": {
+                    "Labels": {"roottrace.cache_key": argv[-1].split(":", 1)[1]},
+                }}]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
+            return subprocess.CompletedProcess(argv, 0, _image_metadata(), "")
+        if argv[:2] == ["docker", "run"] and "--version" in argv:
+            if argv[-3:] == ["-m", "pytest", "--version"]:
+                if base_id in argv:
+                    return subprocess.CompletedProcess(argv, 1, "", "No module named pytest")
+                return subprocess.CompletedProcess(argv, 0, "pytest 8.3.5\n", "")
+            return subprocess.CompletedProcess(argv, 0, "Python 3.8.20\n", "")
+        if argv[:4] == ["docker", "run", "--rm", "--pull"]:
+            assert "merge-base" in argv
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:4] == ["python", "-m", "pip", "download"]:
+            lock = Path(argv[argv.index("-r") + 1]).read_text()
+            assert "pytest==8.3.5" in lock and "--hash=sha256:" in lock
+            assert argv[argv.index("--platform") + 1] == "any"
+            assert argv[argv.index("--python-version") + 1] == "3.8"
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["docker", "run"] and "install" in argv:
+            assert argv[argv.index("--network") + 1] == "none"
+            assert argv[argv.index("--entrypoint") + 1] == (
+                "/opt/miniconda3/envs/testbed/bin/python"
+            )
+            assert sum(token == "-v" for token in argv) == 1
+            assert argv[-1] == "/wheels/requirements.txt"
+            assert not any("/work" in token for token in argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["docker", "commit"]:
+            cached = True
+            return subprocess.CompletedProcess(argv, 0, derived_id + "\n", "")
+        if argv[:3] == ["docker", "rm", "-f"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("roottrace.runtime.docker.subprocess.run", fake_run)
+    def prepare():
+        return DockerEnvironmentPreparer(
+            instance_id="django__django-14672", swebench_image=True,
+            bootstrap_pytest=True, prefer_testbed_python=True,
+            wheels_parent=tmp_path,
+        ).prepare("c" * 40)
+
+    first = prepare()
+    second = prepare()
+    assert first.pytest_bootstrapped and second.pytest_bootstrapped
+    assert first.python_executable.endswith("/testbed/bin/python")
+    assert first.image == derived_id == first.digest == second.digest
+    assert first.base_digest == "sha256:" + "b" * 64
+    assert first.cache_hit is False and second.cache_hit is True
+    assert sum(argv[:4] == ["python", "-m", "pip", "download"] for argv in calls) == 1
 
 
 def test_missing_swebench_image_without_pull_is_explicit(monkeypatch) -> None:
@@ -265,6 +349,9 @@ def test_docker_uses_disposable_copy_and_junit(monkeypatch, git_repo, tmp_path: 
         if argv[0] != "docker":
             return original(argv, **kwargs)
         docker_commands.append(argv)
+        assert argv[argv.index("--entrypoint") + 1] == (
+            "/opt/miniconda3/envs/testbed/bin/python"
+        )
         assert "--network" in argv and "none" in argv
         assert "--read-only" in argv and "--cap-drop" in argv
         assert not any("docker.sock" in token for token in argv)
@@ -277,7 +364,8 @@ def test_docker_uses_disposable_copy_and_junit(monkeypatch, git_repo, tmp_path: 
 
     monkeypatch.setattr("roottrace.runtime.sandbox.subprocess.run", fake_run)
     environment = DockerEnvironment("example:latest", "sha256:" + "b" * 64,
-                                    "linux/amd64", "Python 3.11", "key")
+                                    "linux/amd64", "Python 3.11", "key",
+                                    python_executable="/opt/miniconda3/envs/testbed/bin/python")
     before = capture_repository_fingerprint(git_repo.repo)
     with RuntimeVerificationSandbox(git_repo.repo, base_commit=git_repo.base_sha,
                                     work_dir=tmp_path, docker_environment=environment) as sandbox:

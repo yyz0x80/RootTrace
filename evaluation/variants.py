@@ -115,6 +115,7 @@ class AblationConfig(BaseModel):
     verification_image_mode: Literal["auto", "map"] = "auto"
     verification_image_map_sha256: str | None = None
     verification_pull_missing: bool = True
+    verification_bootstrap_pytest: bool = True
     verification_preparation_timeout_seconds: int = Field(default=900, ge=1)
     verification_wait_seconds: int = Field(default=120, ge=1)
 

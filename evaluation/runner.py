@@ -140,6 +140,7 @@ class InProcessRootTraceClient:
         verification_image_map: Path | None = None,
         verification_swebench_auto: bool = False,
         verification_pull_missing: bool = False,
+        verification_bootstrap_pytest: bool = False,
         verification_preparation_timeout_seconds: int = 900,
         verification_wait_seconds: int = 120,
     ) -> None:
@@ -151,6 +152,7 @@ class InProcessRootTraceClient:
         self._verification_image_map = verification_image_map
         self._verification_swebench_auto = verification_swebench_auto
         self._verification_pull_missing = verification_pull_missing
+        self._verification_bootstrap_pytest = verification_bootstrap_pytest
         self._verification_preparation_timeout_seconds = verification_preparation_timeout_seconds
         self._verification_wait_seconds = verification_wait_seconds
 
@@ -190,6 +192,7 @@ class InProcessRootTraceClient:
                 verification_image_map=self._verification_image_map,
                 verification_swebench_auto=self._verification_swebench_auto,
                 verification_pull_missing=self._verification_pull_missing,
+                verification_bootstrap_pytest=self._verification_bootstrap_pytest,
                 preparation_timeout_seconds=self._verification_preparation_timeout_seconds,
                 verification_wait_seconds=self._verification_wait_seconds,
             )
@@ -517,7 +520,10 @@ def _verification_preflight(
             image_map=image_map,
             swebench_image=image_map is None,
             pull_missing=config.verification_pull_missing and image_map is None,
+            bootstrap_pytest=config.verification_bootstrap_pytest,
+            prefer_testbed_python=True,
             timeout_seconds=config.verification_preparation_timeout_seconds,
+            wheels_parent=Path.cwd(),
         )
         try:
             environment = preparer.prepare(case.base_commit)
@@ -526,8 +532,12 @@ def _verification_preflight(
                 "status": "ready",
                 "image_reference": environment.reference,
                 "image_digest": environment.digest,
+                "base_image_digest": environment.base_digest,
                 "image_platform": environment.platform,
                 "image_pulled": environment.pulled,
+                "python_executable": environment.python_executable,
+                "pytest_bootstrapped": environment.pytest_bootstrapped,
+                "image_cache_hit": environment.cache_hit,
             }
         except EnvironmentPreparationError as exc:
             unavailable += 1
@@ -570,6 +580,9 @@ def _build_ablation_config(
         hashlib.sha256(Path(image_map).read_bytes()).hexdigest() if image_map else None
     )
     base["verification_pull_missing"] = not getattr(args, "no_verification_image_pull", False)
+    base["verification_bootstrap_pytest"] = not getattr(
+        args, "no_verification_pytest_bootstrap", False,
+    )
     base["verification_preparation_timeout_seconds"] = getattr(
         args, "verification_preparation_timeout", 900,
     )
@@ -643,6 +656,7 @@ def _make_run_client(
         verification_image_map=verification_image_map,
         verification_swebench_auto=verification_image_map is None,
         verification_pull_missing=config.verification_pull_missing,
+        verification_bootstrap_pytest=config.verification_bootstrap_pytest,
         verification_preparation_timeout_seconds=config.verification_preparation_timeout_seconds,
         verification_wait_seconds=config.verification_wait_seconds,
     )
@@ -852,6 +866,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-verification-image-pull", action="store_true",
         help="resolve official SWE-bench image names but use only local images",
+    )
+    parser.add_argument(
+        "--no-verification-pytest-bootstrap", action="store_true",
+        help="leave images lacking pytest unverified without installing pinned wheels",
     )
     parser.add_argument(
         "--verification-preparation-timeout", type=_positive_int, default=900,

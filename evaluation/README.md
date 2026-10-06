@@ -53,11 +53,14 @@ python -m evaluation.runner --verification-preflight --max-cases 1
 
 The real runner automatically resolves each official SWE-bench instance image,
 reuses a local copy or pulls the missing `linux/amd64` image from the
-`swebench` Docker Hub namespace, and checks the target commit, Python and
-pytest. `--no-verification-image-pull` disables downloads. An unavailable
-image or missing pytest yields an explicit `unverified` verification result;
-the RCA report still completes. Preflight exits 1 when any selected image is
-not ready. A local, prepared image map can override automatic resolution with
+`swebench` Docker Hub namespace, and checks the target commit and Python.
+If pytest is missing, it downloads a fixed set of hash-pinned wheels from PyPI,
+installs them offline into a RootTrace-owned cached derivative image, and
+checks pytest again. `--no-verification-image-pull` disables image pulls;
+`--no-verification-pytest-bootstrap` disables dependency downloads and setup.
+An unavailable image or failed dependency setup yields an explicit `unverified`
+verification result; the RCA report still completes. Preflight exits 1 when
+any selected image is not ready. A local image map can override resolution with
 `--verification-image-map PATH`; mapped images need matching base-commit labels.
 See [Docker verification](../docs/docker-verification.md).
 
@@ -84,6 +87,7 @@ Useful controls include:
 --history-index PATH  optional persisted historical index
 --verification-preflight        check images without model calls
 --no-verification-image-pull    use local images only
+--no-verification-pytest-bootstrap  skip automatic pytest setup
 --verification-image-map PATH   override automatic official image selection
 ```
 

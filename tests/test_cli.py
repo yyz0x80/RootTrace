@@ -464,6 +464,47 @@ def test_missing_docker_image_keeps_report_and_records_unverified(
     assert (output / "rca_report.json").is_file()
 
 
+def test_failed_pytest_bootstrap_keeps_report_and_records_unverified(
+    git_repo, tmp_path: Path, monkeypatch,
+) -> None:
+    from roottrace.runtime.docker import (
+        DockerEnvironmentPreparer,
+        EnvironmentPreparationError,
+    )
+
+    def failed_prepare(self, base_commit):
+        assert self.bootstrap_pytest is True
+        raise EnvironmentPreparationError("pinned pytest wheel download unavailable")
+
+    monkeypatch.setattr(DockerEnvironmentPreparer, "prepare", failed_prepare)
+    issue, ci_log = _issue_files(git_repo, tmp_path)
+    loaded = load_incident(issue, git_repo.repo, ci_log_path=ci_log)
+    payload = json.loads(_report_json())
+    payload["conclusion"] = "insufficient_evidence"
+    payload["ranked_causes"] = []
+    payload["causal_chain"] = []
+    payload["fix_recommendation"] = None
+    payload["uncertainty"] = {
+        "level": "high", "insufficient_evidence": True,
+        "notes": ["runtime test could not execute"],
+    }
+    output = tmp_path / "bootstrap-failed"
+    result = run_rca_pipeline(
+        loaded, git_repo.repo, output,
+        provider_factory=_scripted_factory([json.dumps(payload)]),
+        log_sources={"ci.log": ci_log},
+        verification_backend="docker",
+        verification_bootstrap_pytest=True,
+    )
+    assert result.verification.results[0].outcome.value == "unverified"
+    assert "pinned pytest wheel download unavailable" in (
+        result.verification.results[0].output_excerpt
+    )
+    environment = json.loads((output / "verification_environment.json").read_text())
+    assert "pinned pytest wheel download unavailable" in environment["preparation_error"]
+    assert (output / "rca_report.json").is_file()
+
+
 def test_run_rca_pipeline_persists_synthesis_degradation_diagnostic(
     git_repo,
     tmp_path: Path,

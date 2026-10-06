@@ -431,7 +431,7 @@ class RuntimeVerificationSandbox:
                 "--pids-limit", "64", "--memory", "1g", "--cpus", "1",
                 "--user", f"{os.getuid()}:{os.getgid()}",
                 "--platform", self.docker_environment.platform,
-                "--entrypoint", "python",
+                "--entrypoint", self.docker_environment.python_executable,
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
                 "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
                 "--env", "PYTHONPATH=/roottrace-deps",
