@@ -69,6 +69,8 @@ def test_swebench_auto_resolves_and_preflights_image(
         if argv[-1] == "--version" and "pytest" not in argv:
             return subprocess.CompletedProcess(argv, 0, "Python 3.8.20\n", "")
         if argv[-3:] == ["-m", "pytest", "--version"]:
+            assert argv[argv.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=128m"
+            assert "HOME=/tmp" in argv
             return subprocess.CompletedProcess(argv, 0, "pytest 8.3.5\n", "")
         raise AssertionError(argv)
 
@@ -82,6 +84,19 @@ def test_swebench_auto_resolves_and_preflights_image(
     assert environment.platform == "linux/amd64"
     assert environment.pulled is (expected_pulls == 1)
     assert sum(argv[:2] == ["docker", "pull"] for argv in calls) == expected_pulls
+
+
+def test_environment_error_keeps_final_traceback_reason(monkeypatch) -> None:
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 1, "", "Traceback (most recent call last):\n" + "frame\n" * 100
+            + "FileNotFoundError: No usable temporary directory found in /tmp",
+        )
+
+    monkeypatch.setattr("roottrace.runtime.docker.subprocess.run", fake_run)
+    preparer = DockerEnvironmentPreparer(image="example:latest")
+    with pytest.raises(EnvironmentPreparationError, match="No usable temporary directory"):
+        preparer.prepare("c" * 40)
 
 
 def test_missing_swebench_image_without_pull_is_explicit(monkeypatch) -> None:

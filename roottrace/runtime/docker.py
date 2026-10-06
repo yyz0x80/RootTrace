@@ -92,7 +92,11 @@ class DockerEnvironmentPreparer:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise EnvironmentPreparationError(f"environment command failed: {type(exc).__name__}") from exc
         if result.returncode:
-            detail = result.stderr.strip()[:300]
+            detail = result.stderr.strip()
+            if "Traceback (most recent call last)" in detail:
+                # Python tracebacks end with the actionable exception message.
+                detail = detail.splitlines()[-1]
+            detail = detail[:300]
             detail = re.sub(r"https?://\S+", "<url>", detail)
             detail = re.sub(r"(?<![A-Za-z0-9])/(?:[^\s:]+)", "<path>", detail)
             raise EnvironmentPreparationError(
@@ -141,6 +145,8 @@ class DockerEnvironmentPreparer:
                 "--read-only", "--cap-drop", "ALL", "--security-opt",
                 "no-new-privileges", "--pids-limit", "64", "--memory", "512m",
                 "--cpus", "1", "--platform", self.platform_name,
+                "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
+                "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
                 "--env", "PYTHONPATH=/roottrace-deps", "--entrypoint", "python",
                 image_id, "-m", "pytest", "--version",
             ], timeout=30)
