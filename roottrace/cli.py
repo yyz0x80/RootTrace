@@ -16,8 +16,9 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import tempfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,11 @@ from roottrace.llm.usage import UsageTracker
 from roottrace.orchestrator import RcaOrchestrator, RcaRunResult
 from roottrace.reporting import RCAReport, render_rca_markdown
 from roottrace.runtime import RuntimeVerificationSandbox, Workspace
+from roottrace.runtime.docker import (
+    DockerEnvironment,
+    DockerEnvironmentPreparer,
+    EnvironmentPreparationError,
+)
 from roottrace.tools import RcaToolRegistry
 from roottrace.tracing import TraceEvent, TraceWriter
 from roottrace.verification import RuntimeTestVerifier, VerificationRun
@@ -83,6 +89,11 @@ def add_rca_subparser(subparsers: Any) -> None:
         help="Run RootTrace RCA on a local repository",
     )
     parser.add_argument("--repo", required=True, help="Path to the target repository")
+    parser.add_argument("--verification-image", help="Local Docker image for isolated verification")
+    parser.add_argument("--verification-backend", choices=("docker", "host"), default="docker")
+    parser.add_argument("--verification-image-map", type=Path, help="SWE-bench instance image mapping JSON")
+    parser.add_argument("--verification-requirements", type=Path, help="Hash-pinned requirements file")
+    parser.add_argument("--verification-index-url", help="HTTPS index for controlled wheel download")
     parser.add_argument(
         "--issue",
         required=True,
@@ -122,6 +133,7 @@ def add_analyze_subparser(subparsers: Any) -> None:
         help="Analyze a GitHub Issue or Pull Request URL",
     )
     parser.add_argument("url", help="Canonical GitHub Issue or Pull Request URL")
+    parser.add_argument("--verification-image", help="Local Docker image for isolated verification")
     parser.add_argument(
         "--model",
         default=None,
@@ -184,6 +196,11 @@ def run_rca_command(args: argparse.Namespace) -> int:
             args.output_dir,
             provider_factory=provider_factory,
             log_sources=log_sources,
+            verification_backend=args.verification_backend,
+            verification_image=getattr(args, "verification_image", None),
+            verification_image_map=getattr(args, "verification_image_map", None),
+            verification_requirements=getattr(args, "verification_requirements", None),
+            verification_index_url=getattr(args, "verification_index_url", None),
         )
     except (PlanError, SynthesisError, ValueError, RuntimeError) as exc:
         print(f"RCA run failed: {exc}", file=sys.stderr)
@@ -239,6 +256,7 @@ def run_analyze_command(args: argparse.Namespace) -> int:
                 prepared.repo,
                 output_dir,
                 provider_factory=provider_factory,
+                verification_image=getattr(args, "verification_image", None),
             )
     except (
         GitHubClientError,
@@ -270,13 +288,22 @@ def run_rca_pipeline(
     retriever: Any | None = None,
     retrieval_mode: str = "off",
     history_excluded_ids: frozenset[str] = frozenset(),
+    verification_backend: str = "docker",
+    verification_image: str | None = None,
+    verification_image_map: Path | None = None,
+    verification_requirements: Path | None = None,
+    verification_index_url: str | None = None,
+    preparation_timeout_seconds: int = 180,
+    verification_wait_seconds: int = 30,
 ) -> RcaCliResult:
     """Run the full local RCA pipeline and persist all artifacts."""
     output = Path(output_dir).resolve()
+    repo_path = Path(repo).resolve()
+    if output == repo_path or repo_path in output.parents:
+        raise ValueError("RCA output directory must be outside the analyzed repository")
     output.mkdir(parents=True, exist_ok=True)
     budgets = budgets or PlanBudgets()
     incident = loaded.incident
-    repo_path = Path(repo).resolve()
     external_root = _stage_external_logs(output, log_sources or {})
 
     registry = RcaToolRegistry(
@@ -298,7 +325,38 @@ def run_rca_pipeline(
         retrieval_mode=retrieval_mode,
         history_excluded_ids=history_excluded_ids,
     )
-    run_result = orchestrator.run(loaded, repo, output_dir=output)
+    if verification_backend not in {"host", "docker"}:
+        raise ValueError("verification_backend must be host or docker")
+    preparation_pool = ThreadPoolExecutor(max_workers=1) if verification_backend == "docker" else None
+    preparation = None
+    if preparation_pool is not None:
+        preparer = DockerEnvironmentPreparer(
+            verification_image,
+            instance_id=incident.id if verification_image_map else None,
+            image_map=verification_image_map,
+            requirements=verification_requirements,
+            index_url=verification_index_url,
+            timeout_seconds=preparation_timeout_seconds,
+            wheels_parent=output,
+        )
+        preparation = preparation_pool.submit(preparer.prepare, incident.base_commit)
+    try:
+        run_result = orchestrator.run(loaded, repo, output_dir=output)
+    finally:
+        if preparation_pool is not None:
+            preparation_pool.shutdown(wait=False, cancel_futures=True)
+
+    environment: DockerEnvironment | None = None
+    environment_error: str | None = None
+    if preparation is not None:
+        try:
+            environment = preparation.result(timeout=verification_wait_seconds)
+        except FutureTimeout:
+            environment_error = "Docker environment preparation exceeded verification wait limit"
+        except EnvironmentPreparationError as exc:
+            environment_error = f"Docker environment unavailable: {exc}"
+        except Exception as exc:  # noqa: BLE001 - environment failures must not abort RCA
+            environment_error = f"Docker environment preparation failed: {type(exc).__name__}"
 
     trace = TraceWriter(output / _EXECUTION_TRACE)
     _trace(trace, incident.id, "verification_start", run_result)
@@ -306,6 +364,9 @@ def run_rca_pipeline(
         repo_path,
         loaded,
         run_result.graph,
+        work_dir=output,
+        docker_environment=environment,
+        unavailable_reason=environment_error,
     )
     _trace(trace, incident.id, "verification_end", run_result)
 
@@ -334,6 +395,17 @@ def run_rca_pipeline(
     writer.write_model(ARTIFACT_EVIDENCE_GRAPH, verification.graph)
     _persist_hypotheses(writer, verification.graph)
     _persist_verification(writer, verification)
+    writer.write_dict(
+        "verification_environment.json",
+        {
+            "backend": verification_backend,
+            "image_digest": environment.digest if environment else None,
+            "image_platform": environment.platform if environment else None,
+            "python_version": environment.python_version if environment else None,
+            "cache_key": environment.cache_key if environment else None,
+            "preparation_error": environment_error,
+        },
+    )
     writer.write_model(ARTIFACT_RCA_REPORT, report)
     (output / "rca_report.md").write_text(
         render_rca_markdown(report),
@@ -377,11 +449,17 @@ def _run_verification(
     repo: Path,
     loaded: LoadedIncident,
     graph: EvidenceGraph,
+    *,
+    work_dir: Path | None = None,
+    docker_environment: DockerEnvironment | None = None,
+    unavailable_reason: str | None = None,
 ) -> VerificationRun:
     sandbox = RuntimeVerificationSandbox(
         repo,
         base_commit=loaded.incident.base_commit,
-        work_dir=tempfile.gettempdir(),
+        work_dir=work_dir,
+        docker_environment=docker_environment,
+        unavailable_reason=unavailable_reason,
     )
     try:
         return RuntimeTestVerifier(sandbox).verify(graph)

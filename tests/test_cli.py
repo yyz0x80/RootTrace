@@ -320,7 +320,8 @@ def test_analyze_command_routes_prepared_github_input_to_existing_pipeline(
 
     captured: dict[str, Any] = {}
 
-    def fake_pipeline(loaded, repo, output_dir, *, provider_factory):
+    def fake_pipeline(loaded, repo, output_dir, *, provider_factory, verification_image):
+        assert verification_image is None
         captured.update(
             loaded=loaded,
             repo=repo,
@@ -374,6 +375,7 @@ def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
         git_repo.repo,
         output_dir,
         provider_factory=factory,
+        verification_backend="host",
         budgets=PlanBudgets(),
         log_sources={"ci.log": ci_log},
     )
@@ -431,6 +433,37 @@ def test_run_rca_pipeline_end_to_end(git_repo, tmp_path: Path) -> None:
     assert before.model_dump(mode="json") == after.model_dump(mode="json")
 
 
+def test_missing_docker_image_keeps_report_and_records_unverified(
+    git_repo, tmp_path: Path,
+) -> None:
+    issue, ci_log = _issue_files(git_repo, tmp_path)
+    loaded = load_incident(issue, git_repo.repo, ci_log_path=ci_log)
+    payload = json.loads(_report_json())
+    payload["conclusion"] = "insufficient_evidence"
+    payload["ranked_causes"] = []
+    payload["causal_chain"] = []
+    payload["fix_recommendation"] = None
+    payload["uncertainty"] = {
+        "level": "high", "insufficient_evidence": True,
+        "notes": ["runtime test could not execute"],
+    }
+    output = tmp_path / "docker-out"
+    result = run_rca_pipeline(
+        loaded, git_repo.repo, output,
+        provider_factory=_scripted_factory([json.dumps(payload)]),
+        log_sources={"ci.log": ci_log},
+        verification_backend="docker",
+        verification_image=None,
+    )
+    assert result.verification.results[0].outcome.value == "unverified"
+    assert "no valid verification image" in result.verification.results[0].output_excerpt
+    environment = json.loads((output / "verification_environment.json").read_text())
+    assert environment["backend"] == "docker"
+    assert environment["image_digest"] is None
+    assert "no valid verification image" in environment["preparation_error"]
+    assert (output / "rca_report.json").is_file()
+
+
 def test_run_rca_pipeline_persists_synthesis_degradation_diagnostic(
     git_repo,
     tmp_path: Path,
@@ -453,6 +486,7 @@ def test_run_rca_pipeline_persists_synthesis_degradation_diagnostic(
         provider_factory=_scripted_factory(
             [invalid_response, invalid_response]
         ),
+        verification_backend="host",
         budgets=PlanBudgets(),
         log_sources={"ci.log": ci_log},
     )
@@ -493,6 +527,8 @@ def test_run_rca_command_with_scripted_providers(
             str(issue),
             "--model",
             "fake-model",
+            "--verification-backend",
+            "host",
             "--output-dir",
             str(output_dir),
             "--ci-log",
@@ -528,6 +564,7 @@ def test_renderer_is_deterministic(git_repo, tmp_path: Path) -> None:
         git_repo.repo,
         tmp_path / "render-out",
         provider_factory=_scripted_factory(),
+        verification_backend="host",
     )
     first = render_rca_markdown(result.report)
     second = render_rca_markdown(result.report)

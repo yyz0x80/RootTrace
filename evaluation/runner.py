@@ -136,12 +136,14 @@ class InProcessRootTraceClient:
         retriever: Any | None = None,
         history_excluded_ids: frozenset[str] = frozenset(),
         worker_concurrency: int = 3,
+        verification_image_map: Path | None = None,
     ) -> None:
         self._enabled_roles = enabled_roles
         self._retrieval_mode = retrieval_mode
         self._retriever = retriever
         self._history_excluded_ids = history_excluded_ids
         self._worker_concurrency = worker_concurrency
+        self._verification_image_map = verification_image_map
 
     def run(
         self,
@@ -152,7 +154,8 @@ class InProcessRootTraceClient:
         output_dir: Path,
         model: str | None,
     ) -> RootTraceOutcome:
-        del case_id  # retained in the protocol for stable tracing
+        if case_id != incident.id:
+            raise ValueError("evaluation case and incident IDs differ")
         from roottrace.cli import run_rca_pipeline
         from roottrace.incident.loader import LoadedIncident
         from roottrace.llm.provider import create_provider_from_config
@@ -174,6 +177,8 @@ class InProcessRootTraceClient:
                 retriever=self._retriever,
                 retrieval_mode=self._retrieval_mode,
                 history_excluded_ids=self._history_excluded_ids,
+                verification_backend="docker",
+                verification_image_map=self._verification_image_map,
             )
         except Exception as exc:  # noqa: BLE001 - isolate per-case RootTrace failures
             elapsed = time.monotonic() - started
@@ -552,6 +557,7 @@ def _build_retriever(config: AblationConfig):
 def _make_run_client(
     settings: VariantSettings,
     config: AblationConfig,
+    verification_image_map: Path | None = None,
 ) -> RootTraceClient:
     """Build the RootTrace client for one ablation variant."""
     if settings.deterministic:
@@ -570,6 +576,7 @@ def _make_run_client(
         retriever=retriever,
         history_excluded_ids=frozenset(config.history_excluded_ids),
         worker_concurrency=config.worker_concurrency,
+        verification_image_map=verification_image_map,
     )
 
 
@@ -686,7 +693,10 @@ def run_from_args(
             print(f"resume: skipping {len(results)} completed case(s)")
 
     active_client = (
-        client if client is not None else _make_run_client(settings, ablation)
+        client if client is not None else _make_run_client(
+            settings, ablation,
+            Path(args.verification_image_map) if getattr(args, "verification_image_map", None) else None,
+        )
     )
     gold_store = GoldStore(gold_path)
     for case in selected:
@@ -761,6 +771,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="local git mirror cache (default: <data-root>/repos)",
+    )
+    parser.add_argument(
+        "--verification-image-map", type=Path, default=None,
+        help="JSON map from instance_id to image, base_commit, and platform",
     )
     parser.add_argument(
         "--gold-path",

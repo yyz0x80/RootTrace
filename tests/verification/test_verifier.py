@@ -112,6 +112,27 @@ def test_verifier_marks_supported_for_passing_tests(
     assert before.model_dump(mode="json") == after.model_dump(mode="json")
 
 
+def test_environment_failure_is_unverified_but_invalid_plan_is_reported_first(
+    git_repo, tmp_path: Path,
+) -> None:
+    graph = _graph(git_repo, [
+        _hypothesis("h-001", "python -m pytest tests/missing.py"),
+        _hypothesis("h-002", "python -m pytest tests/test_calc.py"),
+    ])
+    with RuntimeVerificationSandbox(
+        git_repo.repo, work_dir=tmp_path,
+        unavailable_reason="Docker image unavailable: missing image",
+    ) as sandbox:
+        run = RuntimeTestVerifier(sandbox).verify(graph)
+    assert [result.outcome for result in run.results] == [
+        VerificationOutcome.UNVERIFIED, VerificationOutcome.UNVERIFIED,
+    ]
+    assert "does not exist" in run.results[0].output_excerpt
+    assert "missing image" in run.results[1].output_excerpt
+    assert all(result.exit_code is None for result in run.results)
+    assert run.evidence == []
+
+
 def test_verifier_marks_rejected_for_failing_tests(
     git_repo,
     tmp_path: Path,

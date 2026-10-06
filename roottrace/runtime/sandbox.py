@@ -25,12 +25,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Self
 from xml.etree import ElementTree
 
+from roottrace.runtime.docker import DockerEnvironment
 from roottrace.runtime.workspace import (
     RepositoryFingerprint,
     assert_fingerprint_unchanged,
@@ -106,6 +108,7 @@ def _validate_test_command(tokens: list[str], root: Path) -> list[str]:
         raise ValueError("only 'python -m pytest ...' commands are allowed")
 
     index = 3
+    targets = 0
     while index < len(tokens):
         token = tokens[index]
         if token in _PAIR_FLAGS:
@@ -119,7 +122,10 @@ def _validate_test_command(tokens: list[str], root: Path) -> list[str]:
         if token.startswith("-"):
             raise ValueError(f"disallowed pytest option: {token}")
         _validate_target(token, root)
+        targets += 1
         index += 1
+    if targets == 0:
+        raise ValueError("pytest command must name an existing test target")
     return tokens
 
 
@@ -181,6 +187,8 @@ def _parse_junit_xml(path: Path) -> tuple[_JUnitSummary | None, str]:
     try:
         if not path.is_file():
             return None, "pytest JUnit result is missing"
+        if path.is_symlink() or path.parent.is_symlink():
+            return None, "pytest JUnit result must not be a symlink"
         if path.stat().st_size > MAX_JUNIT_XML_BYTES:
             return None, "pytest JUnit result is too large"
         payload = path.read_bytes()
@@ -321,12 +329,16 @@ class RuntimeVerificationSandbox:
         repo: str | Path,
         base_commit: str | None = None,
         work_dir: str | Path | None = None,
+        docker_environment: DockerEnvironment | None = None,
+        unavailable_reason: str | None = None,
     ) -> None:
         self.repo = Path(repo).resolve()
         self._require_git_repo(self.repo)
         if base_commit is not None and not _VALID_REVISION.fullmatch(base_commit):
             raise ValueError("base_commit must be a hex SHA or HEAD")
         self.base_commit = base_commit
+        self.docker_environment = docker_environment
+        self.unavailable_reason = unavailable_reason
         self.before: RepositoryFingerprint = capture_repository_fingerprint(self.repo)
         parent = (
             Path(work_dir).resolve()
@@ -400,6 +412,8 @@ class RuntimeVerificationSandbox:
             raise ValueError(f"timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}")
         tokens = [str(token) for token in argv]
         validated = _validate_test_command(tokens, self.work_root)
+        if self.unavailable_reason is not None:
+            raise RuntimeError(self.unavailable_reason)
         self._prepare_junit_path()
         execution_argv = [
             *validated,
@@ -407,6 +421,24 @@ class RuntimeVerificationSandbox:
             _JUNIT_XML_PATH.as_posix(),
         ]
         executable = [sys.executable, *execution_argv[1:]]
+        container_name = None
+        if self.docker_environment is not None:
+            container_name = f"roottrace-test-{uuid.uuid4().hex}"
+            executable = [
+                "docker", "run", "--rm", "--name", container_name,
+                "--pull", "never", "--network", "none", "--read-only",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--pids-limit", "64", "--memory", "1g", "--cpus", "1",
+                "--user", f"{os.getuid()}:{os.getgid()}",
+                "--platform", self.docker_environment.platform,
+                "--entrypoint", "python",
+                "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
+                "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
+                "--env", "PYTHONPATH=/roottrace-deps",
+                "--mount", f"type=bind,src={self.work_root},dst=/work",
+                "--workdir", "/work", self.docker_environment.image,
+                *execution_argv[1:],
+            ]
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         started = time.monotonic()
@@ -423,7 +455,14 @@ class RuntimeVerificationSandbox:
                 check=False,
                 env=env,
             )
-        except subprocess.TimeoutExpired as exc:
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            if container_name is not None:
+                subprocess.run(
+                    ["docker", "rm", "-f", container_name],
+                    capture_output=True, timeout=15, check=False,
+                )
+            if isinstance(exc, OSError):
+                raise RuntimeError("Docker execution unavailable") from exc  # noqa: TRY004
             stdout = self._sanitize_output(_text_output(exc.stdout))
             stderr = self._sanitize_output(_text_output(exc.stderr))
             stdout, stdout_truncated = _cap_output(stdout)
@@ -450,6 +489,9 @@ class RuntimeVerificationSandbox:
             result.returncode,
             self._junit_path,
         )
+        if self.docker_environment is not None and result.returncode in {125, 126, 127}:
+            classification = PytestExecutionClassification.EXECUTION_ERROR
+            reason = f"Docker execution failed with status {result.returncode}"
         self._remove_junit_path()
         return SandboxCommandResult(
             command=" ".join(validated),
@@ -487,7 +529,7 @@ class RuntimeVerificationSandbox:
 
     def _sanitize_output(self, text: str) -> str:
         """Replace disposable absolute paths before results leave the sandbox."""
-        return text.replace(str(self._root), "<sandbox>").replace(
+        return text.replace(str(self.repo), "<target>").replace(str(self._root), "<sandbox>").replace(
             str(self.work_root),
             "<sandbox>",
         )

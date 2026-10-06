@@ -43,6 +43,8 @@ def run_rca_job(
     stack_trace: str | None = None,
     ci_log: str | None = None,
     pr_diff: str | None = None,
+    verification_backend: str = "docker",
+    verification_image: str | None = None,
 ) -> RcaJobResult:
     """Run one complete RCA workflow and return its artifact summary.
 
@@ -75,6 +77,8 @@ def run_rca_job(
             stack_trace=stack_trace,
             ci_log=ci_log,
             pr_diff=pr_diff,
+            verification_backend=verification_backend,
+            verification_image=verification_image,
         )
     except Exception as error:
         _withdraw_rq_retries_for(error)
@@ -91,6 +95,8 @@ def _execute_rca_job(
     stack_trace: str | None = None,
     ci_log: str | None = None,
     pr_diff: str | None = None,
+    verification_backend: str = "docker",
+    verification_image: str | None = None,
 ) -> RcaJobResult:
     """Run the synchronous RCA pipeline for one job."""
     loaded = load_incident(
@@ -112,6 +118,8 @@ def _execute_rca_job(
         output_dir,
         provider_factory=provider_factory,
         log_sources=log_sources,
+        verification_backend=verification_backend,
+        verification_image=verification_image,
     )
     return {
         "incident_id": result.incident_id,

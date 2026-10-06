@@ -183,6 +183,7 @@ def test_run_rca_job_runs_existing_pipeline(
         output_dir=str(output_dir),
         model="fake-model",
         ci_log=str(ci_log),
+        verification_backend="host",
     )
 
     assert requested_models == ["fake-model"] * 5

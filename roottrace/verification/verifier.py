@@ -192,7 +192,11 @@ class RuntimeTestVerifier:
             kind=EvidenceKind.TEST_RESULT,
             observation=f"{command}: {classification.value if classification else 'invalid_result'} ({reason})",
             provenance=Provenance(
-                source="verification_sandbox",
+                source=(
+                    f"docker:{self.sandbox.docker_environment.digest}"
+                    if self.sandbox.docker_environment is not None
+                    else "verification_sandbox"
+                ),
                 tool="runtime_test",
                 command=command,
                 commit=self.sandbox.head_sha,
