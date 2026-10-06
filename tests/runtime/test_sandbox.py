@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +13,7 @@ from roottrace.runtime.sandbox import (
     PytestExecutionClassification,
     RuntimeVerificationSandbox,
     _classify_pytest_result,
+    _record_test_events,
 )
 from roottrace.runtime.workspace import capture_repository_fingerprint
 
@@ -175,6 +179,46 @@ def test_sandbox_rejects_missing_junit_result(tmp_path: Path) -> None:
 
     assert classification is PytestExecutionClassification.INVALID_RESULT
     assert "missing" in reason
+
+
+def test_pytest_streams_real_outcomes_and_host_builds_junit(tmp_path: Path) -> None:
+    target = tmp_path / "test_stream.py"
+    target.write_text(
+        "def test_pass():\n    assert True\n"
+        "def test_fail():\n    assert False\n",
+        encoding="utf-8",
+    )
+    helpers = Path(__file__).resolve().parents[2] / "roottrace" / "verification"
+    token = "test-stream-token"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(helpers)
+    env["ROOTTRACE_EVENT_TOKEN"] = token
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "roottrace_pytest_events", str(target)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+        check=False,
+    )
+    destination = tmp_path / "host-junit.xml"
+    output, error = _record_test_events(result.stdout, token, destination)
+    assert error is None
+    assert "ROOTTRACE_TEST_EVENT" not in output
+    assert _classify_pytest_result(result.returncode, destination)[0] is (
+        PytestExecutionClassification.ASSERTION_FAILED
+    )
+
+
+def test_test_event_stream_rejects_missing_record(tmp_path: Path) -> None:
+    token = "test-stream-token"
+    output = (
+        f'ROOTTRACE_TEST_EVENT:{token}:{{"kind":"case","name":"test_a","status":"passed","seq":1}}\n'
+        f'ROOTTRACE_TEST_EVENT:{token}:{{"kind":"end","exit_code":0,"reported":1,"seq":3}}\n'
+    )
+    destination = tmp_path / "host-junit.xml"
+    _, error = _record_test_events(output, token, destination)
+    assert error is not None and "missing or repeated" in error
+    assert not destination.exists()
 
 
 def test_sandbox_writes_do_not_propagate(git_repo, tmp_path: Path) -> None:

@@ -351,7 +351,17 @@ def test_cache_cleanup_refuses_unowned_image(monkeypatch) -> None:
     assert calls[0][:3] == ["docker", "image", "inspect"]
 
 
-def test_docker_uses_disposable_copy_and_junit(monkeypatch, git_repo, tmp_path: Path) -> None:
+def _event_output(argv: list[str], *, status: str = "passed", complete: bool = True) -> str:
+    token = next(value.split("=", 1)[1] for value in argv if value.startswith("ROOTTRACE_EVENT_TOKEN="))
+    lines = [
+        f'ROOTTRACE_TEST_EVENT:{token}:{{"kind":"case","name":"test_add","status":"{status}","seq":1}}',
+    ]
+    if complete:
+        lines.append(f'ROOTTRACE_TEST_EVENT:{token}:{{"kind":"end","exit_code":0,"reported":1,"seq":2}}')
+    return "1 test ran\n" + "\n".join(lines) + "\n"
+
+
+def test_docker_uses_disposable_copy_and_test_events(monkeypatch, git_repo, tmp_path: Path) -> None:
     original = subprocess.run
     docker_commands: list[list[str]] = []
 
@@ -368,13 +378,13 @@ def test_docker_uses_disposable_copy_and_junit(monkeypatch, git_repo, tmp_path: 
         mounts = [argv[index + 1] for index, token in enumerate(argv) if token == "--mount"]
         assert len(mounts) == 2
         work = Path(mounts[0].split("src=", 1)[1].split(",dst=", 1)[0])
-        results = Path(mounts[1].split("src=", 1)[1].split(",dst=", 1)[0])
-        assert results.parent == work.parent
+        helpers = Path(mounts[1].split("src=", 1)[1].split(",dst=", 1)[0])
+        assert helpers.parent == work.parent
+        assert mounts[1].endswith(",readonly")
+        assert (helpers / "roottrace_pytest_events.py").is_file()
+        assert "/roottrace-results" not in " ".join(argv)
         assert not (work / ".roottrace").exists()
-        junit = results / "pytest-results.xml"
-        junit.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
-                         '<testcase name="test_add"/></testsuite>', encoding="utf-8")
-        return subprocess.CompletedProcess(argv, 0, "1 passed", "")
+        return subprocess.CompletedProcess(argv, 0, _event_output(argv), "")
 
     monkeypatch.setattr("roottrace.runtime.sandbox.subprocess.run", fake_run)
     environment = DockerEnvironment("example:latest", "sha256:" + "b" * 64,
@@ -403,13 +413,7 @@ def test_django_checkout_uses_native_runner_with_auditable_command(
         if argv[0] != "docker":
             return original(argv, **kwargs)
         seen.append(argv)
-        mounts = [argv[index + 1] for index, token in enumerate(argv) if token == "--mount"]
-        results = Path(mounts[1].split("src=", 1)[1].split(",dst=", 1)[0])
-        (results / "pytest-results.xml").write_text(
-            '<testsuite tests="1" failures="0" errors="0" skipped="0">'
-            '<testcase name="test_add"/></testsuite>', encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(argv, 0, "1 test passed", "")
+        return subprocess.CompletedProcess(argv, 0, _event_output(argv), "")
 
     monkeypatch.setattr("roottrace.runtime.sandbox.subprocess.run", fake_run)
     environment = DockerEnvironment(
@@ -431,8 +435,28 @@ def test_django_checkout_uses_native_runner_with_auditable_command(
             "python tests/runtests.py --settings=roottrace_django_settings "
             "--noinput --parallel=1 test_calc"
         )
-        assert (sandbox._junit_path.parent / "roottrace_django_runner.py").is_file()
+        assert (sandbox._root / "tools" / "roottrace_django_runner.py").is_file()
     assert "PATH=/opt/miniconda3/envs/testbed/bin:/usr/bin" in seen[0]
+
+
+def test_docker_incomplete_test_events_never_count_as_passed(
+    monkeypatch, git_repo, tmp_path: Path,
+) -> None:
+    original = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if argv[0] != "docker":
+            return original(argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 0, _event_output(argv, complete=False), "")
+
+    monkeypatch.setattr("roottrace.runtime.sandbox.subprocess.run", fake_run)
+    environment = DockerEnvironment("example:latest", "sha256:" + "b" * 64,
+                                    "linux/amd64", "Python 3.11", "key")
+    with RuntimeVerificationSandbox(git_repo.repo, work_dir=tmp_path,
+                                    docker_environment=environment) as sandbox:
+        result = sandbox.run(["python", "-m", "pytest", "tests/test_calc.py"])
+    assert result.classification is PytestExecutionClassification.INVALID_RESULT
+    assert "completion" in result.classification_reason
 
 
 def test_unavailable_environment_does_not_run_tests(git_repo, tmp_path: Path) -> None:

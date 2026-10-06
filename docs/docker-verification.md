@@ -70,8 +70,10 @@ RootTrace does not build or run repository Dockerfiles. Projects needing
 system packages, editable/source builds, private indexes without an explicit
 HTTPS endpoint, or non-pip setup need a prepared image.
 
-JUnit output goes to a private result mount outside the disposable repository
-copy, so repository tests cannot remove its directory. Verification candidates
+Docker tests stream bounded per-test events to the host. After a complete event
+stream, RootTrace builds and validates JUnit XML outside the container. Missing
+completion events or malformed records make verification `unverified`; no
+container result directory is mounted. Verification candidates
 are tracked files with pytest-style names; support files such as
 `tests/roots/.../conf.py` are excluded. A named test file can still contain no
 collected tests, which is reported as `no_tests`. For a Django checkout with

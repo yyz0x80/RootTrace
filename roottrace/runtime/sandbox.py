@@ -18,6 +18,7 @@ the original target fingerprint is re-checked at teardown.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -47,7 +48,9 @@ MAX_COMMAND_TOKENS = 100
 MAX_COMMAND_CHARS = 10_000
 
 _JUNIT_XML_NAME = "pytest-results.xml"
-_CONTAINER_RESULT_DIR = "/roottrace-results"
+_EVENT_PREFIX = "ROOTTRACE_TEST_EVENT:"
+_CONTAINER_TOOL_DIR = "/roottrace-tools"
+_MAX_TEST_EVENTS = 10_000
 
 _VALID_REVISION = re.compile(r"^(?:[0-9a-fA-F]{4,64}|HEAD)$")
 _SAFE_TARGET_CHARS = re.compile(r"^[A-Za-z0-9._/:+-]+$")
@@ -316,6 +319,83 @@ def _classify_pytest_result(
     )
 
 
+def _record_test_events(stdout: str, token: str, destination: Path) -> tuple[str, str | None]:
+    """Validate a complete event stream and build JUnit on the host."""
+    clean_lines = []
+    cases: dict[str, str] = {}
+    ended = False
+    collected = None
+    reported = None
+    sequence = 0
+    error = None
+    rank = {"passed": 0, "skipped": 1, "failure": 2, "error": 3}
+    for line in stdout.splitlines(keepends=True):
+        marker = line.find(_EVENT_PREFIX)
+        if marker < 0:
+            clean_lines.append(line)
+            continue
+        if marker:
+            clean_lines.append(line[:marker])
+        line = line[marker:]
+        if len(line) > 2_000 or not line.startswith(_EVENT_PREFIX + token + ":"):
+            error = "test event stream contains an invalid record"
+            continue
+        try:
+            record = json.loads(line[len(_EVENT_PREFIX + token + ":"):])
+        except (ValueError, TypeError):
+            error = "test event stream contains malformed JSON"
+            continue
+        if not isinstance(record, dict) or ended:
+            error = "test event stream has an invalid order"
+            continue
+        if record.get("seq") != sequence + 1:
+            error = "test event stream has a missing or repeated record"
+            continue
+        sequence += 1
+        if record.get("kind") == "case":
+            name, status = record.get("name"), record.get("status")
+            if (not isinstance(name, str) or not name or len(name) > 300
+                    or status not in rank or len(cases) >= _MAX_TEST_EVENTS):
+                error = "test event stream has an invalid case"
+                continue
+            if name not in cases or rank[status] > rank[cases[name]]:
+                cases[name] = status
+        elif record.get("kind") == "end":
+            ended = True
+            collected = record.get("collected")
+            reported = record.get("reported")
+            if not isinstance(record.get("exit_code"), int):
+                error = "test event stream has an invalid completion record"
+        else:
+            error = "test event stream has an unknown record"
+    if error is not None:
+        return "".join(clean_lines), error
+    if not ended:
+        return "".join(clean_lines), "test event stream has no completion record"
+    if not isinstance(reported, int) or reported != len(cases):
+        return "".join(clean_lines), "test event stream has an inconsistent case count"
+    if isinstance(collected, int) and collected > 0 and not cases:
+        return "".join(clean_lines), "collected tests have no outcome events"
+    counts = {name: sum(status == name for status in cases.values())
+              for name in ("failure", "error", "skipped")}
+    root = ElementTree.Element("testsuite", {
+        "tests": str(len(cases)), "failures": str(counts["failure"]),
+        "errors": str(counts["error"]), "skipped": str(counts["skipped"]),
+    })
+    for name, status in cases.items():
+        testcase = ElementTree.SubElement(root, "testcase", {"name": name})
+        if status != "passed":
+            ElementTree.SubElement(testcase, status)
+    payload = ElementTree.tostring(root, encoding="utf-8")
+    if len(payload) > MAX_JUNIT_XML_BYTES:
+        return "".join(clean_lines), "test event result is too large"
+    try:
+        destination.write_bytes(payload)
+    except OSError:
+        return "".join(clean_lines), "could not save host test result"
+    return "".join(clean_lines), None
+
+
 @dataclass
 class SandboxCommandResult:
     """Bounded result of one allowlisted test command in the sandbox."""
@@ -428,17 +508,12 @@ class RuntimeVerificationSandbox:
             raise RuntimeError(self.unavailable_reason)
         self._prepare_junit_path()
         django_labels = self._django_test_labels(validated)
-        if django_labels and self.docker_environment is not None:
-            self._stage_django_adapter()
-        junit_argument = (
-            f"{_CONTAINER_RESULT_DIR}/{_JUNIT_XML_NAME}"
-            if self.docker_environment is not None else str(self._junit_path)
-        )
-        execution_argv = [
-            *validated,
-            "--junitxml",
-            junit_argument,
-        ]
+        event_token = uuid.uuid4().hex
+        if self.docker_environment is not None:
+            self._stage_test_helpers()
+            execution_argv = [*validated, "-p", "roottrace_pytest_events"]
+        else:
+            execution_argv = [*validated, "--junitxml", str(self._junit_path)]
         executable = [sys.executable, *execution_argv[1:]]
         container_name = None
         if self.docker_environment is not None:
@@ -449,9 +524,11 @@ class RuntimeVerificationSandbox:
                 if django_labels else execution_argv[1:]
             )
             python_path = (
-                "/roottrace-results:/roottrace-deps:/work/tests:/work"
+                f"{_CONTAINER_TOOL_DIR}:/roottrace-deps:/work/tests:/work"
                 if django_labels else "/roottrace-deps"
             )
+            if not django_labels:
+                python_path = f"{_CONTAINER_TOOL_DIR}:{python_path}"
             executable = [
                 "docker", "run", "--rm", "--name", container_name,
                 "--pull", "never", "--network", "none", "--read-only",
@@ -463,18 +540,15 @@ class RuntimeVerificationSandbox:
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
                 "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
                 "--env", f"PYTHONPATH={python_path}",
-                *(
-                    ["--env", f"ROOTTRACE_JUNIT_PATH={junit_argument}"]
-                    if django_labels else []
-                ),
+                "--env", f"ROOTTRACE_EVENT_TOKEN={event_token}",
                 *(
                     ["--env", f"PATH={self.docker_environment.execution_path}"]
                     if self.docker_environment.execution_path else []
                 ),
                 "--mount", f"type=bind,src={self.work_root},dst=/work",
                 "--mount", (
-                    f"type=bind,src={self._junit_path.parent},"
-                    f"dst={_CONTAINER_RESULT_DIR}"
+                    f"type=bind,src={self._root / 'tools'},"
+                    f"dst={_CONTAINER_TOOL_DIR},readonly"
                 ),
                 "--workdir", "/work", self.docker_environment.image,
                 *container_args,
@@ -503,7 +577,12 @@ class RuntimeVerificationSandbox:
                 )
             if isinstance(exc, OSError):
                 raise RuntimeError("Docker execution unavailable") from exc  # noqa: TRY004
-            stdout = self._sanitize_output(_text_output(exc.stdout))
+            raw_stdout = _text_output(exc.stdout)
+            if self.docker_environment is not None:
+                raw_stdout, _ = _record_test_events(
+                    raw_stdout, event_token, self._junit_path,
+                )
+            stdout = self._sanitize_output(raw_stdout)
             stderr = self._sanitize_output(_text_output(exc.stderr))
             stdout, stdout_truncated = _cap_output(stdout)
             stderr, stderr_truncated = _cap_output(stderr)
@@ -524,14 +603,23 @@ class RuntimeVerificationSandbox:
                 ),
             )
         duration = time.monotonic() - started
-        stdout = self._sanitize_output(_text_output(result.stdout))
+        raw_stdout = _text_output(result.stdout)
+        event_error = None
+        if self.docker_environment is not None:
+            raw_stdout, event_error = _record_test_events(
+                raw_stdout, event_token, self._junit_path,
+            )
+        stdout = self._sanitize_output(raw_stdout)
         stderr = self._sanitize_output(_text_output(result.stderr))
         stdout, stdout_truncated = _cap_output(stdout)
         stderr, stderr_truncated = _cap_output(stderr)
-        classification, reason = _classify_pytest_result(
-            result.returncode,
-            self._junit_path,
-        )
+        if event_error is None:
+            classification, reason = _classify_pytest_result(
+                result.returncode, self._junit_path,
+            )
+        else:
+            classification = PytestExecutionClassification.INVALID_RESULT
+            reason = event_error
         if self.docker_environment is not None and result.returncode in {125, 126, 127}:
             classification = PytestExecutionClassification.EXECUTION_ERROR
             reason = f"Docker execution failed with status {result.returncode}"
@@ -573,11 +661,16 @@ class RuntimeVerificationSandbox:
             labels.append(".".join([label, *selectors]))
         return labels
 
-    def _stage_django_adapter(self) -> None:
-        """Copy trusted adapter modules outside the disposable repository."""
+    def _stage_test_helpers(self) -> None:
+        """Mount trusted event reporters separately from the repository copy."""
         source = Path(__file__).resolve().parent.parent / "verification"
-        for name in ("roottrace_django_settings.py", "roottrace_django_runner.py"):
-            (self._junit_path.parent / name).write_bytes((source / name).read_bytes())
+        tools_dir = self._root / "tools"
+        tools_dir.mkdir(mode=0o700, exist_ok=True)
+        for name in (
+            "roottrace_event_protocol.py", "roottrace_pytest_events.py",
+            "roottrace_django_settings.py", "roottrace_django_runner.py",
+        ):
+            (tools_dir / name).write_bytes((source / name).read_bytes())
 
     def _prepare_junit_path(self) -> None:
         """Create a private result directory outside the repository copy."""
