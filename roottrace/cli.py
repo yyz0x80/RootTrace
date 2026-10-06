@@ -414,6 +414,7 @@ def run_rca_pipeline(
             "cache_key": environment.cache_key if environment else None,
             "image_pulled": environment.pulled if environment else None,
             "python_executable": environment.python_executable if environment else None,
+            "python_path": environment.execution_path if environment else None,
             "pytest_bootstrapped": environment.pytest_bootstrapped if environment else None,
             "image_cache_hit": environment.cache_hit if environment else None,
             "preparation_error": environment_error,

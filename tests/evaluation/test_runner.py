@@ -111,6 +111,26 @@ def test_pytest_bootstrap_policy_changes_resume_config(tmp_path: Path) -> None:
     assert enabled.config_hash() != disabled.config_hash()
 
 
+def test_verification_requirements_are_forwarded_and_hashed(tmp_path: Path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    manifest_path = data_root / "manifests" / "smoke3.json"
+    manifest = load_manifest(manifest_path)
+    lock = tmp_path / "verification.lock"
+    lock.write_text("example==1.0 --hash=sha256:" + "a" * 64 + "\n")
+    args = _args(
+        data_root, tmp_path / "out", verification_requirements=lock,
+        verification_index_url="https://example.invalid/simple",
+    )
+    first = _build_ablation_config(args, manifest, manifest_path, list(manifest.instances))
+    client = _make_run_client(variant_settings(first.variant), first, None, lock,
+                              args.verification_index_url)
+    assert client._verification_requirements == lock
+    assert client._verification_index_url == args.verification_index_url
+    lock.write_text("example==2.0 --hash=sha256:" + "b" * 64 + "\n")
+    second = _build_ablation_config(args, manifest, manifest_path, list(manifest.instances))
+    assert first.config_hash() != second.config_hash()
+
+
 class FakeRootTraceClient:
     """Records received incidents and writes deterministic fake reports."""
 

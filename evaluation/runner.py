@@ -141,6 +141,8 @@ class InProcessRootTraceClient:
         verification_swebench_auto: bool = False,
         verification_pull_missing: bool = False,
         verification_bootstrap_pytest: bool = False,
+        verification_requirements: Path | None = None,
+        verification_index_url: str | None = None,
         verification_preparation_timeout_seconds: int = 900,
         verification_wait_seconds: int = 120,
     ) -> None:
@@ -153,6 +155,8 @@ class InProcessRootTraceClient:
         self._verification_swebench_auto = verification_swebench_auto
         self._verification_pull_missing = verification_pull_missing
         self._verification_bootstrap_pytest = verification_bootstrap_pytest
+        self._verification_requirements = verification_requirements
+        self._verification_index_url = verification_index_url
         self._verification_preparation_timeout_seconds = verification_preparation_timeout_seconds
         self._verification_wait_seconds = verification_wait_seconds
 
@@ -193,6 +197,8 @@ class InProcessRootTraceClient:
                 verification_swebench_auto=self._verification_swebench_auto,
                 verification_pull_missing=self._verification_pull_missing,
                 verification_bootstrap_pytest=self._verification_bootstrap_pytest,
+                verification_requirements=self._verification_requirements,
+                verification_index_url=self._verification_index_url,
                 preparation_timeout_seconds=self._verification_preparation_timeout_seconds,
                 verification_wait_seconds=self._verification_wait_seconds,
             )
@@ -506,6 +512,8 @@ def _verification_preflight(
     selected: list[ManifestCase],
     image_map: Path | None,
     config: AblationConfig,
+    requirements: Path | None = None,
+    index_url: str | None = None,
 ) -> int:
     """Resolve and inspect verification images without LLM calls or gold data."""
     from roottrace.runtime.docker import (
@@ -521,6 +529,8 @@ def _verification_preflight(
             swebench_image=image_map is None,
             pull_missing=config.verification_pull_missing and image_map is None,
             bootstrap_pytest=config.verification_bootstrap_pytest,
+            requirements=requirements,
+            index_url=index_url,
             prefer_testbed_python=True,
             timeout_seconds=config.verification_preparation_timeout_seconds,
             wheels_parent=Path.cwd(),
@@ -583,6 +593,15 @@ def _build_ablation_config(
     base["verification_bootstrap_pytest"] = not getattr(
         args, "no_verification_pytest_bootstrap", False,
     )
+    requirements = getattr(args, "verification_requirements", None)
+    index_url = getattr(args, "verification_index_url", None)
+    base["verification_requirements_sha256"] = (
+        hashlib.sha256(Path(requirements).read_bytes()).hexdigest()
+        if requirements else None
+    )
+    base["verification_index_url_sha256"] = (
+        hashlib.sha256(index_url.encode()).hexdigest() if index_url else None
+    )
     base["verification_preparation_timeout_seconds"] = getattr(
         args, "verification_preparation_timeout", 900,
     )
@@ -635,6 +654,8 @@ def _make_run_client(
     settings: VariantSettings,
     config: AblationConfig,
     verification_image_map: Path | None = None,
+    verification_requirements: Path | None = None,
+    verification_index_url: str | None = None,
 ) -> RootTraceClient:
     """Build the RootTrace client for one ablation variant."""
     if settings.deterministic:
@@ -657,6 +678,8 @@ def _make_run_client(
         verification_swebench_auto=verification_image_map is None,
         verification_pull_missing=config.verification_pull_missing,
         verification_bootstrap_pytest=config.verification_bootstrap_pytest,
+        verification_requirements=verification_requirements,
+        verification_index_url=verification_index_url,
         verification_preparation_timeout_seconds=config.verification_preparation_timeout_seconds,
         verification_wait_seconds=config.verification_wait_seconds,
     )
@@ -758,6 +781,8 @@ def run_from_args(
         image_map = getattr(args, "verification_image_map", None)
         return _verification_preflight(
             selected, Path(image_map) if image_map else None, ablation,
+            Path(args.verification_requirements) if getattr(args, "verification_requirements", None) else None,
+            getattr(args, "verification_index_url", None),
         )
 
     output_dir = (
@@ -783,6 +808,8 @@ def run_from_args(
         client if client is not None else _make_run_client(
             settings, ablation,
             Path(args.verification_image_map) if getattr(args, "verification_image_map", None) else None,
+            Path(args.verification_requirements) if getattr(args, "verification_requirements", None) else None,
+            getattr(args, "verification_index_url", None),
         )
     )
     gold_store = GoldStore(gold_path)
@@ -870,6 +897,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-verification-pytest-bootstrap", action="store_true",
         help="leave images lacking pytest unverified without installing pinned wheels",
+    )
+    parser.add_argument(
+        "--verification-requirements", type=Path, default=None,
+        help="hash-pinned, universal-wheel project dependency lock",
+    )
+    parser.add_argument(
+        "--verification-index-url", default=None,
+        help="HTTPS package index used only during image preparation",
     )
     parser.add_argument(
         "--verification-preparation-timeout", type=_positive_int, default=900,

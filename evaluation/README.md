@@ -89,6 +89,8 @@ Useful controls include:
 --no-verification-image-pull    use local images only
 --no-verification-pytest-bootstrap  skip automatic pytest setup
 --verification-image-map PATH   override automatic official image selection
+--verification-requirements PATH  hash-pinned universal-wheel dependency lock
+--verification-index-url URL    HTTPS package index for that lock
 ```
 
 Before a development-subset run, validate its inputs without model calls:

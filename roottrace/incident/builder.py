@@ -113,7 +113,7 @@ def _is_test_file(path: str) -> bool:
 
 
 def list_tracked_test_files(repo: str | Path, base_commit: str) -> list[str]:
-    """Return Python test paths tracked at the exact analyzed revision."""
+    """Return pytest-discoverable files tracked at the analyzed revision."""
     result = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", validate_commit_sha(base_commit)],
         cwd=Path(repo).resolve(),
@@ -126,7 +126,9 @@ def list_tracked_test_files(repo: str | Path, base_commit: str) -> list[str]:
         raise ValueError("cannot list test files at the analyzed commit")
     return [
         path for path in sorted(result.stdout.splitlines())
-        if path.endswith(".py") and _is_test_file(path)
+        if (PurePosixPath(path).name.startswith("test_")
+            or PurePosixPath(path).name.endswith("_test.py"))
+        and path.endswith(".py")
     ]
 
 

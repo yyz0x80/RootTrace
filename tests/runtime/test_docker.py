@@ -101,13 +101,16 @@ def test_environment_error_keeps_final_traceback_reason(monkeypatch) -> None:
 
 
 def test_pytest_bootstrap_lock_is_complete_for_supported_python() -> None:
+    legacy = _pytest_bootstrap_requirements("Python 3.6.13").decode()
     old = _pytest_bootstrap_requirements("Python 3.8.20").decode()
     modern = _pytest_bootstrap_requirements("Python 3.11.5").decode()
+    assert "pytest==6.2.5" in legacy
+    assert "pyparsing==3.0.7" in legacy
     assert "pytest==8.3.5" in old
     assert "exceptiongroup==" in old and "tomli==" in old
     assert "pytest==9.0.3" in modern and "pygments==" in modern
     assert "tomli==" not in modern
-    for line in (old + modern).splitlines():
+    for line in (legacy + old + modern).splitlines():
         assert " --hash=sha256:" in line
         assert len(line.rsplit(":", 1)[-1]) == 64
     with pytest.raises(EnvironmentPreparationError, match="supports Python"):
@@ -181,6 +184,13 @@ def test_missing_pytest_bootstraps_offline_and_reuses_owned_cache(
     assert first.base_digest == "sha256:" + "b" * 64
     assert first.cache_hit is False and second.cache_hit is True
     assert sum(argv[:4] == ["python", "-m", "pip", "download"] for argv in calls) == 1
+
+
+def test_legacy_python_version_on_stderr_is_detected() -> None:
+    result = subprocess.CompletedProcess(
+        ["python", "--version"], 0, "", "Python 3.6.13 :: Anaconda, Inc.\n",
+    )
+    assert DockerEnvironmentPreparer._python_version(result) == "Python 3.6.13"
 
 
 def test_missing_swebench_image_without_pull_is_explicit(monkeypatch) -> None:
@@ -355,9 +365,13 @@ def test_docker_uses_disposable_copy_and_junit(monkeypatch, git_repo, tmp_path: 
         assert "--network" in argv and "none" in argv
         assert "--read-only" in argv and "--cap-drop" in argv
         assert not any("docker.sock" in token for token in argv)
-        mount = argv[argv.index("--mount") + 1]
-        work = Path(mount.split("src=", 1)[1].split(",dst=", 1)[0])
-        junit = work / ".roottrace" / "pytest-results.xml"
+        mounts = [argv[index + 1] for index, token in enumerate(argv) if token == "--mount"]
+        assert len(mounts) == 2
+        work = Path(mounts[0].split("src=", 1)[1].split(",dst=", 1)[0])
+        results = Path(mounts[1].split("src=", 1)[1].split(",dst=", 1)[0])
+        assert results.parent == work.parent
+        assert not (work / ".roottrace").exists()
+        junit = results / "pytest-results.xml"
         junit.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
                          '<testcase name="test_add"/></testsuite>', encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "1 passed", "")
@@ -377,6 +391,48 @@ def test_docker_uses_disposable_copy_and_junit(monkeypatch, git_repo, tmp_path: 
         assert sandbox.head_sha == git_repo.base_sha
     assert before == capture_repository_fingerprint(git_repo.repo)
     assert not sandbox.work_root.exists()
+
+
+def test_django_checkout_uses_native_runner_with_auditable_command(
+    monkeypatch, git_repo, tmp_path: Path,
+) -> None:
+    original = subprocess.run
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        if argv[0] != "docker":
+            return original(argv, **kwargs)
+        seen.append(argv)
+        mounts = [argv[index + 1] for index, token in enumerate(argv) if token == "--mount"]
+        results = Path(mounts[1].split("src=", 1)[1].split(",dst=", 1)[0])
+        (results / "pytest-results.xml").write_text(
+            '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+            '<testcase name="test_add"/></testsuite>', encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "1 test passed", "")
+
+    monkeypatch.setattr("roottrace.runtime.sandbox.subprocess.run", fake_run)
+    environment = DockerEnvironment(
+        "example:latest", "sha256:" + "b" * 64, "linux/amd64",
+        "Python 3.8", "key", python_executable="/opt/miniconda3/envs/testbed/bin/python",
+        execution_path="/opt/miniconda3/envs/testbed/bin:/usr/bin",
+    )
+    with RuntimeVerificationSandbox(
+        git_repo.repo, base_commit=git_repo.base_sha, work_dir=tmp_path,
+        docker_environment=environment,
+    ) as sandbox:
+        (sandbox.work_root / "django").mkdir()
+        (sandbox.work_root / "django" / "__init__.py").write_text("")
+        for name in ("runtests.py", "test_sqlite.py"):
+            (sandbox.work_root / "tests" / name).write_text("")
+        result = sandbox.run(["python", "-m", "pytest", "tests/test_calc.py"])
+        assert result.classification is PytestExecutionClassification.PASSED
+        assert result.executed_command == (
+            "python tests/runtests.py --settings=roottrace_django_settings "
+            "--noinput --parallel=1 test_calc"
+        )
+        assert (sandbox._junit_path.parent / "roottrace_django_runner.py").is_file()
+    assert "PATH=/opt/miniconda3/envs/testbed/bin:/usr/bin" in seen[0]
 
 
 def test_unavailable_environment_does_not_run_tests(git_repo, tmp_path: Path) -> None:

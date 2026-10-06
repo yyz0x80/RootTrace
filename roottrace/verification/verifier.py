@@ -186,6 +186,8 @@ class RuntimeTestVerifier:
         output = "\n".join(
             part for part in (sandbox_result.stdout, sandbox_result.stderr) if part
         )
+        if sandbox_result.executed_command:
+            output = f"Executed: {sandbox_result.executed_command}\n{output}"
         item = EvidenceItem(
             id=f"ev-runtime_test-{len(self._seen_evidence_ids) + 1:03d}",
             agent=AgentRole.RUNTIME_TEST,
@@ -198,7 +200,7 @@ class RuntimeTestVerifier:
                     else "verification_sandbox"
                 ),
                 tool="runtime_test",
-                command=command,
+                command=sandbox_result.executed_command or command,
                 commit=self.sandbox.head_sha,
             ),
             excerpt=_cap(output),

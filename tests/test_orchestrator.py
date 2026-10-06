@@ -703,6 +703,33 @@ def test_verification_test_files_come_from_analyzed_commit(git_repo) -> None:
     assert "tests/test_later.py" not in paths
 
 
+def test_verification_candidates_exclude_test_support_modules(git_repo) -> None:
+    support = git_repo.repo / "tests" / "roots" / "target"
+    support.mkdir(parents=True)
+    (support / "conf.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (support / "typehints.py").write_text("VALUE = 2\n", encoding="utf-8")
+    real_test = git_repo.repo / "tests" / "test_extra.py"
+    real_test.write_text("def test_extra():\n    assert True\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "tests"], cwd=git_repo.repo,
+        check=True, capture_output=True, timeout=30,
+    )
+    subprocess.run(
+        ["git", "commit", "-qm", "add test support files"],
+        cwd=git_repo.repo, check=True, capture_output=True, timeout=30,
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=git_repo.repo,
+        check=True, capture_output=True, text=True, timeout=30,
+    ).stdout.strip()
+
+    paths = list_tracked_test_files(git_repo.repo, head)
+
+    assert "tests/test_extra.py" in paths
+    assert "tests/roots/target/conf.py" not in paths
+    assert "tests/roots/target/typehints.py" not in paths
+
+
 def test_invalid_hypothesis_references_are_explicit(git_repo, tmp_path: Path) -> None:
     bad_hypotheses = json.dumps(
         {

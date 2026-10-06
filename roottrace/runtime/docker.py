@@ -25,6 +25,17 @@ _PINNED_REQUIREMENT = re.compile(
 )
 _TESTBED_PYTHON = "/opt/miniconda3/envs/testbed/bin/python"
 _PYTEST_BOOTSTRAP_WHEELS = {
+    "pytest6": ("pytest", "6.2.5", "7310f8d27bc79ced999e760ca304d69f6ba6c6649c0b60fb0e04a4a77cacc134"),
+    "attrs36": ("attrs", "22.2.0", "29e95c7f6778868dbd49170f98f8818f78f3dc5e0e37c0b1f474e3561b240836"),
+    "iniconfig36": ("iniconfig", "1.1.1", "011e24c64b7f47f6ebd835bb12a743f2fbe9a26d4cecaa7f53bc4f35ee9da8b3"),
+    "importlib_metadata36": ("importlib-metadata", "4.8.3", "65a9576a5b2d58ca44d133c42a241905cc45e34d2c06fd5ba2bafa221e5d7b5e"),
+    "packaging36": ("packaging", "21.3", "ef103e05f519cdc783ae24ea4e2e0f508a9c99b2d4969652eed6a2e1ea5bd522"),
+    "pluggy36": ("pluggy", "1.0.0", "74134bbf457f031a36d68416e1509f34bd5ccc019f0bcc952c7b909d06b37bd3"),
+    "py36": ("py", "1.11.0", "607c53218732647dff4acdfcd50cb62615cedf612e72d1724fb1a0cc6405b378"),
+    "pyparsing36": ("pyparsing", "3.0.7", "a6c06a88f252e6c322f65faf8f418b16213b51bdfaece0524c1c1bc30c63c484"),
+    "toml36": ("toml", "0.10.2", "806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b"),
+    "typing_extensions36": ("typing-extensions", "4.1.1", "21c85e0fe4b9a155d0799430b0ad741cdce7e359660ccbd8b530613e8df88ce2"),
+    "zipp36": ("zipp", "3.6.0", "9fe5ea21568a0a70e50f273397638d39b03353731e6cbbb3fd8502a33fec40bc"),
     "pytest8": ("pytest", "8.3.5", "c69214aa47deac29fad6c2a4f590b9c4a9fdb16a403176fe154b79c0b4d4d820"),
     "pytest9": ("pytest", "9.0.3", "2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9"),
     "pluggy": ("pluggy", "1.5.0", "44e1ad92c8ca002de6377e165f3e0f1be63266ab4d554740532335b9d75ea669"),
@@ -41,13 +52,20 @@ def _pytest_bootstrap_requirements(python_version: str) -> bytes:
     if match is None:
         raise EnvironmentPreparationError("cannot select pytest wheels for unknown Python version")
     minor = int(match.group(2))
-    if not 8 <= minor <= 13:
-        raise EnvironmentPreparationError("automatic pytest setup supports Python 3.8 through 3.13")
-    names = ["pytest8" if minor < 10 else "pytest9", "pluggy", "iniconfig", "packaging"]
-    if minor < 11:
-        names.extend(["exceptiongroup", "tomli"])
-    if minor >= 10:
-        names.append("pygments")
+    if minor == 6:
+        names = [
+            "pytest6", "attrs36", "iniconfig36", "importlib_metadata36",
+            "packaging36", "pluggy36", "py36", "pyparsing36", "toml36",
+            "typing_extensions36", "zipp36",
+        ]
+    elif 8 <= minor <= 13:
+        names = ["pytest8" if minor < 10 else "pytest9", "pluggy", "iniconfig", "packaging"]
+        if minor < 11:
+            names.extend(["exceptiongroup", "tomli"])
+        if minor >= 10:
+            names.append("pygments")
+    else:
+        raise EnvironmentPreparationError("automatic pytest setup supports Python 3.6 and 3.8 through 3.13")
     lines = []
     for package in names:
         name, version, digest = _PYTEST_BOOTSTRAP_WHEELS[package]
@@ -72,6 +90,7 @@ class DockerEnvironment:
     pytest_bootstrapped: bool = False
     cache_hit: bool = False
     base_digest: str | None = None
+    execution_path: str | None = None
 
 
 def swebench_image_reference(instance_id: str) -> str:
@@ -116,6 +135,7 @@ class DockerEnvironmentPreparer:
         self.bootstrap_pytest = bootstrap_pytest
         self.prefer_testbed_python = prefer_testbed_python
         self.python_executable = "python"
+        self.execution_path: str | None = None
         self._deadline: float | None = None
 
     def _run(self, argv: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -185,7 +205,9 @@ class DockerEnvironmentPreparer:
                 "--cpus", "1", "--platform", self.platform_name,
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
                 "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
-                "--env", "PYTHONPATH=/roottrace-deps", "--entrypoint", self.python_executable,
+                "--env", "PYTHONPATH=/roottrace-deps",
+                *(["--env", f"PATH={self.execution_path}"] if self.execution_path else []),
+                "--entrypoint", self.python_executable,
                 image_id, "-m", "pytest", "--version",
             ], timeout=30)
         except EnvironmentPreparationError as exc:
@@ -194,6 +216,14 @@ class DockerEnvironmentPreparer:
                     "verification image lacks pytest in its selected Python"
                 ) from exc
             raise
+
+    @staticmethod
+    def _python_version(result: subprocess.CompletedProcess[str]) -> str:
+        """Accept legacy interpreters that print --version to stderr."""
+        match = re.search(r"Python (3\.\d+\.\d+)", result.stdout + "\n" + result.stderr)
+        if match is None:
+            raise EnvironmentPreparationError("image lacks a supported Python runtime")
+        return f"Python {match.group(1)}"
 
     def _check_swebench_commit(self, image_id: str, base_commit: str) -> None:
         """Prove the official image contains the target revision without edits."""
@@ -242,6 +272,11 @@ class DockerEnvironmentPreparer:
             if actual_platform != self.platform_name:
                 raise EnvironmentPreparationError("verification image platform mismatch")
             labels = metadata.get("Config", {}).get("Labels") or {}
+            image_env = metadata.get("Config", {}).get("Env") or []
+            image_path = next(
+                (entry[5:] for entry in image_env if entry.startswith("PATH=")),
+                "/usr/local/bin:/usr/bin:/bin",
+            )
             if self.image_map is not None and labels.get("roottrace.base_commit") != base_commit:
                 raise EnvironmentPreparationError("verification image commit label mismatch")
         except (IndexError, KeyError, TypeError, ValueError) as exc:
@@ -250,46 +285,69 @@ class DockerEnvironmentPreparer:
             self._check_swebench_commit(image_id, base_commit)
         if self.prefer_testbed_python:
             try:
-                testbed = self._run([
+                self._python_version(self._run([
                     "docker", "run", "--rm", "--pull", "never", "--network", "none",
                     "--read-only", "--cap-drop", "ALL", "--security-opt",
                     "no-new-privileges", "--pids-limit", "64", "--memory", "512m",
                     "--cpus", "1", "--platform", self.platform_name,
                     "--entrypoint", _TESTBED_PYTHON, image_id, "--version",
-                ], timeout=30).stdout.strip()
-            except EnvironmentPreparationError:
-                testbed = ""
-            if testbed.startswith("Python 3."):
+                ], timeout=30))
+            except EnvironmentPreparationError as exc:
+                if self.swebench_image:
+                    raise EnvironmentPreparationError(
+                        "SWE-bench image lacks a usable testbed Python"
+                    ) from exc
+            else:
                 self.python_executable = _TESTBED_PYTHON
-        python = self._run([
+        self.execution_path = (
+            f"{Path(self.python_executable).parent}:{image_path}"
+            if self.python_executable.startswith("/") else image_path
+        )
+        python = self._python_version(self._run([
             "docker", "run", "--rm", "--network", "none", "--read-only",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--pids-limit", "64", "--memory", "512m", "--cpus", "1",
             "--platform", self.platform_name, "--entrypoint", self.python_executable,
             image_id, "--version",
-        ], timeout=30).stdout.strip()
-        if not python.startswith("Python 3."):
-            raise EnvironmentPreparationError("image lacks a supported Python runtime")
+        ], timeout=30))
         bootstrapped = False
-        if self.requirements is None:
+        bootstrap_bytes = b""
+        project_bytes = b""
+        if self.requirements is not None:
             try:
-                self._check_pytest(image_id)
-            except EnvironmentPreparationError as exc:
-                if not self.bootstrap_pytest or "lacks pytest" not in str(exc):
-                    raise
-                dependency_bytes = _pytest_bootstrap_requirements(python)
-                bootstrapped = True
-            else:
-                dependency_bytes = b""
-        else:
-            try:
-                dependency_bytes = self.requirements.read_bytes()
+                project_bytes = self.requirements.read_bytes()
             except OSError as exc:
                 raise EnvironmentPreparationError("requirements file is unavailable") from exc
+        project_has_pytest = any(
+            line.lower().startswith(b"pytest==")
+            for line in project_bytes.splitlines()
+        )
+        try:
+            self._check_pytest(image_id)
+        except EnvironmentPreparationError as exc:
+            if "lacks pytest" not in str(exc):
+                raise
+            if self.bootstrap_pytest and not project_has_pytest:
+                bootstrap_bytes = _pytest_bootstrap_requirements(python)
+                bootstrapped = True
+            elif not project_bytes:
+                raise
+        dependency_bytes = b"\n".join(
+            part.rstrip(b"\n") for part in (bootstrap_bytes, project_bytes) if part
+        )
         if dependency_bytes:
             lines = dependency_bytes.decode("utf-8").splitlines()
             if not lines or any(not _PINNED_REQUIREMENT.fullmatch(line) for line in lines):
                 raise EnvironmentPreparationError("requirements must contain only hash-pinned package versions")
+            unique: dict[str, str] = {}
+            for line in lines:
+                name = line.split("==", 1)[0].lower().replace("_", "-")
+                if name in unique and unique[name] != line:
+                    raise EnvironmentPreparationError("dependency locks contain conflicting packages")
+                unique[name] = line
+            dependency_bytes = ("\n".join(unique.values()) + "\n").encode()
+            if len(unique) > 100 or len(dependency_bytes) > 20_000:
+                raise EnvironmentPreparationError("dependency lock exceeds the allowed size")
         key = hashlib.sha256(b"\0".join([
             digest.encode(), self.platform_name.encode(), python.encode(),
             self.python_executable.encode(),
@@ -298,9 +356,11 @@ class DockerEnvironmentPreparer:
         if not dependency_bytes:
             return DockerEnvironment(
                 image_id, digest, actual_platform, python, key, image, pulled,
-                self.python_executable, False, False, digest,
+                self.python_executable, False, False, digest, self.execution_path,
             )
-        index_url = self.index_url or ("https://pypi.org/simple" if bootstrapped else None)
+        index_url = self.index_url or (
+            "https://pypi.org/simple" if bootstrapped and not project_bytes else None
+        )
         if index_url is None or not index_url.startswith("https://"):
             raise EnvironmentPreparationError("hash-pinned dependency download requires an HTTPS index")
         cached = f"roottrace-env:{key}"
@@ -322,7 +382,7 @@ class DockerEnvironmentPreparer:
                 raise EnvironmentPreparationError("invalid cached Docker image") from exc
             self._check_pytest(cached_id)
             return DockerEnvironment(cached_id, cached_id, actual_platform, python, key, image, pulled,
-                                     self.python_executable, bootstrapped, True, digest)
+                                     self.python_executable, bootstrapped, True, digest, self.execution_path)
         with tempfile.TemporaryDirectory(
             prefix="roottrace-wheels-", dir=self.wheels_parent,
         ) as directory:
@@ -333,11 +393,10 @@ class DockerEnvironmentPreparer:
                 "python", "-m", "pip", "download", "--isolated", "--require-hashes",
                 "--only-binary", ":all:", "--no-deps",
             ]
-            if bootstrapped:
-                download_argv.extend([
-                    "--platform", "any", "--implementation", "py", "--abi", "none",
-                    "--python-version", python.split()[1].rsplit(".", 1)[0],
-                ])
+            download_argv.extend([
+                "--platform", "any", "--implementation", "py", "--abi", "none",
+                "--python-version", python.split()[1].rsplit(".", 1)[0],
+            ])
             download_argv.extend([
                 "--index-url", index_url, "-r", str(staged_requirements),
                 "-d", str(wheels),
@@ -367,7 +426,7 @@ class DockerEnvironmentPreparer:
             raise EnvironmentPreparationError("Docker commit returned no content ID")
         self._check_pytest(committed)
         return DockerEnvironment(committed, committed, actual_platform, python, key, image, pulled,
-                                 self.python_executable, bootstrapped, False, digest)
+                                 self.python_executable, bootstrapped, False, digest, self.execution_path)
 
     def remove_cached_environment(self, cache_key: str) -> bool:
         """Remove only a RootTrace-labeled cache tag; never remove base images."""

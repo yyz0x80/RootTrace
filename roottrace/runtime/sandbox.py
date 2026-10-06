@@ -46,7 +46,8 @@ MAX_JUNIT_XML_BYTES = 1_000_000
 MAX_COMMAND_TOKENS = 100
 MAX_COMMAND_CHARS = 10_000
 
-_JUNIT_XML_PATH = PurePosixPath(".roottrace") / "pytest-results.xml"
+_JUNIT_XML_NAME = "pytest-results.xml"
+_CONTAINER_RESULT_DIR = "/roottrace-results"
 
 _VALID_REVISION = re.compile(r"^(?:[0-9a-fA-F]{4,64}|HEAD)$")
 _SAFE_TARGET_CHARS = re.compile(r"^[A-Za-z0-9._/:+-]+$")
@@ -329,6 +330,7 @@ class SandboxCommandResult:
     truncated: bool
     classification: PytestExecutionClassification | None = None
     classification_reason: str | None = None
+    executed_command: str | None = None
 
 
 class RuntimeVerificationSandbox:
@@ -357,7 +359,7 @@ class RuntimeVerificationSandbox:
         )
         self._root = Path(tempfile.mkdtemp(prefix="roottrace-sandbox-", dir=parent))
         self.work_root = (self._root / "work").resolve()
-        self._junit_path = self.work_root.joinpath(*_JUNIT_XML_PATH.parts)
+        self._junit_path = self._root / "results" / _JUNIT_XML_NAME
         self.head_sha = ""
         self.closed = False
         try:
@@ -425,15 +427,31 @@ class RuntimeVerificationSandbox:
         if self.unavailable_reason is not None:
             raise RuntimeError(self.unavailable_reason)
         self._prepare_junit_path()
+        django_labels = self._django_test_labels(validated)
+        if django_labels and self.docker_environment is not None:
+            self._stage_django_adapter()
+        junit_argument = (
+            f"{_CONTAINER_RESULT_DIR}/{_JUNIT_XML_NAME}"
+            if self.docker_environment is not None else str(self._junit_path)
+        )
         execution_argv = [
             *validated,
             "--junitxml",
-            _JUNIT_XML_PATH.as_posix(),
+            junit_argument,
         ]
         executable = [sys.executable, *execution_argv[1:]]
         container_name = None
         if self.docker_environment is not None:
             container_name = f"roottrace-test-{uuid.uuid4().hex}"
+            container_args = (
+                ["tests/runtests.py", "--settings=roottrace_django_settings",
+                 "--noinput", "--parallel=1", *django_labels]
+                if django_labels else execution_argv[1:]
+            )
+            python_path = (
+                "/roottrace-results:/roottrace-deps:/work/tests:/work"
+                if django_labels else "/roottrace-deps"
+            )
             executable = [
                 "docker", "run", "--rm", "--name", container_name,
                 "--pull", "never", "--network", "none", "--read-only",
@@ -444,10 +462,22 @@ class RuntimeVerificationSandbox:
                 "--entrypoint", self.docker_environment.python_executable,
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
                 "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
-                "--env", "PYTHONPATH=/roottrace-deps",
+                "--env", f"PYTHONPATH={python_path}",
+                *(
+                    ["--env", f"ROOTTRACE_JUNIT_PATH={junit_argument}"]
+                    if django_labels else []
+                ),
+                *(
+                    ["--env", f"PATH={self.docker_environment.execution_path}"]
+                    if self.docker_environment.execution_path else []
+                ),
                 "--mount", f"type=bind,src={self.work_root},dst=/work",
+                "--mount", (
+                    f"type=bind,src={self._junit_path.parent},"
+                    f"dst={_CONTAINER_RESULT_DIR}"
+                ),
                 "--workdir", "/work", self.docker_environment.image,
-                *execution_argv[1:],
+                *container_args,
             ]
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -489,6 +519,9 @@ class RuntimeVerificationSandbox:
                 truncated=stdout_truncated or stderr_truncated,
                 classification=PytestExecutionClassification.TIMEOUT,
                 classification_reason="pytest execution timed out",
+                executed_command=(
+                    "python " + " ".join(container_args) if django_labels else None
+                ),
             )
         duration = time.monotonic() - started
         stdout = self._sanitize_output(_text_output(result.stdout))
@@ -514,13 +547,43 @@ class RuntimeVerificationSandbox:
             truncated=stdout_truncated or stderr_truncated,
             classification=classification,
             classification_reason=reason,
+            executed_command=(
+                "python " + " ".join(container_args) if django_labels else None
+            ),
         )
 
+    def _django_test_labels(self, tokens: list[str]) -> list[str]:
+        """Map validated pytest files to Django's native runner when present."""
+        if not (
+            (self.work_root / "django" / "__init__.py").is_file()
+            and (self.work_root / "tests" / "runtests.py").is_file()
+            and (self.work_root / "tests" / "test_sqlite.py").is_file()
+        ):
+            return []
+        targets = [
+            token for token in tokens[3:]
+            if token.endswith(".py") or ".py::" in token
+        ]
+        if not targets or any(not target.startswith("tests/") for target in targets):
+            return []
+        labels = []
+        for target in targets:
+            path, *selectors = target.split("::")
+            label = path.removeprefix("tests/").removesuffix(".py").replace("/", ".")
+            labels.append(".".join([label, *selectors]))
+        return labels
+
+    def _stage_django_adapter(self) -> None:
+        """Copy trusted adapter modules outside the disposable repository."""
+        source = Path(__file__).resolve().parent.parent / "verification"
+        for name in ("roottrace_django_settings.py", "roottrace_django_runner.py"):
+            (self._junit_path.parent / name).write_bytes((source / name).read_bytes())
+
     def _prepare_junit_path(self) -> None:
-        """Create the private, sandbox-relative directory for JUnit output."""
+        """Create a private result directory outside the repository copy."""
         result_dir = self._junit_path.parent
         try:
-            result_dir.resolve().relative_to(self.work_root)
+            result_dir.resolve().relative_to(self._root)
             if result_dir.exists() and result_dir.is_symlink():
                 raise RuntimeError("pytest result directory must not be a symlink")
             result_dir.mkdir(mode=0o700, exist_ok=True)
