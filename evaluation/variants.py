@@ -112,6 +112,11 @@ class AblationConfig(BaseModel):
     history_index: str | None = Field(default=None, max_length=500)
     history_excluded_ids: list[str] = Field(default_factory=list, max_length=1_000)
     max_cases: int | None = Field(default=None, ge=1)
+    verification_image_mode: Literal["auto", "map"] = "auto"
+    verification_image_map_sha256: str | None = None
+    verification_pull_missing: bool = True
+    verification_preparation_timeout_seconds: int = Field(default=900, ge=1)
+    verification_wait_seconds: int = Field(default=120, ge=1)
 
     @field_validator("variant")
     @classmethod

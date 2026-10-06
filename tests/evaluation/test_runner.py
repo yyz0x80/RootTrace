@@ -16,17 +16,79 @@ from fixtures import (
     write_json,
 )
 
+from evaluation.manifest import load_manifest
 from evaluation.metrics import CaseResult
 from evaluation.runner import (
     RootTraceOutcome,
+    _build_ablation_config,
+    _make_run_client,
     extract_predicted_files,
     load_public_cases,
     run_from_args,
 )
+from evaluation.variants import AblationConfig, AblationVariant, variant_settings
 from roottrace.diagnostics import DiagnosticSeverity
 from roottrace.incident.schema import IncidentInput
+from roottrace.runtime.docker import DockerEnvironment, EnvironmentPreparationError
 
 _REPO = "acme/demo"
+
+
+def test_real_runner_uses_official_images_unless_map_overrides(tmp_path: Path) -> None:
+    variant = AblationVariant.THREE_SPECIALISTS_RETRIEVAL_OFF
+    config = AblationConfig(variant=variant, verification_pull_missing=False)
+    settings = variant_settings(variant)
+    automatic = _make_run_client(settings, config)
+    assert automatic._verification_swebench_auto is True
+    assert automatic._verification_pull_missing is False
+    image_map = tmp_path / "images.json"
+    image_map.write_text("{}", encoding="utf-8")
+    mapped = _make_run_client(settings, config, image_map)
+    assert mapped._verification_swebench_auto is False
+    assert mapped._verification_image_map == image_map
+
+
+def test_verification_preflight_reports_missing_dependency_without_running_rca(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    output = tmp_path / "preflight-out"
+    calls: list[str] = []
+
+    def fake_prepare(self, base_commit):
+        calls.append(self.instance_id)
+        if len(calls) == 1:
+            return DockerEnvironment("sha256:" + "a" * 64, "sha256:" + "b" * 64,
+                                     "linux/amd64", "Python 3.8", "key",
+                                     "swebench/example:latest", False)
+        raise EnvironmentPreparationError("verification image lacks pytest")
+
+    monkeypatch.setattr("roottrace.runtime.docker.DockerEnvironmentPreparer.prepare", fake_prepare)
+    client = FakeRootTraceClient()
+    result = run_from_args(_args(
+        data_root, output, max_cases=2, verification_preflight=True,
+        no_verification_image_pull=True,
+    ), client=client)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert result == 1
+    assert [record["status"] for record in records] == ["ready", "unverified"]
+    assert "lacks pytest" in records[1]["reason"]
+    assert len(calls) == 2
+    assert client.received == []
+    assert not output.exists()
+
+
+def test_image_map_contents_are_part_of_resume_config(tmp_path: Path) -> None:
+    data_root, _ = _setup_data(tmp_path)
+    manifest_path = data_root / "manifests" / "smoke3.json"
+    manifest = load_manifest(manifest_path)
+    image_map = tmp_path / "images.json"
+    args = _args(data_root, tmp_path / "out", verification_image_map=image_map)
+    image_map.write_text('{"case":"first"}', encoding="utf-8")
+    first = _build_ablation_config(args, manifest, manifest_path, list(manifest.instances))
+    image_map.write_text('{"case":"second"}', encoding="utf-8")
+    second = _build_ablation_config(args, manifest, manifest_path, list(manifest.instances))
+    assert first.config_hash() != second.config_hash()
 
 
 class FakeRootTraceClient:

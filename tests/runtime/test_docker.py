@@ -12,6 +12,7 @@ from roottrace.runtime.docker import (
     DockerEnvironment,
     DockerEnvironmentPreparer,
     EnvironmentPreparationError,
+    swebench_image_reference,
 )
 from roottrace.runtime.sandbox import (
     PytestExecutionClassification,
@@ -27,6 +28,120 @@ def _image_metadata() -> str:
         "Os": "linux", "Architecture": "amd64",
         "Config": {"Labels": {"roottrace.base_commit": "c" * 40}},
     }])
+
+
+def test_official_swebench_image_name_is_bounded() -> None:
+    assert swebench_image_reference("django__django-14672") == (
+        "swebench/sweb.eval.x86_64.django_1776_django-14672:latest"
+    )
+    for case_id in ("../bad", "x__y-1;echo", "x__y-latest", "x__y-1:other"):
+        with pytest.raises(EnvironmentPreparationError, match="instance ID"):
+            swebench_image_reference(case_id)
+
+
+@pytest.mark.parametrize(("local", "pull", "expected_pulls"), [
+    (True, True, 0),
+    (False, True, 1),
+])
+def test_swebench_auto_resolves_and_preflights_image(
+    monkeypatch, local: bool, pull: bool, expected_pulls: int,
+) -> None:
+    calls: list[list[str]] = []
+    image = swebench_image_reference("django__django-14672")
+    inspections = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal inspections
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            inspections += 1
+            if not local and inspections == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "No such image")
+            return subprocess.CompletedProcess(argv, 0, _image_metadata(), "")
+        if argv[:2] == ["docker", "pull"]:
+            assert argv[-1] == image
+            assert argv[argv.index("--platform") + 1] == "linux/amd64"
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "--entrypoint" in argv and argv[argv.index("--entrypoint") + 1] == "git":
+            assert "--is-ancestor" in argv
+            assert argv[-2] == "c" * 40
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[-1] == "--version" and "pytest" not in argv:
+            return subprocess.CompletedProcess(argv, 0, "Python 3.8.20\n", "")
+        if argv[-3:] == ["-m", "pytest", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, "pytest 8.3.5\n", "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("roottrace.runtime.docker.subprocess.run", fake_run)
+    preparer = DockerEnvironmentPreparer(
+        instance_id="django__django-14672", swebench_image=True,
+        pull_missing=pull,
+    )
+    environment = preparer.prepare("c" * 40)
+    assert environment.reference == image
+    assert environment.platform == "linux/amd64"
+    assert environment.pulled is (expected_pulls == 1)
+    assert sum(argv[:2] == ["docker", "pull"] for argv in calls) == expected_pulls
+
+
+def test_missing_swebench_image_without_pull_is_explicit(monkeypatch) -> None:
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "No such image")
+
+    monkeypatch.setattr("roottrace.runtime.docker.subprocess.run", fake_run)
+    preparer = DockerEnvironmentPreparer(
+        instance_id="django__django-14672", swebench_image=True,
+        pull_missing=False,
+    )
+    with pytest.raises(EnvironmentPreparationError, match="No such image"):
+        preparer.prepare("c" * 40)
+
+
+def test_official_image_pull_failure_is_bounded_and_never_runs_image(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 1, "", "No such image")
+        assert argv[:2] == ["docker", "pull"]
+        return subprocess.CompletedProcess(argv, 1, "", "pull access denied")
+
+    monkeypatch.setattr("roottrace.runtime.docker.subprocess.run", fake_run)
+    preparer = DockerEnvironmentPreparer(
+        instance_id="django__django-14672", swebench_image=True,
+        pull_missing=True,
+    )
+    with pytest.raises(EnvironmentPreparationError, match="pull access denied"):
+        preparer.prepare("c" * 40)
+    assert len(calls) == 2
+    assert calls[-1][-1] == swebench_image_reference("django__django-14672")
+
+
+@pytest.mark.parametrize(("git_ok", "pytest_ok", "reason"), [
+    (False, True, "target base commit"),
+    (True, False, "lacks pytest"),
+])
+def test_swebench_preflight_failure_is_specific(
+    monkeypatch, git_ok: bool, pytest_ok: bool, reason: str,
+) -> None:
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, _image_metadata(), "")
+        if argv[argv.index("--entrypoint") + 1] == "git":
+            return subprocess.CompletedProcess(argv, 0 if git_ok else 1, "", "bad commit")
+        if argv[-3:] == ["-m", "pytest", "--version"]:
+            return subprocess.CompletedProcess(
+                argv, 0 if pytest_ok else 1, "", "No module named pytest",
+            )
+        return subprocess.CompletedProcess(argv, 0, "Python 3.8.20\n", "")
+
+    monkeypatch.setattr("roottrace.runtime.docker.subprocess.run", fake_run)
+    preparer = DockerEnvironmentPreparer(
+        instance_id="django__django-14672", swebench_image=True,
+    )
+    with pytest.raises(EnvironmentPreparationError, match=reason):
+        preparer.prepare("c" * 40)
 
 
 def test_instance_image_is_checked_and_cached(monkeypatch, tmp_path: Path) -> None:

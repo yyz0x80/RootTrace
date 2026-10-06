@@ -14,6 +14,7 @@ benchmark; ``--resume`` skips already-completed cases.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -137,6 +138,10 @@ class InProcessRootTraceClient:
         history_excluded_ids: frozenset[str] = frozenset(),
         worker_concurrency: int = 3,
         verification_image_map: Path | None = None,
+        verification_swebench_auto: bool = False,
+        verification_pull_missing: bool = False,
+        verification_preparation_timeout_seconds: int = 900,
+        verification_wait_seconds: int = 120,
     ) -> None:
         self._enabled_roles = enabled_roles
         self._retrieval_mode = retrieval_mode
@@ -144,6 +149,10 @@ class InProcessRootTraceClient:
         self._history_excluded_ids = history_excluded_ids
         self._worker_concurrency = worker_concurrency
         self._verification_image_map = verification_image_map
+        self._verification_swebench_auto = verification_swebench_auto
+        self._verification_pull_missing = verification_pull_missing
+        self._verification_preparation_timeout_seconds = verification_preparation_timeout_seconds
+        self._verification_wait_seconds = verification_wait_seconds
 
     def run(
         self,
@@ -179,6 +188,10 @@ class InProcessRootTraceClient:
                 history_excluded_ids=self._history_excluded_ids,
                 verification_backend="docker",
                 verification_image_map=self._verification_image_map,
+                verification_swebench_auto=self._verification_swebench_auto,
+                verification_pull_missing=self._verification_pull_missing,
+                preparation_timeout_seconds=self._verification_preparation_timeout_seconds,
+                verification_wait_seconds=self._verification_wait_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - isolate per-case RootTrace failures
             elapsed = time.monotonic() - started
@@ -486,6 +499,47 @@ def _dry_run(
     return 0
 
 
+def _verification_preflight(
+    selected: list[ManifestCase],
+    image_map: Path | None,
+    config: AblationConfig,
+) -> int:
+    """Resolve and inspect verification images without LLM calls or gold data."""
+    from roottrace.runtime.docker import (
+        DockerEnvironmentPreparer,
+        EnvironmentPreparationError,
+    )
+
+    unavailable = 0
+    for case in selected:
+        preparer = DockerEnvironmentPreparer(
+            instance_id=case.instance_id,
+            image_map=image_map,
+            swebench_image=image_map is None,
+            pull_missing=config.verification_pull_missing and image_map is None,
+            timeout_seconds=config.verification_preparation_timeout_seconds,
+        )
+        try:
+            environment = preparer.prepare(case.base_commit)
+            record = {
+                "instance_id": case.instance_id,
+                "status": "ready",
+                "image_reference": environment.reference,
+                "image_digest": environment.digest,
+                "image_platform": environment.platform,
+                "image_pulled": environment.pulled,
+            }
+        except EnvironmentPreparationError as exc:
+            unavailable += 1
+            record = {
+                "instance_id": case.instance_id,
+                "status": "unverified",
+                "reason": str(exc),
+            }
+        print(json.dumps(record, sort_keys=True))
+    return 1 if unavailable else 0
+
+
 def _build_ablation_config(
     args: argparse.Namespace,
     manifest: RcaManifest,
@@ -510,6 +564,16 @@ def _build_ablation_config(
     base["history_excluded_ids"] = sorted(
         {case.instance_id for case in selected}
     )
+    image_map = getattr(args, "verification_image_map", None)
+    base["verification_image_mode"] = "map" if image_map else "auto"
+    base["verification_image_map_sha256"] = (
+        hashlib.sha256(Path(image_map).read_bytes()).hexdigest() if image_map else None
+    )
+    base["verification_pull_missing"] = not getattr(args, "no_verification_image_pull", False)
+    base["verification_preparation_timeout_seconds"] = getattr(
+        args, "verification_preparation_timeout", 900,
+    )
+    base["verification_wait_seconds"] = getattr(args, "verification_wait_seconds", 120)
     return AblationConfig(**base)
 
 
@@ -577,6 +641,10 @@ def _make_run_client(
         history_excluded_ids=frozenset(config.history_excluded_ids),
         worker_concurrency=config.worker_concurrency,
         verification_image_map=verification_image_map,
+        verification_swebench_auto=verification_image_map is None,
+        verification_pull_missing=config.verification_pull_missing,
+        verification_preparation_timeout_seconds=config.verification_preparation_timeout_seconds,
+        verification_wait_seconds=config.verification_wait_seconds,
     )
 
 
@@ -672,6 +740,11 @@ def run_from_args(
 
     if args.dry_run:
         return _dry_run(selected, repo_cache)
+    if getattr(args, "verification_preflight", False):
+        image_map = getattr(args, "verification_image_map", None)
+        return _verification_preflight(
+            selected, Path(image_map) if image_map else None, ablation,
+        )
 
     output_dir = (
         OUTPUT_ROOT / f"rca-eval-{variant.value}"
@@ -777,6 +850,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON map from instance_id to image, base_commit, and platform",
     )
     parser.add_argument(
+        "--no-verification-image-pull", action="store_true",
+        help="resolve official SWE-bench image names but use only local images",
+    )
+    parser.add_argument(
+        "--verification-preparation-timeout", type=_positive_int, default=900,
+        help="total seconds allowed for image pull and environment preflight",
+    )
+    parser.add_argument(
+        "--verification-wait-seconds", type=_positive_int, default=120,
+        help="seconds to wait for preparation after RCA investigation",
+    )
+    parser.add_argument(
         "--gold-path",
         type=Path,
         default=None,
@@ -806,6 +891,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="validate manifest/public metadata/repo mirrors without running",
+    )
+    parser.add_argument(
+        "--verification-preflight", action="store_true",
+        help="resolve/pull images and check commit, Python, and pytest without LLM calls",
     )
     parser.add_argument(
         "--resume",

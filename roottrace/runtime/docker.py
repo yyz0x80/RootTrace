@@ -20,6 +20,7 @@ from pathlib import Path
 
 _IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SWE_INSTANCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9_.-]+-[0-9]+$")
 _PINNED_REQUIREMENT = re.compile(
     r"^[A-Za-z0-9_.-]+==[A-Za-z0-9_.!+-]+ --hash=sha256:[0-9a-f]{64}$"
 )
@@ -36,6 +37,16 @@ class DockerEnvironment:
     platform: str
     python_version: str
     cache_key: str
+    reference: str | None = None
+    pulled: bool = False
+
+
+def swebench_image_reference(instance_id: str) -> str:
+    """Derive only the official Docker Hub instance reference."""
+    if not _SWE_INSTANCE.fullmatch(instance_id) or len(instance_id) > 200:
+        raise EnvironmentPreparationError("invalid SWE-bench instance ID")
+    key = instance_id.lower().replace("__", "_1776_")
+    return f"swebench/sweb.eval.x86_64.{key}:latest"
 
 
 class DockerEnvironmentPreparer:
@@ -52,6 +63,8 @@ class DockerEnvironmentPreparer:
         index_url: str | None = None,
         timeout_seconds: int = 180,
         wheels_parent: Path | None = None,
+        swebench_image: bool = False,
+        pull_missing: bool = False,
     ) -> None:
         self.image = image
         self.instance_id = instance_id
@@ -63,6 +76,8 @@ class DockerEnvironmentPreparer:
         self.index_url = index_url
         self.timeout_seconds = timeout_seconds
         self.wheels_parent = wheels_parent
+        self.swebench_image = swebench_image
+        self.pull_missing = pull_missing
         self._deadline: float | None = None
 
     def _run(self, argv: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -101,6 +116,13 @@ class DockerEnvironmentPreparer:
                 self.platform_name = entry["platform"]
             except (OSError, KeyError, TypeError, ValueError) as exc:
                 raise EnvironmentPreparationError("instance image mapping is missing or invalid") from exc
+        elif self.swebench_image:
+            if self.image is not None or self.instance_id is None:
+                raise EnvironmentPreparationError("automatic SWE-bench image selection is invalid")
+            image = swebench_image_reference(self.instance_id)
+            if self.platform_name is not None and self.platform_name != "linux/amd64":
+                raise EnvironmentPreparationError("SWE-bench image requires linux/amd64")
+            self.platform_name = "linux/amd64"
         else:
             image = self.image
         if not isinstance(image, str) or not _IMAGE.fullmatch(image):
@@ -113,19 +135,53 @@ class DockerEnvironmentPreparer:
 
     def _check_pytest(self, image_id: str) -> None:
         """Fail preparation when the selected environment cannot start pytest."""
-        self._run([
-            "docker", "run", "--rm", "--pull", "never", "--network", "none",
-            "--read-only", "--cap-drop", "ALL", "--security-opt",
-            "no-new-privileges", "--pids-limit", "64", "--memory", "512m",
-            "--cpus", "1", "--platform", self.platform_name,
-            "--env", "PYTHONPATH=/roottrace-deps", "--entrypoint", "python",
-            image_id, "-m", "pytest", "--version",
-        ], timeout=30)
+        try:
+            self._run([
+                "docker", "run", "--rm", "--pull", "never", "--network", "none",
+                "--read-only", "--cap-drop", "ALL", "--security-opt",
+                "no-new-privileges", "--pids-limit", "64", "--memory", "512m",
+                "--cpus", "1", "--platform", self.platform_name,
+                "--env", "PYTHONPATH=/roottrace-deps", "--entrypoint", "python",
+                image_id, "-m", "pytest", "--version",
+            ], timeout=30)
+        except EnvironmentPreparationError as exc:
+            if "No module named pytest" in str(exc):
+                raise EnvironmentPreparationError(
+                    "verification image lacks pytest in its default Python"
+                ) from exc
+            raise
+
+    def _check_swebench_commit(self, image_id: str, base_commit: str) -> None:
+        """Prove the official image contains the target revision without edits."""
+        try:
+            self._run([
+                "docker", "run", "--rm", "--pull", "never", "--network", "none",
+                "--read-only", "--cap-drop", "ALL", "--security-opt",
+                "no-new-privileges", "--pids-limit", "64", "--memory", "512m",
+                "--cpus", "1", "--platform", self.platform_name,
+                "--entrypoint", "git", image_id, "-C", "/testbed",
+                "merge-base", "--is-ancestor", base_commit, "HEAD",
+            ], timeout=30)
+        except EnvironmentPreparationError as exc:
+            raise EnvironmentPreparationError(
+                "SWE-bench image cannot verify the target base commit"
+            ) from exc
 
     def prepare(self, base_commit: str) -> DockerEnvironment:
         self._deadline = time.monotonic() + self.timeout_seconds
         image = self._select(base_commit)
-        inspected = self._run(["docker", "image", "inspect", image])
+        pulled = False
+        try:
+            inspected = self._run(["docker", "image", "inspect", image])
+        except EnvironmentPreparationError as exc:
+            missing = "No such image" in str(exc) or "No such object" in str(exc)
+            if not (self.swebench_image and self.pull_missing and missing):
+                raise
+            self._run([
+                "docker", "pull", "--quiet", "--platform", self.platform_name, image,
+            ])
+            pulled = True
+            inspected = self._run(["docker", "image", "inspect", image])
         try:
             metadata = json.loads(inspected.stdout)[0]
             repo_digests = metadata.get("RepoDigests") or []
@@ -146,6 +202,8 @@ class DockerEnvironmentPreparer:
                 raise EnvironmentPreparationError("verification image commit label mismatch")
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise EnvironmentPreparationError("invalid Docker image inspection result") from exc
+        if self.swebench_image:
+            self._check_swebench_commit(image_id, base_commit)
         python = self._run([
             "docker", "run", "--rm", "--network", "none", "--read-only",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
@@ -169,7 +227,7 @@ class DockerEnvironmentPreparer:
         ])).hexdigest()
         if self.requirements is None:
             self._check_pytest(image_id)
-            return DockerEnvironment(image_id, digest, actual_platform, python, key)
+            return DockerEnvironment(image_id, digest, actual_platform, python, key, image, pulled)
         if self.index_url is None or not self.index_url.startswith("https://"):
             raise EnvironmentPreparationError("hash-pinned dependency download requires an HTTPS index")
         cached = f"roottrace-env:{key}"
@@ -190,7 +248,7 @@ class DockerEnvironmentPreparer:
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise EnvironmentPreparationError("invalid cached Docker image") from exc
             self._check_pytest(cached_id)
-            return DockerEnvironment(cached_id, digest, actual_platform, python, key)
+            return DockerEnvironment(cached_id, digest, actual_platform, python, key, image, pulled)
         with tempfile.TemporaryDirectory(
             prefix="roottrace-wheels-", dir=self.wheels_parent,
         ) as directory:
@@ -226,7 +284,7 @@ class DockerEnvironmentPreparer:
         if not _DIGEST.fullmatch(committed):
             raise EnvironmentPreparationError("Docker commit returned no content ID")
         self._check_pytest(committed)
-        return DockerEnvironment(committed, digest, actual_platform, python, key)
+        return DockerEnvironment(committed, digest, actual_platform, python, key, image, pulled)
 
     def remove_cached_environment(self, cache_key: str) -> bool:
         """Remove only a RootTrace-labeled cache tag; never remove base images."""

@@ -291,6 +291,8 @@ def run_rca_pipeline(
     verification_backend: str = "docker",
     verification_image: str | None = None,
     verification_image_map: Path | None = None,
+    verification_swebench_auto: bool = False,
+    verification_pull_missing: bool = False,
     verification_requirements: Path | None = None,
     verification_index_url: str | None = None,
     preparation_timeout_seconds: int = 180,
@@ -332,7 +334,9 @@ def run_rca_pipeline(
     if preparation_pool is not None:
         preparer = DockerEnvironmentPreparer(
             verification_image,
-            instance_id=incident.id if verification_image_map else None,
+            instance_id=incident.id if verification_image_map or verification_swebench_auto else None,
+            swebench_image=verification_swebench_auto,
+            pull_missing=verification_pull_missing,
             image_map=verification_image_map,
             requirements=verification_requirements,
             index_url=verification_index_url,
@@ -399,10 +403,12 @@ def run_rca_pipeline(
         "verification_environment.json",
         {
             "backend": verification_backend,
+            "image_reference": environment.reference if environment else None,
             "image_digest": environment.digest if environment else None,
             "image_platform": environment.platform if environment else None,
             "python_version": environment.python_version if environment else None,
             "cache_key": environment.cache_key if environment else None,
+            "image_pulled": environment.pulled if environment else None,
             "preparation_error": environment_error,
         },
     )

@@ -45,6 +45,22 @@ The existing smoke3 run is:
 python -m evaluation.runner
 ```
 
+For model-free Docker environment preflight, run:
+
+```bash
+python -m evaluation.runner --verification-preflight --max-cases 1
+```
+
+The real runner automatically resolves each official SWE-bench instance image,
+reuses a local copy or pulls the missing `linux/amd64` image from the
+`swebench` Docker Hub namespace, and checks the target commit, Python and
+pytest. `--no-verification-image-pull` disables downloads. An unavailable
+image or missing pytest yields an explicit `unverified` verification result;
+the RCA report still completes. Preflight exits 1 when any selected image is
+not ready. A local, prepared image map can override automatic resolution with
+`--verification-image-map PATH`; mapped images need matching base-commit labels.
+See [Docker verification](../docs/docker-verification.md).
+
 The runner defaults to the smoke3 manifest, the data-root above, and the
 `three_specialists_retrieval_off` variant. A configured model can be supplied
 for a real run:
@@ -66,6 +82,9 @@ Useful controls include:
 --output-dir PATH     output directory (default: output/rca-eval-<variant>)
 --history-corpus PATH optional historical RCA JSONL for retrieval variants
 --history-index PATH  optional persisted historical index
+--verification-preflight        check images without model calls
+--no-verification-image-pull    use local images only
+--verification-image-map PATH   override automatic official image selection
 ```
 
 Before a development-subset run, validate its inputs without model calls:
